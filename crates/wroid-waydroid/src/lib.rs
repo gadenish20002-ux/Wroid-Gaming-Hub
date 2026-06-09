@@ -2,6 +2,10 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
+const WAYDROID_SHELL_ROOT_ERROR: &str = "Action \"shell\" needs root access";
+const WAYDROID_SHELL_ROOT_MESSAGE: &str =
+    "Waydroid shell backend requires root privileges on this system. Try: sudo target/debug/wroid ...";
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Waydroid;
 
@@ -99,6 +103,71 @@ fn ensure_success(command: &str, output: &std::process::Output) -> Result<()> {
         return Ok(());
     }
 
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    if let Some(message) = map_waydroid_shell_error(command, &stdout, &stderr) {
+        bail!("{message}");
+    }
+
     bail!("{command} failed: {}", stderr.trim());
+}
+
+fn map_waydroid_shell_error(command: &str, stdout: &str, stderr: &str) -> Option<&'static str> {
+    if command.starts_with("waydroid shell input")
+        && (stdout.contains(WAYDROID_SHELL_ROOT_ERROR)
+            || stderr.contains(WAYDROID_SHELL_ROOT_ERROR))
+    {
+        Some(WAYDROID_SHELL_ROOT_MESSAGE)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_waydroid_shell_root_error_to_actionable_message() {
+        let message = map_waydroid_shell_error(
+            "waydroid shell input tap",
+            "",
+            "ERROR: Action \"shell\" needs root access\n",
+        );
+
+        assert_eq!(message, Some(WAYDROID_SHELL_ROOT_MESSAGE));
+    }
+
+    #[test]
+    fn maps_waydroid_shell_swipe_root_error_to_actionable_message() {
+        let message = map_waydroid_shell_error(
+            "waydroid shell input swipe",
+            "",
+            "ERROR: Action \"shell\" needs root access\n",
+        );
+
+        assert_eq!(message, Some(WAYDROID_SHELL_ROOT_MESSAGE));
+    }
+
+    #[test]
+    fn does_not_map_non_shell_input_waydroid_errors() {
+        let message = map_waydroid_shell_error(
+            "waydroid status",
+            "",
+            "ERROR: Action \"shell\" needs root access\n",
+        );
+
+        assert_eq!(message, None);
+    }
+
+    #[test]
+    fn does_not_map_unrelated_shell_input_errors() {
+        let message = map_waydroid_shell_error(
+            "waydroid shell input tap",
+            "",
+            "ERROR: WayDroid container is STOPPED\n",
+        );
+
+        assert_eq!(message, None);
+    }
 }

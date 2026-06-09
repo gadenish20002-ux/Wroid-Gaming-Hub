@@ -30,6 +30,12 @@ cargo run -p wroid-cli -- input swipe 400 500 800 500 180 --backend waydroid-she
 cargo run -p wroid-cli -- binding run profiles/examples/shooter-basic.json fire --backend auto
 ```
 
+On some systems, `waydroid shell input ...` requires root privileges. If `--backend waydroid-shell` fails with `Action "shell" needs root access`, run the CLI itself with `sudo`, for example:
+
+```sh
+sudo target/debug/wroid input tap 500 400 --backend waydroid-shell
+```
+
 ## Profile Format
 
 Profiles are JSON files with a target resolution and named bindings:
