@@ -1,6 +1,6 @@
 # Wroid Gaming Hub
 
-Wroid Gaming Hub is a Linux gaming frontend for Waydroid. MVP-0 is a CLI-only skeleton that loads JSON control profiles and executes tap/swipe bindings through ADB.
+Wroid Gaming Hub is a Linux gaming frontend for Waydroid. MVP-0 is a CLI-only skeleton that loads JSON control profiles and executes tap/swipe bindings through ADB or Waydroid shell input.
 
 ## Workspace
 
@@ -18,6 +18,16 @@ cargo run -p wroid-cli -- profile example /tmp/wroid-profile.json
 cargo run -p wroid-cli -- input tap 500 400
 cargo run -p wroid-cli -- input swipe 400 500 800 500 180
 cargo run -p wroid-cli -- binding run profiles/examples/shooter-basic.json fire
+```
+
+Input commands default to `--backend auto`. Auto uses ADB when `adb devices` reports at least one connected device with status `device`; otherwise it falls back to `waydroid shell input`.
+
+```sh
+cargo run -p wroid-cli -- input tap 500 400 --backend auto
+cargo run -p wroid-cli -- input tap 500 400 --backend adb
+cargo run -p wroid-cli -- input tap 500 400 --backend waydroid-shell
+cargo run -p wroid-cli -- input swipe 400 500 800 500 180 --backend waydroid-shell
+cargo run -p wroid-cli -- binding run profiles/examples/shooter-basic.json fire --backend auto
 ```
 
 ## Profile Format
