@@ -1,0 +1,56 @@
+{
+  "name": "Shooter Basic",
+  "resolution": {
+    "width": 1920,
+    "height": 1080
+  },
+  "bindings": [
+    {
+      "name": "fire",
+      "input": {
+        "kind": "mouse_button",
+        "button": "left"
+      },
+      "action": {
+        "kind": "tap",
+        "point": {
+          "x": 1640,
+          "y": 540
+        }
+      }
+    },
+    {
+      "name": "reload",
+      "input": {
+        "kind": "key",
+        "key": "r"
+      },
+      "action": {
+        "kind": "tap",
+        "point": {
+          "x": 1760,
+          "y": 900
+        }
+      }
+    },
+    {
+      "name": "look_right",
+      "input": {
+        "kind": "key",
+        "key": "d"
+      },
+      "action": {
+        "kind": "swipe",
+        "from": {
+          "x": 960,
+          "y": 540
+        },
+        "to": {
+          "x": 1260,
+          "y": 540
+        },
+        "duration_ms": 180
+      }
+    }
+  ]
+}
