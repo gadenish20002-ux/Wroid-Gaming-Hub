@@ -115,6 +115,26 @@ impl Adb {
             &output.stdout,
         )))
     }
+
+    pub fn wm_size(&self) -> Result<String> {
+        let output = Command::new("adb")
+            .args(["shell", "wm", "size"])
+            .output()
+            .context("failed to run adb shell wm size")?;
+        ensure_success("adb shell wm size", &output)?;
+
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    pub fn wm_density(&self) -> Result<String> {
+        let output = Command::new("adb")
+            .args(["shell", "wm", "density"])
+            .output()
+            .context("failed to run adb shell wm density")?;
+        ensure_success("adb shell wm density", &output)?;
+
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
 }
 
 pub fn is_available() -> bool {
@@ -151,6 +171,14 @@ pub fn install_apk(path: impl AsRef<Path>) -> Result<()> {
 
 pub fn current_activity() -> Result<Option<AndroidActivity>> {
     Adb.current_activity()
+}
+
+pub fn wm_size() -> Result<String> {
+    Adb.wm_size()
+}
+
+pub fn wm_density() -> Result<String> {
+    Adb.wm_density()
 }
 
 fn parse_device_line(line: &str) -> Option<AdbDevice> {

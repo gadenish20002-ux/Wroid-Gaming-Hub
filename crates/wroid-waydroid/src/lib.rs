@@ -154,6 +154,26 @@ impl Waydroid {
             &output.stdout,
         )))
     }
+
+    pub fn shell_wm_size(&self) -> Result<String> {
+        let output = Command::new("waydroid")
+            .args(["shell", "wm", "size"])
+            .output()
+            .context("failed to run waydroid shell wm size")?;
+        ensure_success("waydroid shell wm size", &output)?;
+
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    pub fn shell_wm_density(&self) -> Result<String> {
+        let output = Command::new("waydroid")
+            .args(["shell", "wm", "density"])
+            .output()
+            .context("failed to run waydroid shell wm density")?;
+        ensure_success("waydroid shell wm density", &output)?;
+
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
 }
 
 pub fn is_available() -> bool {
@@ -206,6 +226,14 @@ pub fn app_install(path: impl AsRef<Path>) -> Result<()> {
 
 pub fn shell_current_activity() -> Result<Option<AndroidActivity>> {
     Waydroid.shell_current_activity()
+}
+
+pub fn shell_wm_size() -> Result<String> {
+    Waydroid.shell_wm_size()
+}
+
+pub fn shell_wm_density() -> Result<String> {
+    Waydroid.shell_wm_density()
 }
 
 fn parse_package_list(output: &str) -> Vec<String> {

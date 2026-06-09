@@ -17,6 +17,9 @@ cargo run -p wroid-cli -- profile validate profiles/examples/shooter-basic.json
 cargo run -p wroid-cli -- profile list-bindings profiles/examples/shooter-basic.json
 cargo run -p wroid-cli -- profile example /tmp/wroid-profile.json
 cargo run -p wroid-cli -- profile new /tmp/wroid-profile.json --name "My Game" --package com.example.game --width 1920 --height 1080
+cargo run -p wroid-cli -- device info --backend waydroid-shell
+cargo run -p wroid-cli -- profile new-current /tmp/settings.json --name "Android Settings" --package com.android.settings --backend waydroid-shell --force
+cargo run -p wroid-cli -- profile registry-new-current --name "Android Settings" --package com.android.settings --backend waydroid-shell --force
 cargo run -p wroid-cli -- profile add-tap /tmp/wroid-profile.json --name fire --key F --x 1640 --y 540
 cargo run -p wroid-cli -- profile add-swipe /tmp/wroid-profile.json --name look_right --key D --from 960,540 --to 1260,540 --duration-ms 180
 cargo run -p wroid-cli -- profile remove-binding /tmp/wroid-profile.json fire
@@ -89,6 +92,7 @@ On some systems, `waydroid shell ...` operations require root privileges. This a
 sudo target/debug/wroid input tap 500 400 --backend waydroid-shell
 sudo target/debug/wroid input keyevent 3 --backend waydroid-shell
 sudo target/debug/wroid input keyevent 4 --backend waydroid-shell
+sudo target/debug/wroid device info --backend waydroid-shell
 ```
 
 On some systems, launching apps through sudo user/session restoration may hang. In that case, launch the Android app as the normal user first, then start Wroid under sudo with `--no-launch`:
@@ -127,6 +131,14 @@ cargo run -p wroid-cli -- profile add-tap profiles/local/my-game.json --name fir
 cargo run -p wroid-cli -- profile add-swipe profiles/local/my-game.json --name look_right --key D --from 960,540 --to 1260,540 --duration-ms 180
 cargo run -p wroid-cli -- profile list-bindings profiles/local/my-game.json
 cargo run -p wroid-cli -- profile remove-binding profiles/local/my-game.json fire
+```
+
+To create a profile using the current Android surface resolution reported by `wm size`, use `new-current`. This avoids guessing host-window dimensions such as `1920x1080` when Waydroid reports a different Android surface such as `1920x1050`:
+
+```sh
+sudo target/debug/wroid device info --backend waydroid-shell
+sudo target/debug/wroid profile new-current /tmp/settings.json --name "Android Settings" --package com.android.settings --backend waydroid-shell --force
+sudo target/debug/wroid profile registry-new-current --name "Android Settings" --package com.android.settings --backend waydroid-shell --force
 ```
 
 Profiles can be imported into the user-owned local registry at `$XDG_CONFIG_HOME/wroid/profiles/`, or `~/.config/wroid/profiles/` when `XDG_CONFIG_HOME` is not set. By default, the registry ID is the profile's `package_name`:

@@ -30,6 +30,10 @@ enum Commands {
         #[command(subcommand)]
         command: ProfileCommand,
     },
+    Device {
+        #[command(subcommand)]
+        command: DeviceCommand,
+    },
     Input {
         #[command(subcommand)]
         command: InputCommand,
@@ -88,6 +92,17 @@ enum ProfileCommand {
         #[arg(long)]
         force: bool,
     },
+    NewCurrent {
+        path: PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        package: String,
+        #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
+        backend: InputBackend,
+        #[arg(long)]
+        force: bool,
+    },
     AddTap {
         path: PathBuf,
         #[arg(long)]
@@ -126,12 +141,40 @@ enum ProfileCommand {
         #[arg(long)]
         force: bool,
     },
+    RegistryNewCurrent {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        package: String,
+        #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
+        backend: InputBackend,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        force: bool,
+    },
     List,
     Path {
         profile_id: String,
     },
     Show {
         profile_id: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DeviceCommand {
+    Screen {
+        #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
+        backend: InputBackend,
+    },
+    Density {
+        #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
+        backend: InputBackend,
+    },
+    Info {
+        #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
+        backend: InputBackend,
     },
 }
 
@@ -240,6 +283,8 @@ trait InputExecutor {
     fn adb_launch_package(&self, package_name: &str) -> Result<()>;
     fn adb_install_apk(&self, path: &Path) -> Result<()>;
     fn adb_current_activity(&self) -> Result<Option<CurrentAndroidActivity>>;
+    fn adb_wm_size(&self) -> Result<String>;
+    fn adb_wm_density(&self) -> Result<String>;
     fn waydroid_shell_tap(&self, x: u32, y: u32) -> Result<()>;
     fn waydroid_shell_swipe(
         &self,
@@ -260,6 +305,8 @@ trait InputExecutor {
     ) -> Result<()>;
     fn waydroid_app_install(&self, path: &Path) -> Result<()>;
     fn waydroid_shell_current_activity(&self) -> Result<Option<CurrentAndroidActivity>>;
+    fn waydroid_shell_wm_size(&self) -> Result<String>;
+    fn waydroid_shell_wm_density(&self) -> Result<String>;
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -302,6 +349,14 @@ impl InputExecutor for CommandInputExecutor {
                 component_name: activity.component_name,
             }),
         )
+    }
+
+    fn adb_wm_size(&self) -> Result<String> {
+        wroid_adb::wm_size()
+    }
+
+    fn adb_wm_density(&self) -> Result<String> {
+        wroid_adb::wm_density()
     }
 
     fn waydroid_shell_tap(&self, x: u32, y: u32) -> Result<()> {
@@ -353,6 +408,14 @@ impl InputExecutor for CommandInputExecutor {
             }),
         )
     }
+
+    fn waydroid_shell_wm_size(&self) -> Result<String> {
+        wroid_waydroid::shell_wm_size()
+    }
+
+    fn waydroid_shell_wm_density(&self) -> Result<String> {
+        wroid_waydroid::shell_wm_density()
+    }
 }
 
 fn main() -> Result<()> {
@@ -372,6 +435,20 @@ fn main() -> Result<()> {
                 height,
                 force,
             } => create_profile(path, name, package, width, height, force),
+            ProfileCommand::NewCurrent {
+                path,
+                name,
+                package,
+                backend,
+                force,
+            } => create_profile_from_current_screen(
+                &input_executor,
+                path,
+                name,
+                package,
+                backend,
+                force,
+            ),
             ProfileCommand::AddTap {
                 path,
                 name,
@@ -392,9 +469,28 @@ fn main() -> Result<()> {
             }
             ProfileCommand::ListBindings { profile_path } => list_bindings(profile_path),
             ProfileCommand::Import { path, id, force } => import_profile(path, id, force),
+            ProfileCommand::RegistryNewCurrent {
+                name,
+                package,
+                backend,
+                id,
+                force,
+            } => registry_create_profile_from_current_screen(
+                &input_executor,
+                name,
+                package,
+                backend,
+                id,
+                force,
+            ),
             ProfileCommand::List => list_profiles(),
             ProfileCommand::Path { profile_id } => print_profile_path(&profile_id),
             ProfileCommand::Show { profile_id } => show_profile(&profile_id),
+        },
+        Commands::Device { command } => match command {
+            DeviceCommand::Screen { backend } => device_screen(&input_executor, backend),
+            DeviceCommand::Density { backend } => device_density(&input_executor, backend),
+            DeviceCommand::Info { backend } => device_info(&input_executor, backend),
         },
         Commands::Input { command } => match command {
             InputCommand::Tap { x, y, backend } => input_tap(&input_executor, backend, x, y),
@@ -517,16 +613,51 @@ fn create_profile(
         );
     }
 
-    let profile = ControlProfile {
-        name,
-        package_name,
-        resolution: Resolution { width, height },
-        bindings: Vec::new(),
-    };
-    profile.validate().context("new profile is invalid")?;
+    let profile = new_empty_control_profile(name, package_name, Resolution { width, height })?;
     save_profile(&profile, &path)?;
     println!("created profile: {}", path.display());
     Ok(())
+}
+
+fn create_profile_from_current_screen(
+    input_executor: &impl InputExecutor,
+    path: PathBuf,
+    name: String,
+    package_name: String,
+    backend: InputBackend,
+    force: bool,
+) -> Result<()> {
+    if path.exists() && !force {
+        bail!(
+            "profile {} already exists; pass --force to overwrite",
+            path.display()
+        );
+    }
+
+    let resolution = detect_device_screen(input_executor, backend)?;
+    create_profile(
+        path,
+        name,
+        package_name,
+        resolution.width,
+        resolution.height,
+        force,
+    )
+}
+
+fn new_empty_control_profile(
+    name: String,
+    package_name: String,
+    resolution: Resolution,
+) -> Result<ControlProfile> {
+    let profile = ControlProfile {
+        name,
+        package_name,
+        resolution,
+        bindings: Vec::new(),
+    };
+    profile.validate().context("new profile is invalid")?;
+    Ok(profile)
 }
 
 fn add_tap_binding(path: PathBuf, name: String, key: String, x: u32, y: u32) -> Result<()> {
@@ -619,6 +750,31 @@ fn import_profile(source_path: PathBuf, profile_id: Option<String>, force: bool)
     println!("Imported profile:");
     println!("  ID: {}", imported.id);
     println!("  Path: {}", imported.path.display());
+    Ok(())
+}
+
+fn registry_create_profile_from_current_screen(
+    input_executor: &impl InputExecutor,
+    name: String,
+    package_name: String,
+    backend: InputBackend,
+    profile_id: Option<String>,
+    force: bool,
+) -> Result<()> {
+    let registry_dir = profile_registry_dir()?;
+    let created = create_current_profile_in_registry(
+        input_executor,
+        name,
+        package_name,
+        backend,
+        profile_id.as_deref(),
+        force,
+        &registry_dir,
+    )?;
+
+    println!("Created profile:");
+    println!("  ID: {}", created.id);
+    println!("  Path: {}", created.path.display());
     Ok(())
 }
 
@@ -764,6 +920,147 @@ fn app_current(input_executor: &impl InputExecutor, backend: InputBackend) -> Re
     }
 
     Ok(())
+}
+
+fn device_screen(input_executor: &impl InputExecutor, backend: InputBackend) -> Result<()> {
+    let resolution = detect_device_screen(input_executor, backend)?;
+    println!("Screen: {resolution}");
+    Ok(())
+}
+
+fn device_density(input_executor: &impl InputExecutor, backend: InputBackend) -> Result<()> {
+    let density = detect_device_density(input_executor, backend)?;
+    println!("Density: {density}");
+    Ok(())
+}
+
+fn device_info(input_executor: &impl InputExecutor, backend: InputBackend) -> Result<()> {
+    write_stdout(&device_info_output(input_executor, backend)?)
+}
+
+fn device_info_output(
+    input_executor: &impl InputExecutor,
+    backend: InputBackend,
+) -> Result<String> {
+    let selected_backend = select_input_backend(input_executor, backend);
+    let screen = detect_device_screen_with_selected_backend(input_executor, selected_backend)?;
+
+    let mut output = format!("Screen: {screen}\n");
+    match detect_device_density_with_selected_backend(input_executor, selected_backend) {
+        Ok(density) => output.push_str(&format!("Density: {density}\n")),
+        Err(error) => output.push_str(&format!(
+            "Warning: density detection failed via {selected_backend}: {error:#}\n"
+        )),
+    }
+
+    Ok(output)
+}
+
+fn detect_device_screen(
+    input_executor: &impl InputExecutor,
+    backend: InputBackend,
+) -> Result<Resolution> {
+    let selected_backend = select_input_backend(input_executor, backend);
+    detect_device_screen_with_selected_backend(input_executor, selected_backend)
+}
+
+fn detect_device_screen_with_selected_backend(
+    input_executor: &impl InputExecutor,
+    selected_backend: SelectedInputBackend,
+) -> Result<Resolution> {
+    let output = match selected_backend {
+        SelectedInputBackend::Adb => input_executor.adb_wm_size(),
+        SelectedInputBackend::WaydroidShell => input_executor.waydroid_shell_wm_size(),
+    }
+    .with_context(|| format!("failed to query screen size via {selected_backend}"))?;
+
+    parse_wm_size_output(&output).with_context(|| {
+        format!(
+            "failed to parse screen size from {selected_backend} output: {}",
+            compact_command_output(&output)
+        )
+    })
+}
+
+fn detect_device_density(
+    input_executor: &impl InputExecutor,
+    backend: InputBackend,
+) -> Result<u32> {
+    let selected_backend = select_input_backend(input_executor, backend);
+    detect_device_density_with_selected_backend(input_executor, selected_backend)
+}
+
+fn detect_device_density_with_selected_backend(
+    input_executor: &impl InputExecutor,
+    selected_backend: SelectedInputBackend,
+) -> Result<u32> {
+    let output = match selected_backend {
+        SelectedInputBackend::Adb => input_executor.adb_wm_density(),
+        SelectedInputBackend::WaydroidShell => input_executor.waydroid_shell_wm_density(),
+    }
+    .with_context(|| format!("failed to query density via {selected_backend}"))?;
+
+    parse_wm_density_output(&output).with_context(|| {
+        format!(
+            "failed to parse density from {selected_backend} output: {}",
+            compact_command_output(&output)
+        )
+    })
+}
+
+fn parse_wm_size_output(output: &str) -> Option<Resolution> {
+    parse_wm_size_output_with_prefix(output, "Override size:")
+        .or_else(|| parse_wm_size_output_with_prefix(output, "Physical size:"))
+}
+
+fn parse_wm_size_output_with_prefix(output: &str, prefix: &str) -> Option<Resolution> {
+    let value = output
+        .lines()
+        .find_map(|line| strip_wm_value_prefix(line, prefix))?;
+    parse_resolution_value(value)
+}
+
+fn parse_resolution_value(value: &str) -> Option<Resolution> {
+    let value = value.trim();
+    let (width, height) = value.split_once('x')?;
+    let width = width.trim().parse().ok()?;
+    let height = height.trim().parse().ok()?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    Some(Resolution { width, height })
+}
+
+fn parse_wm_density_output(output: &str) -> Option<u32> {
+    parse_wm_density_output_with_prefix(output, "Override density:")
+        .or_else(|| parse_wm_density_output_with_prefix(output, "Physical density:"))
+}
+
+fn parse_wm_density_output_with_prefix(output: &str, prefix: &str) -> Option<u32> {
+    let value = output
+        .lines()
+        .find_map(|line| strip_wm_value_prefix(line, prefix))?;
+    let density = value.trim().parse().ok()?;
+    if density == 0 {
+        None
+    } else {
+        Some(density)
+    }
+}
+
+fn strip_wm_value_prefix<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    let trimmed = line.trim();
+    trimmed.strip_prefix(prefix)
+}
+
+fn compact_command_output(output: &str) -> String {
+    let compacted = output.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compacted.is_empty() {
+        "<empty>".to_owned()
+    } else {
+        compacted
+    }
 }
 
 fn ensure_apk_path_exists(path: &Path) -> Result<()> {
@@ -1190,6 +1487,35 @@ fn import_profile_to_registry(
     save_profile(&profile, &target_path)?;
     Ok(ImportedProfile {
         id: id.to_owned(),
+        path: target_path,
+    })
+}
+
+fn create_current_profile_in_registry(
+    input_executor: &impl InputExecutor,
+    name: String,
+    package_name: String,
+    backend: InputBackend,
+    profile_id: Option<&str>,
+    force: bool,
+    registry_dir: &Path,
+) -> Result<ImportedProfile> {
+    let id = profile_id.unwrap_or(&package_name).to_owned();
+    validate_profile_id(&id)?;
+
+    let target_path = registry_profile_file_path(registry_dir, &id)?;
+    if target_path.exists() && !force {
+        bail!(
+            "profile {} already exists; pass --force to overwrite",
+            target_path.display()
+        );
+    }
+
+    let resolution = detect_device_screen(input_executor, backend)?;
+    let profile = new_empty_control_profile(name, package_name, resolution)?;
+    save_profile(&profile, &target_path)?;
+    Ok(ImportedProfile {
+        id,
         path: target_path,
     })
 }
@@ -1713,6 +2039,8 @@ mod tests {
         AdbKeyevent(u32),
         AdbLaunchPackage(String),
         AdbInstallApk(PathBuf),
+        AdbWmSize,
+        AdbWmDensity,
         LaunchDelay(u128),
         StartKeymapper,
         WaydroidShellTap(u32, u32),
@@ -1725,6 +2053,8 @@ mod tests {
             session_env: wroid_waydroid::WaydroidAppLaunchEnv,
         },
         WaydroidAppInstall(PathBuf),
+        WaydroidShellWmSize,
+        WaydroidShellWmDensity,
     }
 
     #[derive(Debug, Default)]
@@ -1736,6 +2066,11 @@ mod tests {
         waydroid_packages: Vec<String>,
         adb_current_activity: Option<CurrentAndroidActivity>,
         waydroid_current_activity: Option<CurrentAndroidActivity>,
+        adb_wm_size_output: String,
+        adb_wm_density_output: String,
+        waydroid_wm_size_output: String,
+        waydroid_wm_density_output: String,
+        fail_density: bool,
         fail_launch: bool,
         calls: RefCell<Vec<InputCall>>,
     }
@@ -1784,6 +2119,21 @@ mod tests {
                     .into_iter()
                     .map(std::borrow::ToOwned::to_owned)
                     .collect(),
+                ..Self::default()
+            }
+        }
+
+        fn with_waydroid_screen(width: u32, height: u32) -> Self {
+            Self {
+                waydroid_wm_size_output: format!("Physical size: {width}x{height}\n"),
+                ..Self::default()
+            }
+        }
+
+        fn with_waydroid_screen_and_density(width: u32, height: u32, density: u32) -> Self {
+            Self {
+                waydroid_wm_size_output: format!("Physical size: {width}x{height}\n"),
+                waydroid_wm_density_output: format!("Physical density: {density}\n"),
                 ..Self::default()
             }
         }
@@ -1840,6 +2190,20 @@ mod tests {
 
         fn adb_current_activity(&self) -> Result<Option<CurrentAndroidActivity>> {
             Ok(self.adb_current_activity.clone())
+        }
+
+        fn adb_wm_size(&self) -> Result<String> {
+            self.calls.borrow_mut().push(InputCall::AdbWmSize);
+            Ok(self.adb_wm_size_output.clone())
+        }
+
+        fn adb_wm_density(&self) -> Result<String> {
+            self.calls.borrow_mut().push(InputCall::AdbWmDensity);
+            if self.fail_density {
+                Err(anyhow!("adb density failed"))
+            } else {
+                Ok(self.adb_wm_density_output.clone())
+            }
         }
 
         fn waydroid_shell_tap(&self, x: u32, y: u32) -> Result<()> {
@@ -1918,6 +2282,22 @@ mod tests {
 
         fn waydroid_shell_current_activity(&self) -> Result<Option<CurrentAndroidActivity>> {
             Ok(self.waydroid_current_activity.clone())
+        }
+
+        fn waydroid_shell_wm_size(&self) -> Result<String> {
+            self.calls.borrow_mut().push(InputCall::WaydroidShellWmSize);
+            Ok(self.waydroid_wm_size_output.clone())
+        }
+
+        fn waydroid_shell_wm_density(&self) -> Result<String> {
+            self.calls
+                .borrow_mut()
+                .push(InputCall::WaydroidShellWmDensity);
+            if self.fail_density {
+                Err(anyhow!("waydroid density failed"))
+            } else {
+                Ok(self.waydroid_wm_density_output.clone())
+            }
         }
     }
 
@@ -2063,6 +2443,151 @@ mod tests {
             ]),
             "com.example.game\norg.example.second\n"
         );
+    }
+
+    #[test]
+    fn wm_size_parser_accepts_physical_size() {
+        assert_eq!(
+            parse_wm_size_output("Physical size: 1920x1050\n"),
+            Some(Resolution {
+                width: 1920,
+                height: 1050
+            })
+        );
+    }
+
+    #[test]
+    fn wm_size_parser_accepts_override_size() {
+        assert_eq!(
+            parse_wm_size_output("Override size: 1280x720\n"),
+            Some(Resolution {
+                width: 1280,
+                height: 720
+            })
+        );
+    }
+
+    #[test]
+    fn wm_size_parser_rejects_unrelated_output() {
+        assert_eq!(parse_wm_size_output("Display metrics unavailable\n"), None);
+    }
+
+    #[test]
+    fn wm_density_parser_accepts_physical_density() {
+        assert_eq!(
+            parse_wm_density_output("Physical density: 180\n"),
+            Some(180)
+        );
+    }
+
+    #[test]
+    fn wm_density_parser_accepts_override_density() {
+        assert_eq!(
+            parse_wm_density_output("Override density: 240\n"),
+            Some(240)
+        );
+    }
+
+    #[test]
+    fn wm_density_parser_rejects_unrelated_output() {
+        assert_eq!(
+            parse_wm_density_output("Display density unavailable\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn device_info_formats_screen_and_density() {
+        let executor = FakeInputExecutor::with_waydroid_screen_and_density(1920, 1050, 180);
+
+        let output = device_info_output(&executor, InputBackend::WaydroidShell).unwrap();
+
+        assert_eq!(output, "Screen: 1920x1050\nDensity: 180\n");
+        assert_eq!(
+            executor.calls(),
+            vec![
+                InputCall::WaydroidShellWmSize,
+                InputCall::WaydroidShellWmDensity
+            ]
+        );
+    }
+
+    #[test]
+    fn device_info_warns_when_density_detection_fails_after_screen() {
+        let executor = FakeInputExecutor {
+            waydroid_wm_size_output: "Physical size: 1920x1050\n".to_owned(),
+            fail_density: true,
+            ..FakeInputExecutor::default()
+        };
+
+        let output = device_info_output(&executor, InputBackend::WaydroidShell).unwrap();
+
+        assert!(output.contains("Screen: 1920x1050\n"));
+        assert!(output.contains("Warning: density detection failed via waydroid-shell"));
+        assert!(output.contains("waydroid density failed"));
+    }
+
+    #[test]
+    fn new_current_uses_detected_screen_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let executor = FakeInputExecutor::with_waydroid_screen(1920, 1050);
+
+        create_profile_from_current_screen(
+            &executor,
+            path.clone(),
+            "Android Settings".to_owned(),
+            "com.android.settings".to_owned(),
+            InputBackend::WaydroidShell,
+            false,
+        )
+        .unwrap();
+
+        let profile = ControlProfile::load_from_path(path).unwrap();
+        assert_eq!(profile.name, "Android Settings");
+        assert_eq!(profile.package_name, "com.android.settings");
+        assert_eq!(
+            profile.resolution,
+            Resolution {
+                width: 1920,
+                height: 1050
+            }
+        );
+        assert!(profile.bindings.is_empty());
+        profile.validate().unwrap();
+        assert_eq!(executor.calls(), vec![InputCall::WaydroidShellWmSize]);
+    }
+
+    #[test]
+    fn registry_new_current_writes_detected_screen_size_to_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_dir = dir.path().join("registry");
+        let executor = FakeInputExecutor::with_waydroid_screen(1920, 1050);
+
+        let created = create_current_profile_in_registry(
+            &executor,
+            "Android Settings".to_owned(),
+            "com.android.settings".to_owned(),
+            InputBackend::WaydroidShell,
+            None,
+            false,
+            &registry_dir,
+        )
+        .unwrap();
+
+        assert_eq!(created.id, "com.android.settings");
+        assert_eq!(created.path, registry_dir.join("com.android.settings.json"));
+        let profile = ControlProfile::load_from_path(created.path).unwrap();
+        assert_eq!(
+            profile.resolution,
+            Resolution {
+                width: 1920,
+                height: 1050
+            }
+        );
+        assert!(profile.bindings.is_empty());
+        profile.validate().unwrap();
+        assert_eq!(executor.calls(), vec![InputCall::WaydroidShellWmSize]);
     }
 
     #[test]
