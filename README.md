@@ -16,6 +16,10 @@ cargo run -p wroid-cli -- doctor
 cargo run -p wroid-cli -- profile validate profiles/examples/shooter-basic.json
 cargo run -p wroid-cli -- profile list-bindings profiles/examples/shooter-basic.json
 cargo run -p wroid-cli -- profile example /tmp/wroid-profile.json
+cargo run -p wroid-cli -- profile new /tmp/wroid-profile.json --name "My Game" --package com.example.game --width 1920 --height 1080
+cargo run -p wroid-cli -- profile add-tap /tmp/wroid-profile.json --name fire --key F --x 1640 --y 540
+cargo run -p wroid-cli -- profile add-swipe /tmp/wroid-profile.json --name look_right --key D --from 960,540 --to 1260,540 --duration-ms 180
+cargo run -p wroid-cli -- profile remove-binding /tmp/wroid-profile.json fire
 cargo run -p wroid-cli -- input tap 500 400
 cargo run -p wroid-cli -- input swipe 400 500 800 500 180
 cargo run -p wroid-cli -- input keyevent 3
@@ -77,6 +81,16 @@ Profiles are JSON files with a target resolution and named bindings:
 ```
 
 Supported MVP action kinds are `tap` and `swipe`. `virtual_joystick`, `mouse_aim`, and `macro` exist in the schema as placeholders and intentionally fail normal validation until implemented. The interactive `play` runner tolerates those placeholder actions so it can print a clear unsupported-action message and continue running.
+
+Profiles can also be edited from the CLI:
+
+```sh
+cargo run -p wroid-cli -- profile new profiles/local/my-game.json --name "My Game" --package com.example.game --width 1920 --height 1080
+cargo run -p wroid-cli -- profile add-tap profiles/local/my-game.json --name fire --key F --x 1640 --y 540
+cargo run -p wroid-cli -- profile add-swipe profiles/local/my-game.json --name look_right --key D --from 960,540 --to 1260,540 --duration-ms 180
+cargo run -p wroid-cli -- profile list-bindings profiles/local/my-game.json
+cargo run -p wroid-cli -- profile remove-binding profiles/local/my-game.json fire
+```
 
 ## Development
 

@@ -1,4 +1,5 @@
 use std::fmt;
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -7,7 +8,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
 use wroid_core::{
-    Binding, BindingAction, BindingInput, ControlProfile, ProfileError, ValidationError,
+    Binding, BindingAction, BindingInput, ControlProfile, Point, ProfileError, Resolution,
+    ValidationError,
 };
 
 #[derive(Debug, Parser)]
@@ -41,9 +43,56 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum ProfileCommand {
-    Validate { path: PathBuf },
-    Example { path: PathBuf },
-    ListBindings { profile_path: PathBuf },
+    Validate {
+        path: PathBuf,
+    },
+    Example {
+        path: PathBuf,
+    },
+    New {
+        path: PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        package: String,
+        #[arg(long)]
+        width: u32,
+        #[arg(long)]
+        height: u32,
+        #[arg(long)]
+        force: bool,
+    },
+    AddTap {
+        path: PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        x: u32,
+        #[arg(long)]
+        y: u32,
+    },
+    AddSwipe {
+        path: PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        key: String,
+        #[arg(long = "from")]
+        from: String,
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        duration_ms: u64,
+    },
+    RemoveBinding {
+        path: PathBuf,
+        binding_name: String,
+    },
+    ListBindings {
+        profile_path: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -179,6 +228,32 @@ fn main() -> Result<()> {
         Commands::Profile { command } => match command {
             ProfileCommand::Validate { path } => validate_profile(path),
             ProfileCommand::Example { path } => write_example_profile(path),
+            ProfileCommand::New {
+                path,
+                name,
+                package,
+                width,
+                height,
+                force,
+            } => create_profile(path, name, package, width, height, force),
+            ProfileCommand::AddTap {
+                path,
+                name,
+                key,
+                x,
+                y,
+            } => add_tap_binding(path, name, key, x, y),
+            ProfileCommand::AddSwipe {
+                path,
+                name,
+                key,
+                from,
+                to,
+                duration_ms,
+            } => add_swipe_binding(path, name, key, from, to, duration_ms),
+            ProfileCommand::RemoveBinding { path, binding_name } => {
+                remove_binding(path, &binding_name)
+            }
             ProfileCommand::ListBindings { profile_path } => list_bindings(profile_path),
         },
         Commands::Input { command } => match command {
@@ -245,6 +320,110 @@ fn write_example_profile(path: PathBuf) -> Result<()> {
         .save_to_path(&path)
         .with_context(|| format!("failed to write example profile {}", path.display()))?;
     println!("wrote example profile: {}", path.display());
+    Ok(())
+}
+
+fn create_profile(
+    path: PathBuf,
+    name: String,
+    package_name: String,
+    width: u32,
+    height: u32,
+    force: bool,
+) -> Result<()> {
+    if path.exists() && !force {
+        bail!(
+            "profile {} already exists; pass --force to overwrite",
+            path.display()
+        );
+    }
+
+    let profile = ControlProfile {
+        name,
+        package_name,
+        resolution: Resolution { width, height },
+        bindings: Vec::new(),
+    };
+    profile.validate().context("new profile is invalid")?;
+    save_profile(&profile, &path)?;
+    println!("created profile: {}", path.display());
+    Ok(())
+}
+
+fn add_tap_binding(path: PathBuf, name: String, key: String, x: u32, y: u32) -> Result<()> {
+    let mut profile = load_validated_profile(&path)?;
+    ensure_binding_name_available(&profile, &name)?;
+
+    let point = Point { x, y };
+    ensure_point_in_bounds(&profile, point, "tap point")?;
+
+    profile.bindings.push(Binding {
+        name: name.clone(),
+        input: BindingInput::Key {
+            key: normalize_key(&key),
+        },
+        action: BindingAction::Tap { point },
+    });
+    profile
+        .validate()
+        .with_context(|| format!("updated profile {} is invalid", path.display()))?;
+    save_profile(&profile, &path)?;
+    println!("added tap binding: {name}");
+    Ok(())
+}
+
+fn add_swipe_binding(
+    path: PathBuf,
+    name: String,
+    key: String,
+    from: String,
+    to: String,
+    duration_ms: u64,
+) -> Result<()> {
+    let mut profile = load_validated_profile(&path)?;
+    ensure_binding_name_available(&profile, &name)?;
+
+    let from = parse_point_arg(&from, "--from")?;
+    let to = parse_point_arg(&to, "--to")?;
+    if duration_ms == 0 {
+        bail!("swipe duration must be greater than zero");
+    }
+    ensure_point_in_bounds(&profile, from, "--from point")?;
+    ensure_point_in_bounds(&profile, to, "--to point")?;
+
+    profile.bindings.push(Binding {
+        name: name.clone(),
+        input: BindingInput::Key {
+            key: normalize_key(&key),
+        },
+        action: BindingAction::Swipe {
+            from,
+            to,
+            duration_ms,
+        },
+    });
+    profile
+        .validate()
+        .with_context(|| format!("updated profile {} is invalid", path.display()))?;
+    save_profile(&profile, &path)?;
+    println!("added swipe binding: {name}");
+    Ok(())
+}
+
+fn remove_binding(path: PathBuf, binding_name: &str) -> Result<()> {
+    let mut profile = load_validated_profile(&path)?;
+    let index = profile
+        .bindings
+        .iter()
+        .position(|binding| binding.name == binding_name)
+        .with_context(|| format!("binding {binding_name} not found"))?;
+
+    let removed = profile.bindings.remove(index);
+    profile
+        .validate()
+        .with_context(|| format!("updated profile {} is invalid", path.display()))?;
+    save_profile(&profile, &path)?;
+    println!("removed binding: {}", removed.name);
     Ok(())
 }
 
@@ -435,6 +614,58 @@ fn load_profile_with_context(profile_path: &Path) -> Result<ControlProfile> {
             Err(error).context(context)
         }
     }
+}
+
+fn save_profile(profile: &ControlProfile, path: &Path) -> Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create profile directory {}", parent.display()))?;
+    }
+
+    profile
+        .save_to_path(path)
+        .with_context(|| format!("failed to write profile {}", path.display()))?;
+    Ok(())
+}
+
+fn ensure_binding_name_available(profile: &ControlProfile, name: &str) -> Result<()> {
+    if profile.binding(name).is_some() {
+        bail!("binding {name} already exists");
+    }
+
+    Ok(())
+}
+
+fn ensure_point_in_bounds(profile: &ControlProfile, point: Point, label: &str) -> Result<()> {
+    if point.x >= profile.resolution.width || point.y >= profile.resolution.height {
+        bail!(
+            "{label} {point} is outside profile resolution {}",
+            profile.resolution
+        );
+    }
+
+    Ok(())
+}
+
+fn parse_point_arg(value: &str, label: &str) -> Result<Point> {
+    let parts: Vec<_> = value.split(',').collect();
+    if parts.len() != 2 || parts.iter().any(|part| part.trim().is_empty()) {
+        bail!("{label} must use x,y coordinate format");
+    }
+
+    let x = parts[0]
+        .trim()
+        .parse()
+        .with_context(|| format!("{label} has an invalid x coordinate"))?;
+    let y = parts[1]
+        .trim()
+        .parse()
+        .with_context(|| format!("{label} has an invalid y coordinate"))?;
+
+    Ok(Point { x, y })
 }
 
 fn profile_error_hint(error: &ProfileError) -> Option<&'static str> {
@@ -931,6 +1162,139 @@ Bindings:
     }
 
     #[test]
+    fn creates_profile_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("profile.json");
+
+        create_profile(
+            path.clone(),
+            "Test Profile".to_owned(),
+            "com.example.test".to_owned(),
+            1280,
+            720,
+            false,
+        )
+        .unwrap();
+
+        let profile = ControlProfile::load_from_path(&path).unwrap();
+        assert_eq!(profile.name, "Test Profile");
+        assert_eq!(profile.package_name, "com.example.test");
+        assert_eq!(
+            profile.resolution,
+            Resolution {
+                width: 1280,
+                height: 720
+            }
+        );
+        assert!(profile.bindings.is_empty());
+        profile.validate().unwrap();
+    }
+
+    #[test]
+    fn adds_tap_binding() {
+        let (_dir, path) = new_empty_profile();
+
+        add_tap_binding(path.clone(), "fire".to_owned(), "F".to_owned(), 100, 200).unwrap();
+
+        let profile = ControlProfile::load_from_path(&path).unwrap();
+        assert_eq!(
+            profile.bindings,
+            vec![Binding {
+                name: "fire".to_owned(),
+                input: BindingInput::Key {
+                    key: "f".to_owned()
+                },
+                action: BindingAction::Tap {
+                    point: Point { x: 100, y: 200 }
+                },
+            }]
+        );
+        profile.validate().unwrap();
+    }
+
+    #[test]
+    fn adds_swipe_binding() {
+        let (_dir, path) = new_empty_profile();
+
+        add_swipe_binding(
+            path.clone(),
+            "look_right".to_owned(),
+            "D".to_owned(),
+            "300,400".to_owned(),
+            "600,400".to_owned(),
+            180,
+        )
+        .unwrap();
+
+        let profile = ControlProfile::load_from_path(&path).unwrap();
+        assert_eq!(
+            profile.bindings,
+            vec![Binding {
+                name: "look_right".to_owned(),
+                input: BindingInput::Key {
+                    key: "d".to_owned()
+                },
+                action: BindingAction::Swipe {
+                    from: Point { x: 300, y: 400 },
+                    to: Point { x: 600, y: 400 },
+                    duration_ms: 180,
+                },
+            }]
+        );
+        profile.validate().unwrap();
+    }
+
+    #[test]
+    fn duplicate_binding_fails() {
+        let (_dir, path) = new_empty_profile();
+        add_tap_binding(path.clone(), "fire".to_owned(), "f".to_owned(), 100, 200).unwrap();
+
+        let err = add_tap_binding(path, "fire".to_owned(), "g".to_owned(), 300, 400).unwrap_err();
+
+        assert!(err.to_string().contains("binding fire already exists"));
+    }
+
+    #[test]
+    fn invalid_coordinate_format_fails() {
+        let (_dir, path) = new_empty_profile();
+
+        let err = add_swipe_binding(
+            path,
+            "look_right".to_owned(),
+            "d".to_owned(),
+            "300".to_owned(),
+            "600,400".to_owned(),
+            180,
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("--from must use x,y coordinate format"));
+    }
+
+    #[test]
+    fn removes_existing_binding() {
+        let (_dir, path) = new_empty_profile();
+        add_tap_binding(path.clone(), "fire".to_owned(), "f".to_owned(), 100, 200).unwrap();
+
+        remove_binding(path.clone(), "fire").unwrap();
+
+        let profile = ControlProfile::load_from_path(&path).unwrap();
+        assert!(profile.bindings.is_empty());
+        profile.validate().unwrap();
+    }
+
+    #[test]
+    fn removing_missing_binding_fails() {
+        let (_dir, path) = new_empty_profile();
+
+        let err = remove_binding(path, "fire").unwrap_err();
+
+        assert!(err.to_string().contains("binding fire not found"));
+    }
+
+    #[test]
     fn resolves_key_f_to_fire_binding() {
         let profile = keyboard_test_profile();
 
@@ -976,6 +1340,21 @@ Bindings:
         };
 
         assert!(resolve_key_binding(&profile.bindings, "F").is_none());
+    }
+
+    fn new_empty_profile() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile.json");
+        create_profile(
+            path.clone(),
+            "Test Profile".to_owned(),
+            "com.example.test".to_owned(),
+            1280,
+            720,
+            false,
+        )
+        .unwrap();
+        (dir, path)
     }
 
     fn keyboard_test_profile() -> ControlProfile {

@@ -804,6 +804,7 @@ dependencies = [
  "anyhow",
  "clap",
  "crossterm",
+ "tempfile",
  "wroid-adb",
  "wroid-core",
  "wroid-waydroid",
