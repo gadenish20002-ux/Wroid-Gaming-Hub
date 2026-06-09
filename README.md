@@ -14,9 +14,11 @@ Wroid Gaming Hub is a Linux gaming frontend for Waydroid. MVP-0 is a CLI-only sk
 ```sh
 cargo run -p wroid-cli -- doctor
 cargo run -p wroid-cli -- profile validate profiles/examples/shooter-basic.json
+cargo run -p wroid-cli -- profile list-bindings profiles/examples/shooter-basic.json
 cargo run -p wroid-cli -- profile example /tmp/wroid-profile.json
 cargo run -p wroid-cli -- input tap 500 400
 cargo run -p wroid-cli -- input swipe 400 500 800 500 180
+cargo run -p wroid-cli -- input keyevent 3
 cargo run -p wroid-cli -- binding run profiles/examples/shooter-basic.json fire
 cargo run -p wroid-cli -- play profiles/examples/shooter-basic.json
 ```
@@ -28,6 +30,7 @@ cargo run -p wroid-cli -- input tap 500 400 --backend auto
 cargo run -p wroid-cli -- input tap 500 400 --backend adb
 cargo run -p wroid-cli -- input tap 500 400 --backend waydroid-shell
 cargo run -p wroid-cli -- input swipe 400 500 800 500 180 --backend waydroid-shell
+cargo run -p wroid-cli -- input keyevent 3 --backend waydroid-shell
 cargo run -p wroid-cli -- binding run profiles/examples/shooter-basic.json fire --backend auto
 cargo run -p wroid-cli -- play profiles/examples/shooter-basic.json --backend adb
 cargo run -p wroid-cli -- play profiles/examples/shooter-basic.json --backend waydroid-shell
@@ -50,6 +53,8 @@ On some systems, `waydroid shell input ...` requires root privileges. If `--back
 
 ```sh
 sudo target/debug/wroid input tap 500 400 --backend waydroid-shell
+sudo target/debug/wroid input keyevent 3 --backend waydroid-shell
+sudo target/debug/wroid input keyevent 4 --backend waydroid-shell
 ```
 
 ## Profile Format

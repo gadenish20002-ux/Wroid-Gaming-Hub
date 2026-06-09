@@ -72,6 +72,15 @@ impl Waydroid {
             .context("failed to run waydroid shell input swipe")?;
         ensure_success("waydroid shell input swipe", &output)
     }
+
+    pub fn shell_input_keyevent(&self, code: u32) -> Result<()> {
+        let output = Command::new("waydroid")
+            .args(["shell", "input", "keyevent"])
+            .arg(code.to_string())
+            .output()
+            .context("failed to run waydroid shell input keyevent")?;
+        ensure_success("waydroid shell input keyevent", &output)
+    }
 }
 
 pub fn is_available() -> bool {
@@ -96,6 +105,10 @@ pub fn shell_input_tap(x: u32, y: u32) -> Result<()> {
 
 pub fn shell_input_swipe(x1: u32, y1: u32, x2: u32, y2: u32, duration_ms: u64) -> Result<()> {
     Waydroid.shell_input_swipe(x1, y1, x2, y2, duration_ms)
+}
+
+pub fn shell_input_keyevent(code: u32) -> Result<()> {
+    Waydroid.shell_input_keyevent(code)
 }
 
 fn ensure_success(command: &str, output: &std::process::Output) -> Result<()> {
@@ -142,6 +155,17 @@ mod tests {
     fn maps_waydroid_shell_swipe_root_error_to_actionable_message() {
         let message = map_waydroid_shell_error(
             "waydroid shell input swipe",
+            "",
+            "ERROR: Action \"shell\" needs root access\n",
+        );
+
+        assert_eq!(message, Some(WAYDROID_SHELL_ROOT_MESSAGE));
+    }
+
+    #[test]
+    fn maps_waydroid_shell_keyevent_root_error_to_actionable_message() {
+        let message = map_waydroid_shell_error(
+            "waydroid shell input keyevent",
             "",
             "ERROR: Action \"shell\" needs root access\n",
         );

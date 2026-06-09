@@ -6,7 +6,9 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
-use wroid_core::{Binding, BindingAction, BindingInput, ControlProfile, ValidationError};
+use wroid_core::{
+    Binding, BindingAction, BindingInput, ControlProfile, ProfileError, ValidationError,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "wroid", about = "Wroid Gaming Hub CLI")]
@@ -41,6 +43,7 @@ enum Commands {
 enum ProfileCommand {
     Validate { path: PathBuf },
     Example { path: PathBuf },
+    ListBindings { profile_path: PathBuf },
 }
 
 #[derive(Debug, Subcommand)]
@@ -57,6 +60,11 @@ enum InputCommand {
         x2: u32,
         y2: u32,
         duration_ms: u64,
+        #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
+        backend: InputBackend,
+    },
+    Keyevent {
+        code: u32,
         #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
         backend: InputBackend,
     },
@@ -109,6 +117,7 @@ trait InputExecutor {
     fn adb_devices(&self) -> Result<Vec<wroid_adb::AdbDevice>>;
     fn adb_tap(&self, x: u32, y: u32) -> Result<()>;
     fn adb_swipe(&self, x1: u32, y1: u32, x2: u32, y2: u32, duration_ms: u64) -> Result<()>;
+    fn adb_keyevent(&self, code: u32) -> Result<()>;
     fn waydroid_shell_tap(&self, x: u32, y: u32) -> Result<()>;
     fn waydroid_shell_swipe(
         &self,
@@ -118,6 +127,7 @@ trait InputExecutor {
         y2: u32,
         duration_ms: u64,
     ) -> Result<()>;
+    fn waydroid_shell_keyevent(&self, code: u32) -> Result<()>;
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -136,6 +146,10 @@ impl InputExecutor for CommandInputExecutor {
         wroid_adb::swipe(x1, y1, x2, y2, duration_ms)
     }
 
+    fn adb_keyevent(&self, code: u32) -> Result<()> {
+        wroid_adb::keyevent(code)
+    }
+
     fn waydroid_shell_tap(&self, x: u32, y: u32) -> Result<()> {
         wroid_waydroid::shell_input_tap(x, y)
     }
@@ -150,6 +164,10 @@ impl InputExecutor for CommandInputExecutor {
     ) -> Result<()> {
         wroid_waydroid::shell_input_swipe(x1, y1, x2, y2, duration_ms)
     }
+
+    fn waydroid_shell_keyevent(&self, code: u32) -> Result<()> {
+        wroid_waydroid::shell_input_keyevent(code)
+    }
 }
 
 fn main() -> Result<()> {
@@ -161,6 +179,7 @@ fn main() -> Result<()> {
         Commands::Profile { command } => match command {
             ProfileCommand::Validate { path } => validate_profile(path),
             ProfileCommand::Example { path } => write_example_profile(path),
+            ProfileCommand::ListBindings { profile_path } => list_bindings(profile_path),
         },
         Commands::Input { command } => match command {
             InputCommand::Tap { x, y, backend } => input_tap(&input_executor, backend, x, y),
@@ -172,6 +191,9 @@ fn main() -> Result<()> {
                 duration_ms,
                 backend,
             } => input_swipe(&input_executor, backend, x1, y1, x2, y2, duration_ms),
+            InputCommand::Keyevent { code, backend } => {
+                input_keyevent(&input_executor, backend, code)
+            }
         },
         Commands::Binding { command } => match command {
             BindingCommand::Run {
@@ -226,6 +248,12 @@ fn write_example_profile(path: PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn list_bindings(profile_path: PathBuf) -> Result<()> {
+    let profile = load_validated_profile(&profile_path)?;
+    print!("{}", profile_bindings_listing(&profile));
+    Ok(())
+}
+
 fn input_tap(
     input_executor: &impl InputExecutor,
     backend: InputBackend,
@@ -252,6 +280,17 @@ fn input_swipe(
         SelectedInputBackend::WaydroidShell => {
             input_executor.waydroid_shell_swipe(x1, y1, x2, y2, duration_ms)
         }
+    }
+}
+
+fn input_keyevent(
+    input_executor: &impl InputExecutor,
+    backend: InputBackend,
+    code: u32,
+) -> Result<()> {
+    match select_input_backend(input_executor, backend) {
+        SelectedInputBackend::Adb => input_executor.adb_keyevent(code),
+        SelectedInputBackend::WaydroidShell => input_executor.waydroid_shell_keyevent(code),
     }
 }
 
@@ -358,8 +397,7 @@ fn play(
 }
 
 fn load_validated_profile(profile_path: &Path) -> Result<ControlProfile> {
-    let profile = ControlProfile::load_from_path(profile_path)
-        .with_context(|| format!("failed to load profile {}", profile_path.display()))?;
+    let profile = load_profile_with_context(profile_path)?;
     profile
         .validate()
         .with_context(|| format!("profile {} is invalid", profile_path.display()))?;
@@ -367,8 +405,7 @@ fn load_validated_profile(profile_path: &Path) -> Result<ControlProfile> {
 }
 
 fn load_play_profile(profile_path: &Path) -> Result<ControlProfile> {
-    let profile = ControlProfile::load_from_path(profile_path)
-        .with_context(|| format!("failed to load profile {}", profile_path.display()))?;
+    let profile = load_profile_with_context(profile_path)?;
 
     match profile.validate() {
         Ok(()) => Ok(profile),
@@ -383,6 +420,85 @@ fn load_play_profile(profile_path: &Path) -> Result<ControlProfile> {
         Err(error) => {
             Err(error).with_context(|| format!("profile {} is invalid", profile_path.display()))
         }
+    }
+}
+
+fn load_profile_with_context(profile_path: &Path) -> Result<ControlProfile> {
+    match ControlProfile::load_from_path(profile_path) {
+        Ok(profile) => Ok(profile),
+        Err(error) => {
+            let mut context = format!("failed to load profile {}", profile_path.display());
+            if let Some(hint) = profile_error_hint(&error) {
+                context.push_str("\nHint: ");
+                context.push_str(hint);
+            }
+            Err(error).context(context)
+        }
+    }
+}
+
+fn profile_error_hint(error: &ProfileError) -> Option<&'static str> {
+    let ProfileError::Json(error) = error else {
+        return None;
+    };
+
+    let message = error.to_string();
+    if message.contains("missing field `kind`") {
+        Some("profile input and action objects are tagged; include a `kind` field such as `key`, `tap`, or `swipe`.")
+    } else if message.contains("unknown variant") {
+        Some("check `kind` values. Supported MVP input kind: `key`; supported MVP action kinds: `tap` and `swipe`.")
+    } else if message.contains("invalid type: map, expected a sequence") {
+        Some("check array fields. `bindings` must be a JSON array, and macro `steps` must be an array.")
+    } else {
+        None
+    }
+}
+
+fn profile_bindings_listing(profile: &ControlProfile) -> String {
+    let mut output = String::new();
+    output.push_str(&format!("Profile: {}\n", profile.name));
+    output.push_str(&format!("Package: {}\n", profile.package_name));
+    output.push_str(&format!("Resolution: {}\n", profile.resolution));
+    output.push_str("Bindings:\n");
+
+    if profile.bindings.is_empty() {
+        output.push_str("  (none)\n");
+    } else {
+        for binding in &profile.bindings {
+            output.push_str("  ");
+            output.push_str(&binding_description(binding));
+            output.push('\n');
+        }
+    }
+
+    output
+}
+
+fn binding_description(binding: &Binding) -> String {
+    format!(
+        "{} -> {} -> {}",
+        input_description(&binding.input),
+        binding.name,
+        action_description(&binding.action)
+    )
+}
+
+fn input_description(input: &BindingInput) -> String {
+    match input {
+        BindingInput::Key { key } => key.trim().to_owned(),
+        BindingInput::MouseButton { button } => format!("mouse_button {}", button.trim()),
+    }
+}
+
+fn action_description(action: &BindingAction) -> String {
+    match action {
+        BindingAction::Tap { point } => format!("tap {point}"),
+        BindingAction::Swipe {
+            from,
+            to,
+            duration_ms,
+        } => format!("swipe {from} to {to} ({duration_ms} ms)"),
+        unsupported => format!("unsupported {}", action_kind(unsupported)),
     }
 }
 
@@ -584,8 +700,10 @@ mod tests {
     enum InputCall {
         AdbTap(u32, u32),
         AdbSwipe(u32, u32, u32, u32, u64),
+        AdbKeyevent(u32),
         WaydroidShellTap(u32, u32),
         WaydroidShellSwipe(u32, u32, u32, u32, u64),
+        WaydroidShellKeyevent(u32),
     }
 
     #[derive(Debug, Default)]
@@ -645,6 +763,11 @@ mod tests {
             Ok(())
         }
 
+        fn adb_keyevent(&self, code: u32) -> Result<()> {
+            self.calls.borrow_mut().push(InputCall::AdbKeyevent(code));
+            Ok(())
+        }
+
         fn waydroid_shell_tap(&self, x: u32, y: u32) -> Result<()> {
             self.calls
                 .borrow_mut()
@@ -667,6 +790,13 @@ mod tests {
                 y2,
                 duration_ms,
             ));
+            Ok(())
+        }
+
+        fn waydroid_shell_keyevent(&self, code: u32) -> Result<()> {
+            self.calls
+                .borrow_mut()
+                .push(InputCall::WaydroidShellKeyevent(code));
             Ok(())
         }
     }
@@ -743,6 +873,61 @@ mod tests {
             vec![InputCall::AdbSwipe(400, 500, 800, 500, 180)]
         );
         assert_eq!(executor.device_queries.get(), 0);
+    }
+
+    #[test]
+    fn input_keyevent_dispatches_to_explicit_adb_backend() {
+        let executor = FakeInputExecutor::default();
+
+        input_keyevent(&executor, InputBackend::Adb, 3).unwrap();
+
+        assert_eq!(executor.calls(), vec![InputCall::AdbKeyevent(3)]);
+        assert_eq!(executor.device_queries.get(), 0);
+    }
+
+    #[test]
+    fn input_keyevent_dispatches_to_auto_selected_waydroid_shell_backend() {
+        let executor = FakeInputExecutor::with_device_state("offline-device", "offline");
+
+        input_keyevent(&executor, InputBackend::Auto, 4).unwrap();
+
+        assert_eq!(executor.calls(), vec![InputCall::WaydroidShellKeyevent(4)]);
+        assert_eq!(executor.device_queries.get(), 1);
+    }
+
+    #[test]
+    fn binding_description_formats_tap_binding() {
+        let binding = &ControlProfile::example().bindings[0];
+
+        assert_eq!(binding_description(binding), "f -> fire -> tap 1640,540");
+    }
+
+    #[test]
+    fn binding_description_formats_swipe_binding() {
+        let binding = &ControlProfile::example().bindings[2];
+
+        assert_eq!(
+            binding_description(binding),
+            "d -> look_right -> swipe 960,540 to 1260,540 (180 ms)"
+        );
+    }
+
+    #[test]
+    fn profile_bindings_listing_includes_metadata_and_bindings() {
+        let listing = profile_bindings_listing(&ControlProfile::example());
+
+        assert_eq!(
+            listing,
+            "\
+Profile: Shooter Basic
+Package: com.example.shooter
+Resolution: 1920x1080
+Bindings:
+  f -> fire -> tap 1640,540
+  r -> reload -> tap 1760,900
+  d -> look_right -> swipe 960,540 to 1260,540 (180 ms)
+"
+        );
     }
 
     #[test]

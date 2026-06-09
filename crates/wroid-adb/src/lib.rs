@@ -59,6 +59,15 @@ impl Adb {
             .context("failed to run adb shell input swipe")?;
         ensure_success("adb shell input swipe", &output)
     }
+
+    pub fn keyevent(&self, code: u32) -> Result<()> {
+        let output = Command::new("adb")
+            .args(["shell", "input", "keyevent"])
+            .arg(code.to_string())
+            .output()
+            .context("failed to run adb shell input keyevent")?;
+        ensure_success("adb shell input keyevent", &output)
+    }
 }
 
 pub fn is_available() -> bool {
@@ -75,6 +84,10 @@ pub fn tap(x: u32, y: u32) -> Result<()> {
 
 pub fn swipe(x1: u32, y1: u32, x2: u32, y2: u32, duration_ms: u64) -> Result<()> {
     Adb.swipe(x1, y1, x2, y2, duration_ms)
+}
+
+pub fn keyevent(code: u32) -> Result<()> {
+    Adb.keyevent(code)
 }
 
 fn parse_device_line(line: &str) -> Option<AdbDevice> {
