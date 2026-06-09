@@ -20,6 +20,7 @@ cargo run -p wroid-cli -- profile new /tmp/wroid-profile.json --name "My Game" -
 cargo run -p wroid-cli -- device info --backend waydroid-shell
 cargo run -p wroid-cli -- profile new-current /tmp/settings.json --name "Android Settings" --package com.android.settings --backend waydroid-shell --force
 cargo run -p wroid-cli -- profile registry-new-current --name "Android Settings" --package com.android.settings --backend waydroid-shell --force
+cargo run -p wroid-cli -- profile scale profiles/examples/shooter-basic.json /tmp/shooter-1050.json --width 1920 --height 1050 --force
 cargo run -p wroid-cli -- profile add-tap /tmp/wroid-profile.json --name fire --key F --x 1640 --y 540
 cargo run -p wroid-cli -- profile add-swipe /tmp/wroid-profile.json --name look_right --key D --from 960,540 --to 1260,540 --duration-ms 180
 cargo run -p wroid-cli -- profile remove-binding /tmp/wroid-profile.json fire
@@ -35,6 +36,7 @@ cargo run -p wroid-cli -- app install-apk ./game.apk --backend waydroid-shell
 cargo run -p wroid-cli -- app current --backend waydroid-shell
 cargo run -p wroid-cli -- binding run profiles/examples/shooter-basic.json fire
 cargo run -p wroid-cli -- play profiles/examples/shooter-basic.json
+cargo run -p wroid-cli -- play profiles/examples/shooter-basic.json --scale-to-current
 cargo run -p wroid-cli -- run profiles/examples/shooter-basic.json --backend waydroid-shell
 cargo run -p wroid-cli -- run profiles/examples/shooter-basic.json --backend waydroid-shell --no-launch
 cargo run -p wroid-cli -- run-profile com.android.settings --backend waydroid-shell
@@ -56,6 +58,7 @@ cargo run -p wroid-cli -- app current --backend waydroid-shell
 cargo run -p wroid-cli -- binding run profiles/examples/shooter-basic.json fire --backend auto
 cargo run -p wroid-cli -- play profiles/examples/shooter-basic.json --backend adb
 cargo run -p wroid-cli -- play profiles/examples/shooter-basic.json --backend waydroid-shell
+cargo run -p wroid-cli -- play profiles/examples/shooter-basic.json --backend waydroid-shell --scale-to-current
 cargo run -p wroid-cli -- run profiles/examples/shooter-basic.json --backend waydroid-shell
 cargo run -p wroid-cli -- run profiles/examples/shooter-basic.json --backend waydroid-shell --launch-delay-ms 2500
 cargo run -p wroid-cli -- run profiles/examples/shooter-basic.json --backend waydroid-shell --no-launch
@@ -139,6 +142,15 @@ To create a profile using the current Android surface resolution reported by `wm
 sudo target/debug/wroid device info --backend waydroid-shell
 sudo target/debug/wroid profile new-current /tmp/settings.json --name "Android Settings" --package com.android.settings --backend waydroid-shell --force
 sudo target/debug/wroid profile registry-new-current --name "Android Settings" --package com.android.settings --backend waydroid-shell --force
+sudo target/debug/wroid profile scale-current profiles/examples/shooter-basic.json /tmp/shooter-current.json --backend waydroid-shell --force
+```
+
+Existing profiles can be scaled to another Android surface resolution without changing binding names or inputs:
+
+```sh
+wroid profile scale profiles/examples/shooter-basic.json /tmp/shooter-1050.json --width 1920 --height 1050 --force
+sudo target/debug/wroid play /tmp/shooter-1050.json --backend waydroid-shell
+sudo target/debug/wroid play profiles/examples/shooter-basic.json --backend waydroid-shell --scale-to-current
 ```
 
 Profiles can be imported into the user-owned local registry at `$XDG_CONFIG_HOME/wroid/profiles/`, or `~/.config/wroid/profiles/` when `XDG_CONFIG_HOME` is not set. By default, the registry ID is the profile's `package_name`:

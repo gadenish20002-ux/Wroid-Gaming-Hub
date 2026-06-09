@@ -10,8 +10,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
 use wroid_core::{
-    Binding, BindingAction, BindingInput, ControlProfile, Point, ProfileError, Resolution,
-    ValidationError,
+    scale_profile, Binding, BindingAction, BindingInput, ControlProfile, Point, ProfileError,
+    Resolution, ValidationError,
 };
 
 const DEFAULT_LAUNCH_DELAY_MS: u64 = 1500;
@@ -50,6 +50,8 @@ enum Commands {
         profile_path: PathBuf,
         #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
         backend: InputBackend,
+        #[arg(long)]
+        scale_to_current: bool,
     },
     Run {
         profile_path: PathBuf,
@@ -59,6 +61,8 @@ enum Commands {
         launch_delay_ms: u64,
         #[arg(long)]
         no_launch: bool,
+        #[arg(long)]
+        scale_to_current: bool,
     },
     RunProfile {
         profile_id: String,
@@ -68,6 +72,8 @@ enum Commands {
         launch_delay_ms: u64,
         #[arg(long)]
         no_launch: bool,
+        #[arg(long)]
+        scale_to_current: bool,
     },
 }
 
@@ -98,6 +104,24 @@ enum ProfileCommand {
         name: String,
         #[arg(long)]
         package: String,
+        #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
+        backend: InputBackend,
+        #[arg(long)]
+        force: bool,
+    },
+    Scale {
+        input_path: PathBuf,
+        output_path: PathBuf,
+        #[arg(long)]
+        width: u32,
+        #[arg(long)]
+        height: u32,
+        #[arg(long)]
+        force: bool,
+    },
+    ScaleCurrent {
+        input_path: PathBuf,
+        output_path: PathBuf,
         #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
         backend: InputBackend,
         #[arg(long)]
@@ -231,6 +255,8 @@ enum BindingCommand {
         binding_name: String,
         #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
         backend: InputBackend,
+        #[arg(long)]
+        scale_to_current: bool,
     },
 }
 
@@ -449,6 +475,25 @@ fn main() -> Result<()> {
                 backend,
                 force,
             ),
+            ProfileCommand::Scale {
+                input_path,
+                output_path,
+                width,
+                height,
+                force,
+            } => scale_profile_file(input_path, output_path, Resolution { width, height }, force),
+            ProfileCommand::ScaleCurrent {
+                input_path,
+                output_path,
+                backend,
+                force,
+            } => scale_profile_file_to_current_screen(
+                &input_executor,
+                input_path,
+                output_path,
+                backend,
+                force,
+            ),
             ProfileCommand::AddTap {
                 path,
                 name,
@@ -522,17 +567,26 @@ fn main() -> Result<()> {
                 profile_path,
                 binding_name,
                 backend,
-            } => run_binding(&input_executor, profile_path, &binding_name, backend),
+                scale_to_current,
+            } => run_binding(
+                &input_executor,
+                profile_path,
+                &binding_name,
+                backend,
+                scale_to_current,
+            ),
         },
         Commands::Play {
             profile_path,
             backend,
-        } => play(&input_executor, profile_path, backend),
+            scale_to_current,
+        } => play(&input_executor, profile_path, backend, scale_to_current),
         Commands::Run {
             profile_path,
             backend,
             launch_delay_ms,
             no_launch,
+            scale_to_current,
         } => run(
             &input_executor,
             profile_path,
@@ -540,6 +594,7 @@ fn main() -> Result<()> {
             RunOptions {
                 launch_delay_ms,
                 no_launch,
+                scale_to_current,
             },
         ),
         Commands::RunProfile {
@@ -547,6 +602,7 @@ fn main() -> Result<()> {
             backend,
             launch_delay_ms,
             no_launch,
+            scale_to_current,
         } => run_profile(
             &input_executor,
             &profile_id,
@@ -554,6 +610,7 @@ fn main() -> Result<()> {
             RunOptions {
                 launch_delay_ms,
                 no_launch,
+                scale_to_current,
             },
         ),
     }
@@ -643,6 +700,57 @@ fn create_profile_from_current_screen(
         resolution.height,
         force,
     )
+}
+
+fn scale_profile_file(
+    input_path: PathBuf,
+    output_path: PathBuf,
+    resolution: Resolution,
+    force: bool,
+) -> Result<()> {
+    write_scaled_profile_file(input_path, output_path, resolution, force)
+}
+
+fn scale_profile_file_to_current_screen(
+    input_executor: &impl InputExecutor,
+    input_path: PathBuf,
+    output_path: PathBuf,
+    backend: InputBackend,
+    force: bool,
+) -> Result<()> {
+    let resolution = detect_device_screen(input_executor, backend)?;
+    write_scaled_profile_file(input_path, output_path, resolution, force)
+}
+
+fn write_scaled_profile_file(
+    input_path: PathBuf,
+    output_path: PathBuf,
+    resolution: Resolution,
+    force: bool,
+) -> Result<()> {
+    if resolution.width == 0 || resolution.height == 0 {
+        bail!("target resolution must be non-zero, got {resolution}");
+    }
+
+    if output_path.exists() && !force {
+        bail!(
+            "profile {} already exists; pass --force to overwrite",
+            output_path.display()
+        );
+    }
+
+    let profile = load_validated_profile(&input_path)?;
+    let scaled = scale_profile(&profile, resolution);
+    scaled
+        .validate()
+        .with_context(|| format!("scaled profile {} is invalid", output_path.display()))?;
+    save_profile(&scaled, &output_path)?;
+    println!(
+        "Scaled profile coordinates: {} -> {}",
+        profile.resolution, resolution
+    );
+    println!("wrote scaled profile: {}", output_path.display());
+    Ok(())
 }
 
 fn new_empty_control_profile(
@@ -1126,22 +1234,28 @@ fn run_binding(
     profile_path: PathBuf,
     binding_name: &str,
     backend: InputBackend,
+    scale_to_current: bool,
 ) -> Result<()> {
     let profile = load_validated_profile(&profile_path)?;
+    let selected_backend = select_input_backend(input_executor, backend);
+    let profile =
+        profile_for_execution(input_executor, profile, selected_backend, scale_to_current)?;
 
     let binding = profile
         .binding(binding_name)
         .with_context(|| format!("binding {binding_name} not found"))?;
 
     match &binding.action {
-        BindingAction::Tap { point } => input_tap(input_executor, backend, point.x, point.y),
+        BindingAction::Tap { point } => {
+            execute_tap(input_executor, selected_backend, point.x, point.y)
+        }
         BindingAction::Swipe {
             from,
             to,
             duration_ms,
-        } => input_swipe(
+        } => execute_swipe(
             input_executor,
-            backend,
+            selected_backend,
             from.x,
             from.y,
             to.x,
@@ -1158,9 +1272,12 @@ fn play(
     input_executor: &impl InputExecutor,
     profile_path: PathBuf,
     backend: InputBackend,
+    scale_to_current: bool,
 ) -> Result<()> {
     let profile = load_play_profile(&profile_path)?;
     let selected_backend = select_input_backend(input_executor, backend);
+    let profile =
+        profile_for_execution(input_executor, profile, selected_backend, scale_to_current)?;
 
     println!("Profile: {}", profile.name);
     println!("Package: {}", profile.package_name);
@@ -1175,6 +1292,12 @@ fn run(
 ) -> Result<()> {
     let profile = load_play_profile(&profile_path)?;
     let selected_backend = select_input_backend(input_executor, backend);
+    let profile = profile_for_execution(
+        input_executor,
+        profile,
+        selected_backend,
+        options.scale_to_current,
+    )?;
 
     println!("Profile: {}", profile.name);
     println!("Package: {}", profile.package_name);
@@ -1225,6 +1348,33 @@ fn run_profile(
 struct RunOptions {
     launch_delay_ms: u64,
     no_launch: bool,
+    scale_to_current: bool,
+}
+
+fn profile_for_execution(
+    input_executor: &impl InputExecutor,
+    profile: ControlProfile,
+    selected_backend: SelectedInputBackend,
+    scale_to_current: bool,
+) -> Result<ControlProfile> {
+    if !scale_to_current {
+        return Ok(profile);
+    }
+
+    let current_resolution =
+        detect_device_screen_with_selected_backend(input_executor, selected_backend)
+            .with_context(|| "failed to detect current screen size for coordinate scaling")?;
+
+    if current_resolution == profile.resolution {
+        println!("Profile resolution already matches current screen.");
+        return Ok(profile);
+    }
+
+    println!(
+        "Scaling profile coordinates: {} -> {}",
+        profile.resolution, current_resolution
+    );
+    Ok(scale_profile(&profile, current_resolution))
 }
 
 fn resolve_registered_profile_and_run(
@@ -2591,6 +2741,107 @@ mod tests {
     }
 
     #[test]
+    fn profile_scale_updates_resolution_and_coordinates() {
+        let dir = tempfile::tempdir().unwrap();
+        let input_path = dir.path().join("source.json");
+        let output_path = dir.path().join("scaled.json");
+        ControlProfile::example().save_to_path(&input_path).unwrap();
+
+        scale_profile_file(
+            input_path,
+            output_path.clone(),
+            Resolution {
+                width: 1920,
+                height: 1050,
+            },
+            false,
+        )
+        .unwrap();
+
+        let profile = ControlProfile::load_from_path(output_path).unwrap();
+        assert_eq!(profile.name, "Shooter Basic");
+        assert_eq!(profile.package_name, "com.example.shooter");
+        assert_eq!(
+            profile.resolution,
+            Resolution {
+                width: 1920,
+                height: 1050
+            }
+        );
+        assert_eq!(
+            profile.bindings[0].action,
+            BindingAction::Tap {
+                point: Point { x: 1640, y: 525 }
+            }
+        );
+        assert_eq!(
+            profile.bindings[2].action,
+            BindingAction::Swipe {
+                from: Point { x: 960, y: 525 },
+                to: Point { x: 1260, y: 525 },
+                duration_ms: 180,
+            }
+        );
+        profile.validate().unwrap();
+    }
+
+    #[test]
+    fn profile_scale_rejects_existing_output_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let input_path = dir.path().join("source.json");
+        let output_path = dir.path().join("scaled.json");
+        ControlProfile::example().save_to_path(&input_path).unwrap();
+        fs::write(&output_path, b"existing").unwrap();
+
+        let err = scale_profile_file(
+            input_path,
+            output_path,
+            Resolution {
+                width: 1920,
+                height: 1050,
+            },
+            false,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn scale_current_uses_detected_screen_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let input_path = dir.path().join("source.json");
+        let output_path = dir.path().join("scaled.json");
+        ControlProfile::example().save_to_path(&input_path).unwrap();
+        let executor = FakeInputExecutor::with_waydroid_screen(1920, 1050);
+
+        scale_profile_file_to_current_screen(
+            &executor,
+            input_path,
+            output_path.clone(),
+            InputBackend::WaydroidShell,
+            false,
+        )
+        .unwrap();
+
+        let profile = ControlProfile::load_from_path(output_path).unwrap();
+        assert_eq!(
+            profile.resolution,
+            Resolution {
+                width: 1920,
+                height: 1050
+            }
+        );
+        assert_eq!(
+            profile.bindings[0].action,
+            BindingAction::Tap {
+                point: Point { x: 1640, y: 525 }
+            }
+        );
+        assert_eq!(executor.calls(), vec![InputCall::WaydroidShellWmSize]);
+    }
+
+    #[test]
     fn profile_id_validation_accepts_supported_characters() {
         for profile_id in ["com.android.settings", "my-game", "game_1"] {
             validate_profile_id(profile_id).unwrap();
@@ -2711,6 +2962,7 @@ mod tests {
             RunOptions {
                 launch_delay_ms: 1500,
                 no_launch: false,
+                scale_to_current: false,
             },
             |path, _options| {
                 *called_path.borrow_mut() = Some(path);
@@ -2833,6 +3085,7 @@ mod tests {
             RunOptions {
                 launch_delay_ms: 2500,
                 no_launch: false,
+                scale_to_current: false,
             },
             |path, _options| {
                 *called_path.borrow_mut() = Some(path);
@@ -2899,6 +3152,7 @@ mod tests {
             backend,
             launch_delay_ms,
             no_launch,
+            scale_to_current,
         } = cli.command
         else {
             panic!("expected run command");
@@ -2908,6 +3162,7 @@ mod tests {
         assert_eq!(backend, InputBackend::Auto);
         assert_eq!(launch_delay_ms, DEFAULT_LAUNCH_DELAY_MS);
         assert!(!no_launch);
+        assert!(!scale_to_current);
     }
 
     #[test]
@@ -2989,6 +3244,138 @@ mod tests {
     }
 
     #[test]
+    fn binding_run_accepts_scale_to_current() {
+        let cli = Cli::try_parse_from([
+            "wroid",
+            "binding",
+            "run",
+            "profiles/my-game.json",
+            "fire",
+            "--backend",
+            "waydroid-shell",
+            "--scale-to-current",
+        ])
+        .unwrap();
+
+        let Commands::Binding { command } = cli.command else {
+            panic!("expected binding command");
+        };
+        let BindingCommand::Run {
+            profile_path,
+            binding_name,
+            backend,
+            scale_to_current,
+        } = command;
+
+        assert_eq!(profile_path, PathBuf::from("profiles/my-game.json"));
+        assert_eq!(binding_name, "fire");
+        assert_eq!(backend, InputBackend::WaydroidShell);
+        assert!(scale_to_current);
+    }
+
+    #[test]
+    fn run_profile_accepts_scale_to_current() {
+        let cli = Cli::try_parse_from([
+            "wroid",
+            "run-profile",
+            "com.android.settings",
+            "--backend",
+            "waydroid-shell",
+            "--scale-to-current",
+        ])
+        .unwrap();
+
+        let Commands::RunProfile {
+            profile_id,
+            backend,
+            scale_to_current,
+            ..
+        } = cli.command
+        else {
+            panic!("expected run-profile command");
+        };
+
+        assert_eq!(profile_id, "com.android.settings");
+        assert_eq!(backend, InputBackend::WaydroidShell);
+        assert!(scale_to_current);
+    }
+
+    #[test]
+    fn scale_to_current_execution_uses_scaled_coordinates() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile_path = dir.path().join("profile.json");
+        ControlProfile::example()
+            .save_to_path(&profile_path)
+            .unwrap();
+        let executor = FakeInputExecutor::with_waydroid_screen(1920, 1050);
+
+        run_binding(
+            &executor,
+            profile_path,
+            "fire",
+            InputBackend::WaydroidShell,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            executor.calls(),
+            vec![
+                InputCall::WaydroidShellWmSize,
+                InputCall::WaydroidShellTap(1640, 525)
+            ]
+        );
+    }
+
+    #[test]
+    fn execution_does_not_scale_when_flag_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile_path = dir.path().join("profile.json");
+        ControlProfile::example()
+            .save_to_path(&profile_path)
+            .unwrap();
+        let executor = FakeInputExecutor::with_waydroid_screen(1920, 1050);
+
+        run_binding(
+            &executor,
+            profile_path,
+            "fire",
+            InputBackend::WaydroidShell,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            executor.calls(),
+            vec![InputCall::WaydroidShellTap(1640, 540)]
+        );
+    }
+
+    #[test]
+    fn scale_to_current_detection_failure_does_not_execute_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile_path = dir.path().join("profile.json");
+        ControlProfile::example()
+            .save_to_path(&profile_path)
+            .unwrap();
+        let executor = FakeInputExecutor::default();
+
+        let err = run_binding(
+            &executor,
+            profile_path,
+            "fire",
+            InputBackend::WaydroidShell,
+            true,
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("failed to detect current screen size for coordinate scaling"));
+        assert_eq!(executor.calls(), vec![InputCall::WaydroidShellWmSize]);
+    }
+
+    #[test]
     fn run_workflow_launches_package_before_keymapper_setup() {
         let executor = FakeInputExecutor::default();
 
@@ -3013,6 +3400,7 @@ mod tests {
             RunOptions {
                 launch_delay_ms: 2500,
                 no_launch: false,
+                scale_to_current: false,
             },
         )
         .unwrap();
@@ -3055,6 +3443,7 @@ mod tests {
             RunOptions {
                 launch_delay_ms: 1500,
                 no_launch: false,
+                scale_to_current: false,
             },
         )
         .unwrap_err();
@@ -3095,6 +3484,7 @@ mod tests {
             RunOptions {
                 launch_delay_ms: 2500,
                 no_launch: true,
+                scale_to_current: false,
             },
         )
         .unwrap();
@@ -3130,6 +3520,7 @@ mod tests {
             RunOptions {
                 launch_delay_ms: 2500,
                 no_launch: true,
+                scale_to_current: false,
             },
         )
         .unwrap();
@@ -3145,6 +3536,7 @@ mod tests {
         let options = RunOptions {
             launch_delay_ms: 2500,
             no_launch: true,
+            scale_to_current: false,
         };
 
         resolve_registered_profile_and_run(
@@ -3190,6 +3582,7 @@ mod tests {
             RunOptions {
                 launch_delay_ms: 9999,
                 no_launch: true,
+                scale_to_current: false,
             },
         )
         .unwrap();

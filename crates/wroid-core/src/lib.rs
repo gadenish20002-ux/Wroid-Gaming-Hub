@@ -118,6 +118,10 @@ impl ControlProfile {
             ],
         }
     }
+
+    pub fn scaled_to_resolution(&self, resolution: Resolution) -> Self {
+        scale_profile(self, resolution)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,6 +236,62 @@ impl fmt::Display for Resolution {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}x{}", self.width, self.height)
     }
+}
+
+pub fn scale_point(point: Point, from_resolution: Resolution, to_resolution: Resolution) -> Point {
+    Point {
+        x: scale_axis(point.x, from_resolution.width, to_resolution.width),
+        y: scale_axis(point.y, from_resolution.height, to_resolution.height),
+    }
+}
+
+pub fn scale_action(
+    action: &BindingAction,
+    from_resolution: Resolution,
+    to_resolution: Resolution,
+) -> BindingAction {
+    match action {
+        BindingAction::Tap { point } => BindingAction::Tap {
+            point: scale_point(*point, from_resolution, to_resolution),
+        },
+        BindingAction::Swipe {
+            from,
+            to,
+            duration_ms,
+        } => BindingAction::Swipe {
+            from: scale_point(*from, from_resolution, to_resolution),
+            to: scale_point(*to, from_resolution, to_resolution),
+            duration_ms: *duration_ms,
+        },
+        BindingAction::VirtualJoystick { center, radius } => BindingAction::VirtualJoystick {
+            center: *center,
+            radius: *radius,
+        },
+        BindingAction::MouseAim { anchor } => BindingAction::MouseAim { anchor: *anchor },
+        BindingAction::Macro { steps } => BindingAction::Macro {
+            steps: steps.clone(),
+        },
+    }
+}
+
+pub fn scale_profile(profile: &ControlProfile, resolution: Resolution) -> ControlProfile {
+    let from_resolution = profile.resolution;
+    let mut scaled = profile.clone();
+    scaled.resolution = resolution;
+    for binding in &mut scaled.bindings {
+        binding.action = scale_action(&binding.action, from_resolution, resolution);
+    }
+    scaled
+}
+
+fn scale_axis(value: u32, from: u32, to: u32) -> u32 {
+    if from == 0 || to == 0 {
+        return 0;
+    }
+
+    let scaled = ((value as u128 * to as u128) + (from as u128 / 2)) / from as u128;
+    let clamped = scaled.min((to - 1) as u128);
+    clamped as u32
 }
 
 fn validate_input(input: &BindingInput, binding: &str, errors: &mut Vec<ValidationError>) {
@@ -384,5 +444,91 @@ mod tests {
         let loaded = ControlProfile::load_from_path(&path).unwrap();
 
         assert_eq!(profile, loaded);
+    }
+
+    #[test]
+    fn scale_point_scales_profile_resolution_to_current_screen() {
+        let scaled = scale_point(
+            Point { x: 1640, y: 540 },
+            Resolution {
+                width: 1920,
+                height: 1080,
+            },
+            Resolution {
+                width: 1920,
+                height: 1050,
+            },
+        );
+
+        assert_eq!(scaled, Point { x: 1640, y: 525 });
+    }
+
+    #[test]
+    fn scale_point_clamps_to_target_bounds() {
+        let scaled = scale_point(
+            Point { x: 3000, y: 3000 },
+            Resolution {
+                width: 1920,
+                height: 1080,
+            },
+            Resolution {
+                width: 1920,
+                height: 1050,
+            },
+        );
+
+        assert_eq!(scaled, Point { x: 1919, y: 1049 });
+    }
+
+    #[test]
+    fn scale_action_scales_tap_point() {
+        let scaled = scale_action(
+            &BindingAction::Tap {
+                point: Point { x: 960, y: 540 },
+            },
+            Resolution {
+                width: 1920,
+                height: 1080,
+            },
+            Resolution {
+                width: 1920,
+                height: 1050,
+            },
+        );
+
+        assert_eq!(
+            scaled,
+            BindingAction::Tap {
+                point: Point { x: 960, y: 525 }
+            }
+        );
+    }
+
+    #[test]
+    fn scale_action_scales_swipe_points() {
+        let scaled = scale_action(
+            &BindingAction::Swipe {
+                from: Point { x: 960, y: 540 },
+                to: Point { x: 1260, y: 540 },
+                duration_ms: 180,
+            },
+            Resolution {
+                width: 1920,
+                height: 1080,
+            },
+            Resolution {
+                width: 1920,
+                height: 1050,
+            },
+        );
+
+        assert_eq!(
+            scaled,
+            BindingAction::Swipe {
+                from: Point { x: 960, y: 525 },
+                to: Point { x: 1260, y: 525 },
+                duration_ms: 180,
+            }
+        );
     }
 }
