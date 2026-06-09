@@ -53,6 +53,17 @@ enum Commands {
         backend: InputBackend,
         #[arg(long, default_value_t = DEFAULT_LAUNCH_DELAY_MS)]
         launch_delay_ms: u64,
+        #[arg(long)]
+        no_launch: bool,
+    },
+    RunProfile {
+        profile_id: String,
+        #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
+        backend: InputBackend,
+        #[arg(long, default_value_t = DEFAULT_LAUNCH_DELAY_MS)]
+        launch_delay_ms: u64,
+        #[arg(long)]
+        no_launch: bool,
     },
 }
 
@@ -107,6 +118,20 @@ enum ProfileCommand {
     },
     ListBindings {
         profile_path: PathBuf,
+    },
+    Import {
+        path: PathBuf,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        force: bool,
+    },
+    List,
+    Path {
+        profile_id: String,
+    },
+    Show {
+        profile_id: String,
     },
 }
 
@@ -366,6 +391,10 @@ fn main() -> Result<()> {
                 remove_binding(path, &binding_name)
             }
             ProfileCommand::ListBindings { profile_path } => list_bindings(profile_path),
+            ProfileCommand::Import { path, id, force } => import_profile(path, id, force),
+            ProfileCommand::List => list_profiles(),
+            ProfileCommand::Path { profile_id } => print_profile_path(&profile_id),
+            ProfileCommand::Show { profile_id } => show_profile(&profile_id),
         },
         Commands::Input { command } => match command {
             InputCommand::Tap { x, y, backend } => input_tap(&input_executor, backend, x, y),
@@ -407,7 +436,30 @@ fn main() -> Result<()> {
             profile_path,
             backend,
             launch_delay_ms,
-        } => run(&input_executor, profile_path, backend, launch_delay_ms),
+            no_launch,
+        } => run(
+            &input_executor,
+            profile_path,
+            backend,
+            RunOptions {
+                launch_delay_ms,
+                no_launch,
+            },
+        ),
+        Commands::RunProfile {
+            profile_id,
+            backend,
+            launch_delay_ms,
+            no_launch,
+        } => run_profile(
+            &input_executor,
+            &profile_id,
+            backend,
+            RunOptions {
+                launch_delay_ms,
+                no_launch,
+            },
+        ),
     }
 }
 
@@ -557,6 +609,36 @@ fn remove_binding(path: PathBuf, binding_name: &str) -> Result<()> {
 fn list_bindings(profile_path: PathBuf) -> Result<()> {
     let profile = load_validated_profile(&profile_path)?;
     write_stdout(&profile_bindings_listing(&profile))
+}
+
+fn import_profile(source_path: PathBuf, profile_id: Option<String>, force: bool) -> Result<()> {
+    let registry_dir = profile_registry_dir()?;
+    let imported =
+        import_profile_to_registry(&source_path, profile_id.as_deref(), force, &registry_dir)?;
+
+    println!("Imported profile:");
+    println!("  ID: {}", imported.id);
+    println!("  Path: {}", imported.path.display());
+    Ok(())
+}
+
+fn list_profiles() -> Result<()> {
+    let registry_dir = profile_registry_dir()?;
+    write_stdout(&profile_registry_listing(&registry_dir)?)
+}
+
+fn print_profile_path(profile_id: &str) -> Result<()> {
+    let path = profile_registry_file_path(profile_id)?;
+    println!("{}", path.display());
+    Ok(())
+}
+
+fn show_profile(profile_id: &str) -> Result<()> {
+    let registry_dir = profile_registry_dir()?;
+    write_stdout(&registered_profile_bindings_listing(
+        profile_id,
+        &registry_dir,
+    )?)
 }
 
 fn input_tap(
@@ -792,14 +874,18 @@ fn run(
     input_executor: &impl InputExecutor,
     profile_path: PathBuf,
     backend: InputBackend,
-    launch_delay_ms: u64,
+    options: RunOptions,
 ) -> Result<()> {
     let profile = load_play_profile(&profile_path)?;
     let selected_backend = select_input_backend(input_executor, backend);
 
     println!("Profile: {}", profile.name);
     println!("Package: {}", profile.package_name);
-    println!("Launching package {} ...", profile.package_name);
+    if options.no_launch {
+        println!("Skipping app launch (--no-launch).");
+    } else {
+        println!("Launching package {} ...", profile.package_name);
+    }
     io::stdout().flush().context("failed to flush stdout")?;
 
     let launch_context = RunLaunchContext::current();
@@ -818,18 +904,58 @@ fn run(
             println!("Starting keymapper ...");
             start_interactive_keymapper(input_executor, &profile, selected_backend)
         },
-        launch_delay_ms,
+        options,
     )
+}
+
+fn run_profile(
+    input_executor: &impl InputExecutor,
+    profile_id: &str,
+    backend: InputBackend,
+    options: RunOptions,
+) -> Result<()> {
+    let registry_dir = profile_registry_dir()?;
+    resolve_registered_profile_and_run(
+        profile_id,
+        &registry_dir,
+        backend,
+        options,
+        |path, options| run(input_executor, path, backend, options),
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RunOptions {
+    launch_delay_ms: u64,
+    no_launch: bool,
+}
+
+fn resolve_registered_profile_and_run(
+    profile_id: &str,
+    registry_dir: &Path,
+    backend: InputBackend,
+    options: RunOptions,
+    run_profile_path: impl FnOnce(PathBuf, RunOptions) -> Result<()>,
+) -> Result<()> {
+    let profile_path = registry_profile_file_path(registry_dir, profile_id)?;
+    run_profile_path(profile_path, options).with_context(|| {
+        format!(
+            "failed to run registered profile {profile_id} with backend {backend}, launch delay {} ms, no-launch {}",
+            options.launch_delay_ms, options.no_launch
+        )
+    })
 }
 
 fn run_game_workflow_steps(
     launch_package: impl FnOnce() -> Result<()>,
     wait_for_launch: impl FnOnce(Duration),
     start_keymapper: impl FnOnce() -> Result<()>,
-    launch_delay_ms: u64,
+    options: RunOptions,
 ) -> Result<()> {
-    launch_package()?;
-    wait_for_launch(Duration::from_millis(launch_delay_ms));
+    if !options.no_launch {
+        launch_package()?;
+        wait_for_launch(Duration::from_millis(options.launch_delay_ms));
+    }
     start_keymapper()
 }
 
@@ -932,7 +1058,7 @@ fn waydroid_sudo_user_launch_error(package_name: &str, profile_path: &Path, user
         "failed to launch Android package {package_name} as {user} via waydroid-shell. \
 Waydroid app launch needs the original desktop user's DBus session. Try launching the app first with: \
 target/debug/wroid app launch {package_name} --backend waydroid-shell; \
-then start the keymapper with: sudo target/debug/wroid play {} --backend waydroid-shell",
+then start the keymapper with: sudo target/debug/wroid run {} --backend waydroid-shell --no-launch",
         profile_path.display()
     )
 }
@@ -1035,6 +1161,237 @@ fn load_profile_with_context(profile_path: &Path) -> Result<ControlProfile> {
             Err(error).context(context)
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ImportedProfile {
+    id: String,
+    path: PathBuf,
+}
+
+fn import_profile_to_registry(
+    source_path: &Path,
+    profile_id: Option<&str>,
+    force: bool,
+    registry_dir: &Path,
+) -> Result<ImportedProfile> {
+    let profile = load_validated_profile(source_path)?;
+    let id = profile_id.unwrap_or(&profile.package_name);
+    validate_profile_id(id)?;
+
+    let target_path = registry_profile_file_path(registry_dir, id)?;
+    if target_path.exists() && !force {
+        bail!(
+            "profile {} already exists; pass --force to overwrite",
+            target_path.display()
+        );
+    }
+
+    save_profile(&profile, &target_path)?;
+    Ok(ImportedProfile {
+        id: id.to_owned(),
+        path: target_path,
+    })
+}
+
+fn profile_registry_listing(registry_dir: &Path) -> Result<String> {
+    if !registry_dir.exists() {
+        return Ok(empty_profile_registry_message(registry_dir));
+    }
+
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(registry_dir)
+        .with_context(|| format!("failed to read profile registry {}", registry_dir.display()))?
+    {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to read an entry in profile registry {}",
+                registry_dir.display()
+            )
+        })?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) == Some("json") {
+            entries.push(path);
+        }
+    }
+    entries.sort();
+
+    if entries.is_empty() {
+        return Ok(empty_profile_registry_message(registry_dir));
+    }
+
+    let mut output = String::new();
+    for path in entries {
+        let Some(profile_id) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            output.push_str(&format!(
+                "warning: skipped profile with non-UTF-8 path: {}\n",
+                path.display()
+            ));
+            continue;
+        };
+
+        if let Err(error) = validate_profile_id(profile_id) {
+            output.push_str(&format!(
+                "warning: skipped invalid profile ID from {}: {error:#}\n",
+                path.display()
+            ));
+            continue;
+        }
+
+        match load_validated_profile(&path) {
+            Ok(profile) => {
+                output.push_str(&format!(
+                    "{} -> {} -> {} -> {}\n",
+                    profile_id, profile.name, profile.package_name, profile.resolution
+                ));
+            }
+            Err(error) => {
+                output.push_str(&format!(
+                    "warning: skipped invalid profile {}: {error:#}\n",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    Ok(output)
+}
+
+fn empty_profile_registry_message(registry_dir: &Path) -> String {
+    format!(
+        "No profiles found in {}. Import one with `wroid profile import <path>`.\n",
+        registry_dir.display()
+    )
+}
+
+fn registered_profile_bindings_listing(profile_id: &str, registry_dir: &Path) -> Result<String> {
+    let path = registry_profile_file_path(registry_dir, profile_id)?;
+    let profile = load_validated_profile(&path)?;
+    Ok(profile_bindings_listing(&profile))
+}
+
+fn profile_registry_file_path(profile_id: &str) -> Result<PathBuf> {
+    let registry_dir = profile_registry_dir()?;
+    registry_profile_file_path(&registry_dir, profile_id)
+}
+
+fn registry_profile_file_path(registry_dir: &Path, profile_id: &str) -> Result<PathBuf> {
+    validate_profile_id(profile_id)?;
+    Ok(registry_dir.join(format!("{profile_id}.json")))
+}
+
+fn validate_profile_id(profile_id: &str) -> Result<()> {
+    if profile_id.is_empty() {
+        bail!("profile ID must not be empty");
+    }
+
+    if !profile_id.chars().all(is_profile_id_char) {
+        bail!(
+            "profile ID {profile_id:?} is invalid; use only ASCII letters, digits, dot, dash, and underscore"
+        );
+    }
+
+    Ok(())
+}
+
+fn is_profile_id_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+}
+
+fn profile_registry_dir() -> Result<PathBuf> {
+    profile_registry_dir_from_env(
+        env_path("XDG_CONFIG_HOME"),
+        env_path("HOME"),
+        env_value("SUDO_USER"),
+        env_value("SUDO_UID"),
+        effective_uid(),
+        system_user_home_dir,
+    )
+}
+
+fn profile_registry_dir_from_env(
+    xdg_config_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+    sudo_user: Option<String>,
+    sudo_uid: Option<String>,
+    effective_uid: u32,
+    user_home_dir: impl FnOnce(&str) -> Option<PathBuf>,
+) -> Result<PathBuf> {
+    if let Some(xdg_config_home) = xdg_config_home.filter(|path| !path.as_os_str().is_empty()) {
+        return Ok(xdg_config_home.join("wroid").join("profiles"));
+    }
+
+    if let Some(sudo_user) =
+        original_sudo_user_for_registry(effective_uid, sudo_user.as_deref(), sudo_uid.as_deref())
+    {
+        let home =
+            user_home_dir(sudo_user).unwrap_or_else(|| PathBuf::from("/home").join(sudo_user));
+        return Ok(home.join(".config").join("wroid").join("profiles"));
+    }
+
+    if let Some(home) = home.filter(|path| !path.as_os_str().is_empty()) {
+        return Ok(home.join(".config").join("wroid").join("profiles"));
+    }
+
+    bail!("could not determine profile registry directory; set XDG_CONFIG_HOME or HOME")
+}
+
+fn original_sudo_user_for_registry<'a>(
+    effective_uid: u32,
+    sudo_user: Option<&'a str>,
+    sudo_uid: Option<&str>,
+) -> Option<&'a str> {
+    if effective_uid != 0 {
+        return None;
+    }
+
+    let sudo_uid = sudo_uid.map(str::trim).filter(|uid| !uid.is_empty())?;
+    let sudo_user = sudo_user.map(str::trim).filter(|user| {
+        !user.is_empty()
+            && *user != "root"
+            && !user.contains('/')
+            && !user.contains('\\')
+            && !user.contains('\0')
+    })?;
+
+    if sudo_uid == "0" {
+        return None;
+    }
+
+    Some(sudo_user)
+}
+
+#[cfg(unix)]
+fn system_user_home_dir(user: &str) -> Option<PathBuf> {
+    fs::read_to_string("/etc/passwd")
+        .ok()?
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .find_map(|line| {
+            let mut fields = line.split(':');
+            let name = fields.next()?;
+            if name != user {
+                return None;
+            }
+
+            let home = fields.nth(4)?;
+            if home.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(home))
+            }
+        })
+}
+
+#[cfg(not(unix))]
+fn system_user_home_dir(_user: &str) -> Option<PathBuf> {
+    None
+}
+
+fn env_path(key: &str) -> Option<PathBuf> {
+    env::var_os(key)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 fn save_profile(profile: &ControlProfile, path: &Path) -> Result<()> {
@@ -1709,6 +2066,263 @@ mod tests {
     }
 
     #[test]
+    fn profile_id_validation_accepts_supported_characters() {
+        for profile_id in ["com.android.settings", "my-game", "game_1"] {
+            validate_profile_id(profile_id).unwrap();
+        }
+    }
+
+    #[test]
+    fn profile_id_validation_rejects_unsafe_or_empty_values() {
+        for profile_id in ["../evil", "evil/path", "", "name with spaces"] {
+            let err = validate_profile_id(profile_id).unwrap_err();
+            assert!(
+                err.to_string().contains("profile ID"),
+                "unexpected error for {profile_id:?}: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_registry_dir_uses_xdg_config_home_when_set() {
+        let path = profile_registry_dir_from_env(
+            Some(PathBuf::from("/tmp/xdg-config")),
+            Some(PathBuf::from("/root")),
+            Some("supergut".to_owned()),
+            Some("1000".to_owned()),
+            0,
+            |_| Some(PathBuf::from("/home/supergut")),
+        )
+        .unwrap();
+
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/xdg-config")
+                .join("wroid")
+                .join("profiles")
+        );
+    }
+
+    #[test]
+    fn profile_registry_dir_falls_back_to_current_user_home_config() {
+        let path = profile_registry_dir_from_env(
+            None,
+            Some(PathBuf::from("/tmp/home")),
+            None,
+            None,
+            1000,
+            |_| None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/home")
+                .join(".config")
+                .join("wroid")
+                .join("profiles")
+        );
+    }
+
+    #[test]
+    fn profile_registry_dir_uses_original_sudo_user_home_when_root() {
+        let path = profile_registry_dir_from_env(
+            None,
+            Some(PathBuf::from("/root")),
+            Some("supergut".to_owned()),
+            Some("1000".to_owned()),
+            0,
+            |_| None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            path,
+            PathBuf::from("/home/supergut")
+                .join(".config")
+                .join("wroid")
+                .join("profiles")
+        );
+    }
+
+    #[test]
+    fn profile_registry_dir_prefers_resolved_sudo_user_home() {
+        let path = profile_registry_dir_from_env(
+            None,
+            Some(PathBuf::from("/root")),
+            Some("alice".to_owned()),
+            Some("1001".to_owned()),
+            0,
+            |_| Some(PathBuf::from("/var/home/alice")),
+        )
+        .unwrap();
+
+        assert_eq!(
+            path,
+            PathBuf::from("/var/home/alice")
+                .join(".config")
+                .join("wroid")
+                .join("profiles")
+        );
+    }
+
+    #[test]
+    fn run_profile_resolves_original_user_registry_path_under_sudo() {
+        let registry_dir = profile_registry_dir_from_env(
+            None,
+            Some(PathBuf::from("/root")),
+            Some("supergut".to_owned()),
+            Some("1000".to_owned()),
+            0,
+            |_| None,
+        )
+        .unwrap();
+        let called_path = RefCell::new(None);
+
+        resolve_registered_profile_and_run(
+            "com.android.settings",
+            &registry_dir,
+            InputBackend::WaydroidShell,
+            RunOptions {
+                launch_delay_ms: 1500,
+                no_launch: false,
+            },
+            |path, _options| {
+                *called_path.borrow_mut() = Some(path);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            called_path.into_inner(),
+            Some(
+                PathBuf::from("/home/supergut")
+                    .join(".config")
+                    .join("wroid")
+                    .join("profiles")
+                    .join("com.android.settings.json")
+            )
+        );
+    }
+
+    #[test]
+    fn import_profile_writes_default_id_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path().join("source.json");
+        let registry_dir = dir.path().join("registry");
+        ControlProfile::example()
+            .save_to_path(&source_path)
+            .unwrap();
+
+        let imported =
+            import_profile_to_registry(&source_path, None, false, &registry_dir).unwrap();
+
+        assert_eq!(imported.id, "com.example.shooter");
+        assert_eq!(imported.path, registry_dir.join("com.example.shooter.json"));
+        assert!(imported.path.exists());
+        assert_eq!(
+            ControlProfile::load_from_path(imported.path).unwrap(),
+            ControlProfile::example()
+        );
+    }
+
+    #[test]
+    fn import_profile_refuses_overwrite_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path().join("source.json");
+        let registry_dir = dir.path().join("registry");
+        ControlProfile::example()
+            .save_to_path(&source_path)
+            .unwrap();
+        import_profile_to_registry(&source_path, None, false, &registry_dir).unwrap();
+
+        let err = import_profile_to_registry(&source_path, None, false, &registry_dir).unwrap_err();
+
+        assert!(err.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn list_profiles_handles_empty_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_dir = dir.path().join("registry");
+        fs::create_dir_all(&registry_dir).unwrap();
+
+        let listing = profile_registry_listing(&registry_dir).unwrap();
+
+        assert!(listing.contains("No profiles found"));
+        assert!(listing.contains("wroid profile import <path>"));
+    }
+
+    #[test]
+    fn list_profiles_prints_valid_profiles_and_warns_for_invalid_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_dir = dir.path().join("registry");
+        fs::create_dir_all(&registry_dir).unwrap();
+        let mut profile = ControlProfile::example();
+        profile.name = "Settings".to_owned();
+        profile.package_name = "com.android.settings".to_owned();
+        profile
+            .save_to_path(registry_dir.join("com.android.settings.json"))
+            .unwrap();
+        fs::write(registry_dir.join("broken.json"), b"{ not json").unwrap();
+
+        let listing = profile_registry_listing(&registry_dir).unwrap();
+
+        assert!(listing
+            .contains("com.android.settings -> Settings -> com.android.settings -> 1920x1080\n"));
+        assert!(listing.contains("warning: skipped invalid profile"));
+        assert!(listing.contains("broken.json"));
+    }
+
+    #[test]
+    fn show_profile_resolves_profile_by_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_dir = dir.path().join("registry");
+        fs::create_dir_all(&registry_dir).unwrap();
+        let mut profile = ControlProfile::example();
+        profile.name = "Settings".to_owned();
+        profile.package_name = "com.android.settings".to_owned();
+        profile
+            .save_to_path(registry_dir.join("com.android.settings.json"))
+            .unwrap();
+
+        let listing =
+            registered_profile_bindings_listing("com.android.settings", &registry_dir).unwrap();
+
+        assert!(listing.contains("Profile: Settings\n"));
+        assert!(listing.contains("Package: com.android.settings\n"));
+        assert!(listing.contains("Resolution: 1920x1080\n"));
+    }
+
+    #[test]
+    fn run_profile_resolves_registered_path_for_existing_run_workflow() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_dir = dir.path().join("registry");
+        let called_path = RefCell::new(None);
+
+        resolve_registered_profile_and_run(
+            "com.android.settings",
+            &registry_dir,
+            InputBackend::WaydroidShell,
+            RunOptions {
+                launch_delay_ms: 2500,
+                no_launch: false,
+            },
+            |path, _options| {
+                *called_path.borrow_mut() = Some(path);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            called_path.into_inner(),
+            Some(registry_dir.join("com.android.settings.json"))
+        );
+    }
+
+    #[test]
     fn write_output_treats_broken_pipe_as_success() {
         let mut writer = BrokenPipeWriter;
 
@@ -1759,6 +2373,7 @@ mod tests {
             profile_path,
             backend,
             launch_delay_ms,
+            no_launch,
         } = cli.command
         else {
             panic!("expected run command");
@@ -1767,6 +2382,7 @@ mod tests {
         assert_eq!(profile_path, PathBuf::from("profiles/my-game.json"));
         assert_eq!(backend, InputBackend::Auto);
         assert_eq!(launch_delay_ms, DEFAULT_LAUNCH_DELAY_MS);
+        assert!(!no_launch);
     }
 
     #[test]
@@ -1785,6 +2401,7 @@ mod tests {
         let Commands::Run {
             backend,
             launch_delay_ms,
+            no_launch,
             ..
         } = cli.command
         else {
@@ -1793,6 +2410,57 @@ mod tests {
 
         assert_eq!(backend, InputBackend::WaydroidShell);
         assert_eq!(launch_delay_ms, 2500);
+        assert!(!no_launch);
+    }
+
+    #[test]
+    fn run_command_accepts_no_launch() {
+        let cli = Cli::try_parse_from([
+            "wroid",
+            "run",
+            "profiles/my-game.json",
+            "--backend",
+            "waydroid-shell",
+            "--no-launch",
+        ])
+        .unwrap();
+
+        let Commands::Run {
+            backend, no_launch, ..
+        } = cli.command
+        else {
+            panic!("expected run command");
+        };
+
+        assert_eq!(backend, InputBackend::WaydroidShell);
+        assert!(no_launch);
+    }
+
+    #[test]
+    fn run_profile_command_accepts_no_launch() {
+        let cli = Cli::try_parse_from([
+            "wroid",
+            "run-profile",
+            "com.android.settings",
+            "--backend",
+            "waydroid-shell",
+            "--no-launch",
+        ])
+        .unwrap();
+
+        let Commands::RunProfile {
+            profile_id,
+            backend,
+            no_launch,
+            ..
+        } = cli.command
+        else {
+            panic!("expected run-profile command");
+        };
+
+        assert_eq!(profile_id, "com.android.settings");
+        assert_eq!(backend, InputBackend::WaydroidShell);
+        assert!(no_launch);
     }
 
     #[test]
@@ -1817,7 +2485,10 @@ mod tests {
                 executor.calls.borrow_mut().push(InputCall::StartKeymapper);
                 Ok(())
             },
-            2500,
+            RunOptions {
+                launch_delay_ms: 2500,
+                no_launch: false,
+            },
         )
         .unwrap();
 
@@ -1856,7 +2527,10 @@ mod tests {
                 executor.calls.borrow_mut().push(InputCall::StartKeymapper);
                 Ok(())
             },
-            1500,
+            RunOptions {
+                launch_delay_ms: 1500,
+                no_launch: false,
+            },
         )
         .unwrap_err();
 
@@ -1869,6 +2543,136 @@ mod tests {
                 "com.example.game".to_owned()
             )]
         );
+    }
+
+    #[test]
+    fn run_workflow_with_no_launch_does_not_call_app_launch() {
+        let executor = FakeInputExecutor::default();
+
+        run_game_workflow_steps(
+            || {
+                launch_profile_package(
+                    &executor,
+                    SelectedInputBackend::WaydroidShell,
+                    "com.example.game",
+                )
+            },
+            |duration| {
+                executor
+                    .calls
+                    .borrow_mut()
+                    .push(InputCall::LaunchDelay(duration.as_millis()));
+            },
+            || {
+                executor.calls.borrow_mut().push(InputCall::StartKeymapper);
+                Ok(())
+            },
+            RunOptions {
+                launch_delay_ms: 2500,
+                no_launch: true,
+            },
+        )
+        .unwrap();
+
+        assert!(!executor
+            .calls()
+            .iter()
+            .any(|call| matches!(call, InputCall::WaydroidAppLaunchPackage(_))));
+    }
+
+    #[test]
+    fn run_workflow_with_no_launch_starts_keymapper() {
+        let executor = FakeInputExecutor::default();
+
+        run_game_workflow_steps(
+            || {
+                launch_profile_package(
+                    &executor,
+                    SelectedInputBackend::WaydroidShell,
+                    "com.example.game",
+                )
+            },
+            |duration| {
+                executor
+                    .calls
+                    .borrow_mut()
+                    .push(InputCall::LaunchDelay(duration.as_millis()));
+            },
+            || {
+                executor.calls.borrow_mut().push(InputCall::StartKeymapper);
+                Ok(())
+            },
+            RunOptions {
+                launch_delay_ms: 2500,
+                no_launch: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(executor.calls(), vec![InputCall::StartKeymapper]);
+    }
+
+    #[test]
+    fn run_profile_passes_no_launch_into_existing_workflow() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_dir = dir.path().join("registry");
+        let called = RefCell::new(None);
+        let options = RunOptions {
+            launch_delay_ms: 2500,
+            no_launch: true,
+        };
+
+        resolve_registered_profile_and_run(
+            "com.android.settings",
+            &registry_dir,
+            InputBackend::WaydroidShell,
+            options,
+            |path, received_options| {
+                *called.borrow_mut() = Some((path, received_options));
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            called.into_inner(),
+            Some((registry_dir.join("com.android.settings.json"), options))
+        );
+    }
+
+    #[test]
+    fn run_workflow_ignores_launch_delay_when_no_launch_is_set() {
+        let executor = FakeInputExecutor::default();
+
+        run_game_workflow_steps(
+            || {
+                launch_profile_package(
+                    &executor,
+                    SelectedInputBackend::WaydroidShell,
+                    "com.example.game",
+                )
+            },
+            |duration| {
+                executor
+                    .calls
+                    .borrow_mut()
+                    .push(InputCall::LaunchDelay(duration.as_millis()));
+            },
+            || {
+                executor.calls.borrow_mut().push(InputCall::StartKeymapper);
+                Ok(())
+            },
+            RunOptions {
+                launch_delay_ms: 9999,
+                no_launch: true,
+            },
+        )
+        .unwrap();
+
+        assert!(!executor
+            .calls()
+            .iter()
+            .any(|call| matches!(call, InputCall::LaunchDelay(_))));
     }
 
     #[test]
@@ -2029,8 +2833,9 @@ mod tests {
         assert!(message.contains("DBus session"));
         assert!(message
             .contains("target/debug/wroid app launch com.example.game --backend waydroid-shell"));
-        assert!(message
-            .contains("sudo target/debug/wroid play /tmp/game.json --backend waydroid-shell"));
+        assert!(message.contains(
+            "sudo target/debug/wroid run /tmp/game.json --backend waydroid-shell --no-launch"
+        ));
         assert_eq!(
             executor.calls(),
             vec![InputCall::WaydroidAppLaunchPackageAsUser {
