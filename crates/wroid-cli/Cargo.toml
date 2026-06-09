@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+crossterm.workspace = true
 wroid-adb = { path = "../wroid-adb" }
 wroid-core = { path = "../wroid-core" }
 wroid-waydroid = { path = "../wroid-waydroid" }

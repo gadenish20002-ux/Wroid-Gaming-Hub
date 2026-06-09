@@ -1,5 +1,6 @@
 {
   "name": "Shooter Basic",
+  "package_name": "com.example.shooter",
   "resolution": {
     "width": 1920,
     "height": 1080
@@ -8,8 +9,8 @@
     {
       "name": "fire",
       "input": {
-        "kind": "mouse_button",
-        "button": "left"
+        "kind": "key",
+        "key": "f"
       },
       "action": {
         "kind": "tap",

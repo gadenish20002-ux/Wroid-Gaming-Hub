@@ -1,9 +1,12 @@
 use std::fmt;
-use std::path::PathBuf;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use wroid_core::{BindingAction, ControlProfile};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::terminal;
+use wroid_core::{Binding, BindingAction, BindingInput, ControlProfile, ValidationError};
 
 #[derive(Debug, Parser)]
 #[command(name = "wroid", about = "Wroid Gaming Hub CLI")]
@@ -26,6 +29,11 @@ enum Commands {
     Binding {
         #[command(subcommand)]
         command: BindingCommand,
+    },
+    Play {
+        profile_path: PathBuf,
+        #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
+        backend: InputBackend,
     },
 }
 
@@ -86,6 +94,15 @@ impl fmt::Display for InputBackend {
 enum SelectedInputBackend {
     Adb,
     WaydroidShell,
+}
+
+impl fmt::Display for SelectedInputBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Adb => write!(f, "adb"),
+            Self::WaydroidShell => write!(f, "waydroid-shell"),
+        }
+    }
 }
 
 trait InputExecutor {
@@ -163,6 +180,10 @@ fn main() -> Result<()> {
                 backend,
             } => run_binding(&input_executor, profile_path, &binding_name, backend),
         },
+        Commands::Play {
+            profile_path,
+            backend,
+        } => play(&input_executor, profile_path, backend),
     }
 }
 
@@ -188,11 +209,7 @@ fn doctor() -> Result<()> {
 }
 
 fn validate_profile(path: PathBuf) -> Result<()> {
-    let profile = ControlProfile::load_from_path(&path)
-        .with_context(|| format!("failed to load profile {}", path.display()))?;
-    profile
-        .validate()
-        .with_context(|| format!("profile {} is invalid", path.display()))?;
+    load_validated_profile(&path)?;
     println!("valid profile: {}", path.display());
     Ok(())
 }
@@ -267,11 +284,7 @@ fn run_binding(
     binding_name: &str,
     backend: InputBackend,
 ) -> Result<()> {
-    let profile = ControlProfile::load_from_path(&profile_path)
-        .with_context(|| format!("failed to load profile {}", profile_path.display()))?;
-    profile
-        .validate()
-        .with_context(|| format!("profile {} is invalid", profile_path.display()))?;
+    let profile = load_validated_profile(&profile_path)?;
 
     let binding = profile
         .binding(binding_name)
@@ -298,6 +311,258 @@ fn run_binding(
     }
 }
 
+fn play(
+    input_executor: &impl InputExecutor,
+    profile_path: PathBuf,
+    backend: InputBackend,
+) -> Result<()> {
+    let profile = load_play_profile(&profile_path)?;
+    let selected_backend = select_input_backend(input_executor, backend);
+
+    println!("Profile: {}", profile.name);
+    println!("Package: {}", profile.package_name);
+    println!("Backend: {}", selected_backend);
+    println!();
+    print_keyboard_bindings(&profile);
+    println!();
+    println!("Press a mapped key to run its binding. Press Esc or Ctrl+C to exit.");
+    io::stdout().flush().context("failed to flush stdout")?;
+
+    let raw_mode = RawModeGuard::enable()?;
+
+    loop {
+        let event = event::read().context("failed to read terminal input")?;
+        let Event::Key(key_event) = event else {
+            continue;
+        };
+
+        if should_exit_key(key_event) {
+            break;
+        }
+
+        let Some(key_name) = key_event_name(key_event) else {
+            continue;
+        };
+
+        let Some(binding) = resolve_key_binding(&profile.bindings, &key_name) else {
+            continue;
+        };
+
+        execute_interactive_binding(input_executor, selected_backend, binding)?;
+        io::stdout().flush().context("failed to flush stdout")?;
+    }
+
+    drop(raw_mode);
+    println!();
+    Ok(())
+}
+
+fn load_validated_profile(profile_path: &Path) -> Result<ControlProfile> {
+    let profile = ControlProfile::load_from_path(profile_path)
+        .with_context(|| format!("failed to load profile {}", profile_path.display()))?;
+    profile
+        .validate()
+        .with_context(|| format!("profile {} is invalid", profile_path.display()))?;
+    Ok(profile)
+}
+
+fn load_play_profile(profile_path: &Path) -> Result<ControlProfile> {
+    let profile = ControlProfile::load_from_path(profile_path)
+        .with_context(|| format!("failed to load profile {}", profile_path.display()))?;
+
+    match profile.validate() {
+        Ok(()) => Ok(profile),
+        Err(error)
+            if error
+                .errors
+                .iter()
+                .all(|error| matches!(error, ValidationError::UnsupportedAction { .. })) =>
+        {
+            Ok(profile)
+        }
+        Err(error) => {
+            Err(error).with_context(|| format!("profile {} is invalid", profile_path.display()))
+        }
+    }
+}
+
+fn print_keyboard_bindings(profile: &ControlProfile) {
+    println!("Keyboard bindings:");
+    let mut printed = false;
+
+    for binding in keyboard_bindings(&profile.bindings) {
+        if let BindingInput::Key { key } = &binding.input {
+            println!("  {} -> {}", display_key(key), binding.name);
+            printed = true;
+        }
+    }
+
+    if !printed {
+        println!("  (none)");
+    }
+}
+
+fn keyboard_bindings(bindings: &[Binding]) -> impl Iterator<Item = &Binding> {
+    bindings
+        .iter()
+        .filter(|binding| matches!(binding.input, BindingInput::Key { .. }))
+}
+
+fn resolve_key_binding<'a>(bindings: &'a [Binding], key: &str) -> Option<&'a Binding> {
+    let normalized_key = normalize_key(key);
+    keyboard_bindings(bindings).find(|binding| {
+        let BindingInput::Key { key } = &binding.input else {
+            return false;
+        };
+        normalize_key(key) == normalized_key
+    })
+}
+
+fn normalize_key(key: &str) -> String {
+    key.trim().to_lowercase()
+}
+
+fn display_key(key: &str) -> String {
+    let trimmed = key.trim();
+    if trimmed.chars().count() == 1 {
+        trimmed.to_uppercase()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn key_event_name(key_event: KeyEvent) -> Option<String> {
+    match key_event.code {
+        KeyCode::Char(character) => Some(character.to_string()),
+        KeyCode::Enter => Some("enter".to_owned()),
+        KeyCode::Tab => Some("tab".to_owned()),
+        KeyCode::BackTab => Some("backtab".to_owned()),
+        KeyCode::Backspace => Some("backspace".to_owned()),
+        KeyCode::Delete => Some("delete".to_owned()),
+        KeyCode::Insert => Some("insert".to_owned()),
+        KeyCode::Home => Some("home".to_owned()),
+        KeyCode::End => Some("end".to_owned()),
+        KeyCode::PageUp => Some("pageup".to_owned()),
+        KeyCode::PageDown => Some("pagedown".to_owned()),
+        KeyCode::Up => Some("up".to_owned()),
+        KeyCode::Down => Some("down".to_owned()),
+        KeyCode::Left => Some("left".to_owned()),
+        KeyCode::Right => Some("right".to_owned()),
+        KeyCode::F(number) => Some(format!("f{number}")),
+        KeyCode::Esc
+        | KeyCode::Null
+        | KeyCode::CapsLock
+        | KeyCode::ScrollLock
+        | KeyCode::NumLock
+        | KeyCode::PrintScreen
+        | KeyCode::Pause
+        | KeyCode::Menu
+        | KeyCode::KeypadBegin
+        | KeyCode::Media(_)
+        | KeyCode::Modifier(_) => None,
+    }
+}
+
+fn should_exit_key(key_event: KeyEvent) -> bool {
+    key_event.code == KeyCode::Esc
+        || (key_event.code == KeyCode::Char('c')
+            && key_event.modifiers.contains(KeyModifiers::CONTROL))
+}
+
+fn execute_interactive_binding(
+    input_executor: &impl InputExecutor,
+    backend: SelectedInputBackend,
+    binding: &Binding,
+) -> Result<()> {
+    match &binding.action {
+        BindingAction::Tap { point } => {
+            println!("{} -> tap {},{}", binding.name, point.x, point.y);
+            execute_tap(input_executor, backend, point.x, point.y)
+        }
+        BindingAction::Swipe {
+            from,
+            to,
+            duration_ms,
+        } => {
+            println!(
+                "{} -> swipe {},{} to {},{} ({} ms)",
+                binding.name, from.x, from.y, to.x, to.y, duration_ms
+            );
+            execute_swipe(
+                input_executor,
+                backend,
+                from.x,
+                from.y,
+                to.x,
+                to.y,
+                *duration_ms,
+            )
+        }
+        unsupported => {
+            println!(
+                "{} uses unsupported action kind: {}",
+                binding.name,
+                action_kind(unsupported)
+            );
+            Ok(())
+        }
+    }
+}
+
+fn execute_tap(
+    input_executor: &impl InputExecutor,
+    backend: SelectedInputBackend,
+    x: u32,
+    y: u32,
+) -> Result<()> {
+    match backend {
+        SelectedInputBackend::Adb => input_executor.adb_tap(x, y),
+        SelectedInputBackend::WaydroidShell => input_executor.waydroid_shell_tap(x, y),
+    }
+}
+
+fn execute_swipe(
+    input_executor: &impl InputExecutor,
+    backend: SelectedInputBackend,
+    x1: u32,
+    y1: u32,
+    x2: u32,
+    y2: u32,
+    duration_ms: u64,
+) -> Result<()> {
+    match backend {
+        SelectedInputBackend::Adb => input_executor.adb_swipe(x1, y1, x2, y2, duration_ms),
+        SelectedInputBackend::WaydroidShell => {
+            input_executor.waydroid_shell_swipe(x1, y1, x2, y2, duration_ms)
+        }
+    }
+}
+
+fn action_kind(action: &BindingAction) -> &'static str {
+    match action {
+        BindingAction::Tap { .. } => "tap",
+        BindingAction::Swipe { .. } => "swipe",
+        BindingAction::VirtualJoystick { .. } => "virtual_joystick",
+        BindingAction::MouseAim { .. } => "mouse_aim",
+        BindingAction::Macro { .. } => "macro",
+    }
+}
+
+struct RawModeGuard;
+
+impl RawModeGuard {
+    fn enable() -> Result<Self> {
+        terminal::enable_raw_mode().context("failed to enable terminal raw mode")?;
+        Ok(Self)
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = terminal::disable_raw_mode();
+    }
+}
+
 fn availability(is_available: bool) -> &'static str {
     if is_available {
         "available"
@@ -311,6 +576,7 @@ mod tests {
     use std::cell::{Cell, RefCell};
 
     use anyhow::{anyhow, Result};
+    use wroid_core::{Point, Resolution};
 
     use super::*;
 
@@ -477,5 +743,95 @@ mod tests {
             vec![InputCall::AdbSwipe(400, 500, 800, 500, 180)]
         );
         assert_eq!(executor.device_queries.get(), 0);
+    }
+
+    #[test]
+    fn resolves_key_f_to_fire_binding() {
+        let profile = keyboard_test_profile();
+
+        let binding = resolve_key_binding(&profile.bindings, "F").unwrap();
+
+        assert_eq!(binding.name, "fire");
+    }
+
+    #[test]
+    fn resolves_key_r_to_reload_binding() {
+        let profile = keyboard_test_profile();
+
+        let binding = resolve_key_binding(&profile.bindings, "R").unwrap();
+
+        assert_eq!(binding.name, "reload");
+    }
+
+    #[test]
+    fn unknown_key_returns_no_binding() {
+        let profile = keyboard_test_profile();
+
+        assert!(resolve_key_binding(&profile.bindings, "X").is_none());
+    }
+
+    #[test]
+    fn non_keyboard_bindings_are_ignored_by_interactive_runner() {
+        let profile = ControlProfile {
+            name: "Mouse Profile".to_owned(),
+            package_name: "com.example.mouse".to_owned(),
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+            bindings: vec![Binding {
+                name: "fire".to_owned(),
+                input: BindingInput::MouseButton {
+                    button: "f".to_owned(),
+                },
+                action: BindingAction::Tap {
+                    point: Point { x: 100, y: 100 },
+                },
+            }],
+        };
+
+        assert!(resolve_key_binding(&profile.bindings, "F").is_none());
+    }
+
+    fn keyboard_test_profile() -> ControlProfile {
+        ControlProfile {
+            name: "Keyboard Profile".to_owned(),
+            package_name: "com.example.keyboard".to_owned(),
+            resolution: Resolution {
+                width: 1920,
+                height: 1080,
+            },
+            bindings: vec![
+                Binding {
+                    name: "fire".to_owned(),
+                    input: BindingInput::Key {
+                        key: "f".to_owned(),
+                    },
+                    action: BindingAction::Tap {
+                        point: Point { x: 1640, y: 540 },
+                    },
+                },
+                Binding {
+                    name: "reload".to_owned(),
+                    input: BindingInput::Key {
+                        key: "r".to_owned(),
+                    },
+                    action: BindingAction::Tap {
+                        point: Point { x: 1760, y: 900 },
+                    },
+                },
+                Binding {
+                    name: "look".to_owned(),
+                    input: BindingInput::MouseButton {
+                        button: "left".to_owned(),
+                    },
+                    action: BindingAction::Swipe {
+                        from: Point { x: 960, y: 540 },
+                        to: Point { x: 1260, y: 540 },
+                        duration_ms: 180,
+                    },
+                },
+            ],
+        }
     }
 }

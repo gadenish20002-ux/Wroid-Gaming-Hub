@@ -9,6 +9,8 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlProfile {
     pub name: String,
+    #[serde(default)]
+    pub package_name: String,
     pub resolution: Resolution,
     pub bindings: Vec<Binding>,
 }
@@ -31,6 +33,10 @@ impl ControlProfile {
 
         if self.name.trim().is_empty() {
             errors.push(ValidationError::EmptyProfileName);
+        }
+
+        if self.package_name.trim().is_empty() {
+            errors.push(ValidationError::EmptyPackageName);
         }
 
         if self.resolution.width == 0 || self.resolution.height == 0 {
@@ -74,6 +80,7 @@ impl ControlProfile {
     pub fn example() -> Self {
         Self {
             name: "Shooter Basic".to_owned(),
+            package_name: "com.example.shooter".to_owned(),
             resolution: Resolution {
                 width: 1920,
                 height: 1080,
@@ -81,11 +88,20 @@ impl ControlProfile {
             bindings: vec![
                 Binding {
                     name: "fire".to_owned(),
-                    input: BindingInput::MouseButton {
-                        button: "left".to_owned(),
+                    input: BindingInput::Key {
+                        key: "f".to_owned(),
                     },
                     action: BindingAction::Tap {
                         point: Point { x: 1640, y: 540 },
+                    },
+                },
+                Binding {
+                    name: "reload".to_owned(),
+                    input: BindingInput::Key {
+                        key: "r".to_owned(),
+                    },
+                    action: BindingAction::Tap {
+                        point: Point { x: 1760, y: 900 },
                     },
                 },
                 Binding {
@@ -184,6 +200,8 @@ impl std::error::Error for ProfileValidationError {}
 pub enum ValidationError {
     #[error("profile name must not be empty")]
     EmptyProfileName,
+    #[error("package name must not be empty")]
+    EmptyPackageName,
     #[error("resolution must be non-zero, got {width}x{height}")]
     InvalidResolution { width: u32, height: u32 },
     #[error("binding name must not be empty")]
