@@ -17,6 +17,15 @@ pub struct AndroidActivity {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Waydroid;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WaydroidAppLaunchEnv {
+    pub xdg_runtime_dir: String,
+    pub dbus_session_bus_address: String,
+    pub wayland_display: String,
+    pub xdg_session_type: String,
+    pub display: Option<String>,
+}
+
 impl Waydroid {
     pub fn is_available(&self) -> bool {
         Command::new("waydroid")
@@ -108,6 +117,23 @@ impl Waydroid {
         ensure_success("waydroid app launch", &output)
     }
 
+    pub fn app_launch_package_as_user(
+        &self,
+        package_name: &str,
+        user: &str,
+        session_env: &WaydroidAppLaunchEnv,
+    ) -> Result<()> {
+        if user.trim().is_empty() {
+            bail!("waydroid app launch user must not be empty");
+        }
+
+        let output = Command::new("sudo")
+            .args(app_launch_as_user_args(user, session_env, package_name))
+            .output()
+            .with_context(|| format!("failed to run waydroid app launch as {user}"))?;
+        ensure_success("sudo -u user waydroid app launch", &output)
+    }
+
     pub fn app_install(&self, path: impl AsRef<Path>) -> Result<()> {
         let output = Command::new("waydroid")
             .args(["app", "install"])
@@ -166,6 +192,14 @@ pub fn app_launch_package(package_name: &str) -> Result<()> {
     Waydroid.app_launch_package(package_name)
 }
 
+pub fn app_launch_package_as_user(
+    package_name: &str,
+    user: &str,
+    session_env: &WaydroidAppLaunchEnv,
+) -> Result<()> {
+    Waydroid.app_launch_package_as_user(package_name, user, session_env)
+}
+
 pub fn app_install(path: impl AsRef<Path>) -> Result<()> {
     Waydroid.app_install(path)
 }
@@ -220,6 +254,37 @@ fn app_list_args() -> [&'static str; 2] {
 
 fn app_launch_args(package_name: &str) -> [&str; 3] {
     ["app", "launch", package_name]
+}
+
+fn app_launch_as_user_args(
+    user: &str,
+    session_env: &WaydroidAppLaunchEnv,
+    package_name: &str,
+) -> Vec<String> {
+    let mut args = vec![
+        "-u".to_owned(),
+        user.to_owned(),
+        "env".to_owned(),
+        format!("XDG_RUNTIME_DIR={}", session_env.xdg_runtime_dir),
+        format!(
+            "DBUS_SESSION_BUS_ADDRESS={}",
+            session_env.dbus_session_bus_address
+        ),
+        format!("WAYLAND_DISPLAY={}", session_env.wayland_display),
+        format!("XDG_SESSION_TYPE={}", session_env.xdg_session_type),
+    ];
+
+    if let Some(display) = &session_env.display {
+        args.push(format!("DISPLAY={display}"));
+    }
+
+    args.extend([
+        "waydroid".to_owned(),
+        "app".to_owned(),
+        "launch".to_owned(),
+        package_name.to_owned(),
+    ]);
+    args
 }
 
 fn parse_current_activity(output: &str) -> Option<AndroidActivity> {
@@ -425,6 +490,63 @@ com.example.raw
         assert_eq!(
             app_launch_args("com.example.game"),
             ["app", "launch", "com.example.game"]
+        );
+    }
+
+    #[test]
+    fn app_launch_package_as_user_uses_sudo_user_args() {
+        let session_env = WaydroidAppLaunchEnv {
+            xdg_runtime_dir: "/run/user/1000".to_owned(),
+            dbus_session_bus_address: "unix:path=/run/user/1000/bus".to_owned(),
+            wayland_display: "wayland-0".to_owned(),
+            xdg_session_type: "wayland".to_owned(),
+            display: None,
+        };
+
+        assert_eq!(
+            app_launch_as_user_args("supergut", &session_env, "com.example.game"),
+            vec![
+                "-u",
+                "supergut",
+                "env",
+                "XDG_RUNTIME_DIR=/run/user/1000",
+                "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
+                "WAYLAND_DISPLAY=wayland-0",
+                "XDG_SESSION_TYPE=wayland",
+                "waydroid",
+                "app",
+                "launch",
+                "com.example.game"
+            ]
+        );
+    }
+
+    #[test]
+    fn app_launch_package_as_user_copies_display_args_when_present() {
+        let session_env = WaydroidAppLaunchEnv {
+            xdg_runtime_dir: "/run/user/1000".to_owned(),
+            dbus_session_bus_address: "unix:path=/run/user/1000/bus".to_owned(),
+            wayland_display: "wayland-1".to_owned(),
+            xdg_session_type: "wayland".to_owned(),
+            display: Some(":0".to_owned()),
+        };
+
+        assert_eq!(
+            app_launch_as_user_args("supergut", &session_env, "com.android.settings"),
+            vec![
+                "-u",
+                "supergut",
+                "env",
+                "XDG_RUNTIME_DIR=/run/user/1000",
+                "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
+                "WAYLAND_DISPLAY=wayland-1",
+                "XDG_SESSION_TYPE=wayland",
+                "DISPLAY=:0",
+                "waydroid",
+                "app",
+                "launch",
+                "com.android.settings"
+            ]
         );
     }
 

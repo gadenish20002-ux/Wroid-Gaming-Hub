@@ -29,6 +29,7 @@ cargo run -p wroid-cli -- app install-apk ./game.apk --backend waydroid-shell
 cargo run -p wroid-cli -- app current --backend waydroid-shell
 cargo run -p wroid-cli -- binding run profiles/examples/shooter-basic.json fire
 cargo run -p wroid-cli -- play profiles/examples/shooter-basic.json
+cargo run -p wroid-cli -- run profiles/examples/shooter-basic.json --backend waydroid-shell
 ```
 
 Input commands default to `--backend auto`. Auto uses ADB when `adb devices` reports at least one connected device with status `device`; otherwise it falls back to `waydroid shell input`.
@@ -46,6 +47,8 @@ cargo run -p wroid-cli -- app current --backend waydroid-shell
 cargo run -p wroid-cli -- binding run profiles/examples/shooter-basic.json fire --backend auto
 cargo run -p wroid-cli -- play profiles/examples/shooter-basic.json --backend adb
 cargo run -p wroid-cli -- play profiles/examples/shooter-basic.json --backend waydroid-shell
+cargo run -p wroid-cli -- run profiles/examples/shooter-basic.json --backend waydroid-shell
+cargo run -p wroid-cli -- run profiles/examples/shooter-basic.json --backend waydroid-shell --launch-delay-ms 2500
 ```
 
 `play` loads and validates a profile, prints the profile metadata and keyboard bindings, then listens for key presses until `Esc` or `Ctrl+C`:
@@ -61,9 +64,16 @@ Keyboard bindings:
   D -> look_right
 ```
 
+`run` loads the same profile, launches `package_name`, waits 1500 ms by default, then starts the same interactive keymapper used by `play`:
+
+```sh
+sudo target/debug/wroid run profiles/my-game.json --backend waydroid-shell
+sudo target/debug/wroid run profiles/my-game.json --backend waydroid-shell --launch-delay-ms 2500
+```
+
 For app management, `--backend waydroid-shell` uses `waydroid app list`, `waydroid app launch`, and `waydroid app install` where available. Current-app detection still uses `waydroid shell dumpsys activity activities` because Waydroid does not expose the focused Android activity through `waydroid app`.
 
-On some systems, `waydroid shell ...` operations require root privileges. This affects shell-backed input commands and `app current`; `waydroid app launch` may work without sudo. If `--backend waydroid-shell` fails with `Action "shell" needs root access`, run the CLI itself with `sudo`, for example:
+On some systems, `waydroid shell ...` operations require root privileges. This affects shell-backed input commands and `app current`; `waydroid app launch` may work without sudo. On those systems, `wroid run` handles app launch as the original user when `SUDO_USER` and `SUDO_UID` are available, restores that user's DBus and Wayland session environment for the launch subprocess, then keeps the keymapper in the current sudo process for shell input. If `--backend waydroid-shell` fails with `Action "shell" needs root access`, run the CLI itself with `sudo`, for example:
 
 ```sh
 sudo target/debug/wroid input tap 500 400 --backend waydroid-shell

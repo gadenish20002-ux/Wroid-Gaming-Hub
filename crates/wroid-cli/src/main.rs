@@ -1,7 +1,9 @@
+use std::env;
 use std::fmt;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -11,6 +13,8 @@ use wroid_core::{
     Binding, BindingAction, BindingInput, ControlProfile, Point, ProfileError, Resolution,
     ValidationError,
 };
+
+const DEFAULT_LAUNCH_DELAY_MS: u64 = 1500;
 
 #[derive(Debug, Parser)]
 #[command(name = "wroid", about = "Wroid Gaming Hub CLI")]
@@ -42,6 +46,13 @@ enum Commands {
         profile_path: PathBuf,
         #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
         backend: InputBackend,
+    },
+    Run {
+        profile_path: PathBuf,
+        #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
+        backend: InputBackend,
+        #[arg(long, default_value_t = DEFAULT_LAUNCH_DELAY_MS)]
+        launch_delay_ms: u64,
     },
 }
 
@@ -216,6 +227,12 @@ trait InputExecutor {
     fn waydroid_shell_keyevent(&self, code: u32) -> Result<()>;
     fn waydroid_app_list_packages(&self) -> Result<Vec<String>>;
     fn waydroid_app_launch_package(&self, package_name: &str) -> Result<()>;
+    fn waydroid_app_launch_package_as_user(
+        &self,
+        package_name: &str,
+        user: &str,
+        session_env: &wroid_waydroid::WaydroidAppLaunchEnv,
+    ) -> Result<()>;
     fn waydroid_app_install(&self, path: &Path) -> Result<()>;
     fn waydroid_shell_current_activity(&self) -> Result<Option<CurrentAndroidActivity>>;
 }
@@ -287,6 +304,15 @@ impl InputExecutor for CommandInputExecutor {
 
     fn waydroid_app_launch_package(&self, package_name: &str) -> Result<()> {
         wroid_waydroid::app_launch_package(package_name)
+    }
+
+    fn waydroid_app_launch_package_as_user(
+        &self,
+        package_name: &str,
+        user: &str,
+        session_env: &wroid_waydroid::WaydroidAppLaunchEnv,
+    ) -> Result<()> {
+        wroid_waydroid::app_launch_package_as_user(package_name, user, session_env)
     }
 
     fn waydroid_app_install(&self, path: &Path) -> Result<()> {
@@ -377,6 +403,11 @@ fn main() -> Result<()> {
             profile_path,
             backend,
         } => play(&input_executor, profile_path, backend),
+        Commands::Run {
+            profile_path,
+            backend,
+            launch_delay_ms,
+        } => run(&input_executor, profile_path, backend, launch_delay_ms),
     }
 }
 
@@ -587,6 +618,17 @@ fn app_launch(
     package_name: &str,
 ) -> Result<()> {
     let selected_backend = select_input_backend(input_executor, backend);
+    launch_profile_package(input_executor, selected_backend, package_name)?;
+
+    println!("Launched {package_name} via {selected_backend}.");
+    Ok(())
+}
+
+fn launch_profile_package(
+    input_executor: &impl InputExecutor,
+    selected_backend: SelectedInputBackend,
+    package_name: &str,
+) -> Result<()> {
     match selected_backend {
         SelectedInputBackend::Adb => input_executor.adb_launch_package(package_name),
         SelectedInputBackend::WaydroidShell => {
@@ -595,10 +637,7 @@ fn app_launch(
     }
     .with_context(|| {
         format!("failed to launch Android package {package_name} via {selected_backend}")
-    })?;
-
-    println!("Launched {package_name} via {selected_backend}.");
-    Ok(())
+    })
 }
 
 fn app_install_apk(
@@ -746,6 +785,181 @@ fn play(
 
     println!("Profile: {}", profile.name);
     println!("Package: {}", profile.package_name);
+    start_interactive_keymapper(input_executor, &profile, selected_backend)
+}
+
+fn run(
+    input_executor: &impl InputExecutor,
+    profile_path: PathBuf,
+    backend: InputBackend,
+    launch_delay_ms: u64,
+) -> Result<()> {
+    let profile = load_play_profile(&profile_path)?;
+    let selected_backend = select_input_backend(input_executor, backend);
+
+    println!("Profile: {}", profile.name);
+    println!("Package: {}", profile.package_name);
+    println!("Launching package {} ...", profile.package_name);
+    io::stdout().flush().context("failed to flush stdout")?;
+
+    let launch_context = RunLaunchContext::current();
+    run_game_workflow_steps(
+        || {
+            launch_run_package(
+                input_executor,
+                selected_backend,
+                &profile.package_name,
+                &profile_path,
+                &launch_context,
+            )
+        },
+        |duration| std::thread::sleep(duration),
+        || {
+            println!("Starting keymapper ...");
+            start_interactive_keymapper(input_executor, &profile, selected_backend)
+        },
+        launch_delay_ms,
+    )
+}
+
+fn run_game_workflow_steps(
+    launch_package: impl FnOnce() -> Result<()>,
+    wait_for_launch: impl FnOnce(Duration),
+    start_keymapper: impl FnOnce() -> Result<()>,
+    launch_delay_ms: u64,
+) -> Result<()> {
+    launch_package()?;
+    wait_for_launch(Duration::from_millis(launch_delay_ms));
+    start_keymapper()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunLaunchContext {
+    effective_uid: u32,
+    sudo_user: Option<String>,
+    sudo_uid: Option<String>,
+    wayland_display: Option<String>,
+    xdg_session_type: Option<String>,
+    display: Option<String>,
+}
+
+impl RunLaunchContext {
+    fn current() -> Self {
+        Self {
+            effective_uid: effective_uid(),
+            sudo_user: env_value("SUDO_USER"),
+            sudo_uid: env_value("SUDO_UID"),
+            wayland_display: env_value("WAYLAND_DISPLAY"),
+            xdg_session_type: env_value("XDG_SESSION_TYPE"),
+            display: env_value("DISPLAY"),
+        }
+    }
+}
+
+fn launch_run_package(
+    input_executor: &impl InputExecutor,
+    selected_backend: SelectedInputBackend,
+    package_name: &str,
+    profile_path: &Path,
+    launch_context: &RunLaunchContext,
+) -> Result<()> {
+    match selected_backend {
+        SelectedInputBackend::Adb => {
+            launch_profile_package(input_executor, selected_backend, package_name)
+        }
+        SelectedInputBackend::WaydroidShell => {
+            if let Some(user) = original_sudo_user_for_launch(launch_context) {
+                let Some(session_env) = sudo_user_session_env(launch_context) else {
+                    return launch_profile_package(input_executor, selected_backend, package_name);
+                };
+
+                input_executor
+                    .waydroid_app_launch_package_as_user(package_name, user, &session_env)
+                    .with_context(|| {
+                        waydroid_sudo_user_launch_error(package_name, profile_path, user)
+                    })
+            } else {
+                launch_profile_package(input_executor, selected_backend, package_name)
+            }
+        }
+    }
+}
+
+fn env_value(key: &str) -> Option<String> {
+    env::var(key)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn original_sudo_user_for_launch(launch_context: &RunLaunchContext) -> Option<&str> {
+    if launch_context.effective_uid != 0 {
+        return None;
+    }
+
+    launch_context
+        .sudo_user
+        .as_deref()
+        .map(str::trim)
+        .filter(|user| !user.is_empty() && *user != "root")
+}
+
+fn sudo_user_session_env(
+    launch_context: &RunLaunchContext,
+) -> Option<wroid_waydroid::WaydroidAppLaunchEnv> {
+    let sudo_uid = launch_context.sudo_uid.as_deref()?.trim();
+    if sudo_uid.is_empty() {
+        return None;
+    }
+
+    Some(wroid_waydroid::WaydroidAppLaunchEnv {
+        xdg_runtime_dir: format!("/run/user/{sudo_uid}"),
+        dbus_session_bus_address: format!("unix:path=/run/user/{sudo_uid}/bus"),
+        wayland_display: launch_context
+            .wayland_display
+            .clone()
+            .unwrap_or_else(|| "wayland-0".to_owned()),
+        xdg_session_type: launch_context
+            .xdg_session_type
+            .clone()
+            .unwrap_or_else(|| "wayland".to_owned()),
+        display: launch_context.display.clone(),
+    })
+}
+
+fn waydroid_sudo_user_launch_error(package_name: &str, profile_path: &Path, user: &str) -> String {
+    format!(
+        "failed to launch Android package {package_name} as {user} via waydroid-shell. \
+Waydroid app launch needs the original desktop user's DBus session. Try launching the app first with: \
+target/debug/wroid app launch {package_name} --backend waydroid-shell; \
+then start the keymapper with: sudo target/debug/wroid play {} --backend waydroid-shell",
+        profile_path.display()
+    )
+}
+
+#[cfg(unix)]
+fn effective_uid() -> u32 {
+    unsafe extern "C" {
+        fn geteuid() -> u32;
+    }
+
+    unsafe { geteuid() }
+}
+
+#[cfg(not(unix))]
+fn effective_uid() -> u32 {
+    if std::process::id() == 0 {
+        0
+    } else {
+        u32::MAX
+    }
+}
+
+fn start_interactive_keymapper(
+    input_executor: &impl InputExecutor,
+    profile: &ControlProfile,
+    selected_backend: SelectedInputBackend,
+) -> Result<()> {
     println!("Backend: {}", selected_backend);
     println!();
     print_keyboard_bindings(&profile);
@@ -1030,7 +1244,7 @@ fn execute_interactive_binding(
 ) -> Result<()> {
     match &binding.action {
         BindingAction::Tap { point } => {
-            println!("{} -> tap {},{}", binding.name, point.x, point.y);
+            println!("\r{} -> tap {},{}", binding.name, point.x, point.y);
             execute_tap(input_executor, backend, point.x, point.y)
         }
         BindingAction::Swipe {
@@ -1039,7 +1253,7 @@ fn execute_interactive_binding(
             duration_ms,
         } => {
             println!(
-                "{} -> swipe {},{} to {},{} ({} ms)",
+                "\r{} -> swipe {},{} to {},{} ({} ms)",
                 binding.name, from.x, from.y, to.x, to.y, duration_ms
             );
             execute_swipe(
@@ -1054,7 +1268,7 @@ fn execute_interactive_binding(
         }
         unsupported => {
             println!(
-                "{} uses unsupported action kind: {}",
+                "\r{} uses unsupported action kind: {}",
                 binding.name,
                 action_kind(unsupported)
             );
@@ -1142,10 +1356,17 @@ mod tests {
         AdbKeyevent(u32),
         AdbLaunchPackage(String),
         AdbInstallApk(PathBuf),
+        LaunchDelay(u128),
+        StartKeymapper,
         WaydroidShellTap(u32, u32),
         WaydroidShellSwipe(u32, u32, u32, u32, u64),
         WaydroidShellKeyevent(u32),
         WaydroidAppLaunchPackage(String),
+        WaydroidAppLaunchPackageAsUser {
+            package: String,
+            user: String,
+            session_env: wroid_waydroid::WaydroidAppLaunchEnv,
+        },
         WaydroidAppInstall(PathBuf),
     }
 
@@ -1158,6 +1379,7 @@ mod tests {
         waydroid_packages: Vec<String>,
         adb_current_activity: Option<CurrentAndroidActivity>,
         waydroid_current_activity: Option<CurrentAndroidActivity>,
+        fail_launch: bool,
         calls: RefCell<Vec<InputCall>>,
     }
 
@@ -1245,7 +1467,11 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push(InputCall::AdbLaunchPackage(package_name.to_owned()));
-            Ok(())
+            if self.fail_launch {
+                Err(anyhow!("adb launch failed"))
+            } else {
+                Ok(())
+            }
         }
 
         fn adb_install_apk(&self, path: &Path) -> Result<()> {
@@ -1299,7 +1525,31 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push(InputCall::WaydroidAppLaunchPackage(package_name.to_owned()));
-            Ok(())
+            if self.fail_launch {
+                Err(anyhow!("waydroid launch failed"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn waydroid_app_launch_package_as_user(
+            &self,
+            package_name: &str,
+            user: &str,
+            session_env: &wroid_waydroid::WaydroidAppLaunchEnv,
+        ) -> Result<()> {
+            self.calls
+                .borrow_mut()
+                .push(InputCall::WaydroidAppLaunchPackageAsUser {
+                    package: package_name.to_owned(),
+                    user: user.to_owned(),
+                    session_env: session_env.clone(),
+                });
+            if self.fail_launch {
+                Err(anyhow!("waydroid launch as user failed"))
+            } else {
+                Ok(())
+            }
         }
 
         fn waydroid_app_install(&self, path: &Path) -> Result<()> {
@@ -1499,6 +1749,302 @@ mod tests {
 
         assert_eq!(executor.calls(), vec![InputCall::AdbInstallApk(path)]);
         assert_eq!(executor.device_queries.get(), 0);
+    }
+
+    #[test]
+    fn run_command_default_launch_delay_is_1500() {
+        let cli = Cli::try_parse_from(["wroid", "run", "profiles/my-game.json"]).unwrap();
+
+        let Commands::Run {
+            profile_path,
+            backend,
+            launch_delay_ms,
+        } = cli.command
+        else {
+            panic!("expected run command");
+        };
+
+        assert_eq!(profile_path, PathBuf::from("profiles/my-game.json"));
+        assert_eq!(backend, InputBackend::Auto);
+        assert_eq!(launch_delay_ms, DEFAULT_LAUNCH_DELAY_MS);
+    }
+
+    #[test]
+    fn run_command_accepts_explicit_launch_delay() {
+        let cli = Cli::try_parse_from([
+            "wroid",
+            "run",
+            "profiles/my-game.json",
+            "--backend",
+            "waydroid-shell",
+            "--launch-delay-ms",
+            "2500",
+        ])
+        .unwrap();
+
+        let Commands::Run {
+            backend,
+            launch_delay_ms,
+            ..
+        } = cli.command
+        else {
+            panic!("expected run command");
+        };
+
+        assert_eq!(backend, InputBackend::WaydroidShell);
+        assert_eq!(launch_delay_ms, 2500);
+    }
+
+    #[test]
+    fn run_workflow_launches_package_before_keymapper_setup() {
+        let executor = FakeInputExecutor::default();
+
+        run_game_workflow_steps(
+            || {
+                launch_profile_package(
+                    &executor,
+                    SelectedInputBackend::WaydroidShell,
+                    "com.example.game",
+                )
+            },
+            |duration| {
+                executor
+                    .calls
+                    .borrow_mut()
+                    .push(InputCall::LaunchDelay(duration.as_millis()));
+            },
+            || {
+                executor.calls.borrow_mut().push(InputCall::StartKeymapper);
+                Ok(())
+            },
+            2500,
+        )
+        .unwrap();
+
+        assert_eq!(
+            executor.calls(),
+            vec![
+                InputCall::WaydroidAppLaunchPackage("com.example.game".to_owned()),
+                InputCall::LaunchDelay(2500),
+                InputCall::StartKeymapper,
+            ]
+        );
+    }
+
+    #[test]
+    fn run_workflow_does_not_start_keymapper_when_launch_fails() {
+        let executor = FakeInputExecutor {
+            fail_launch: true,
+            ..FakeInputExecutor::default()
+        };
+
+        let err = run_game_workflow_steps(
+            || {
+                launch_profile_package(
+                    &executor,
+                    SelectedInputBackend::WaydroidShell,
+                    "com.example.game",
+                )
+            },
+            |duration| {
+                executor
+                    .calls
+                    .borrow_mut()
+                    .push(InputCall::LaunchDelay(duration.as_millis()));
+            },
+            || {
+                executor.calls.borrow_mut().push(InputCall::StartKeymapper);
+                Ok(())
+            },
+            1500,
+        )
+        .unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("failed to launch Android package com.example.game via waydroid-shell"));
+        assert_eq!(
+            executor.calls(),
+            vec![InputCall::WaydroidAppLaunchPackage(
+                "com.example.game".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn run_launch_uses_sudo_user_for_waydroid_shell_when_root() {
+        let executor = FakeInputExecutor::default();
+        let launch_context = RunLaunchContext {
+            effective_uid: 0,
+            sudo_user: Some("alice".to_owned()),
+            sudo_uid: Some("1000".to_owned()),
+            wayland_display: None,
+            xdg_session_type: None,
+            display: None,
+        };
+
+        launch_run_package(
+            &executor,
+            SelectedInputBackend::WaydroidShell,
+            "com.example.game",
+            Path::new("/tmp/game.json"),
+            &launch_context,
+        )
+        .unwrap();
+
+        assert_eq!(
+            executor.calls(),
+            vec![InputCall::WaydroidAppLaunchPackageAsUser {
+                package: "com.example.game".to_owned(),
+                user: "alice".to_owned(),
+                session_env: wroid_waydroid::WaydroidAppLaunchEnv {
+                    xdg_runtime_dir: "/run/user/1000".to_owned(),
+                    dbus_session_bus_address: "unix:path=/run/user/1000/bus".to_owned(),
+                    wayland_display: "wayland-0".to_owned(),
+                    xdg_session_type: "wayland".to_owned(),
+                    display: None,
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn run_launch_copies_desktop_display_env_for_sudo_user() {
+        let executor = FakeInputExecutor::default();
+        let launch_context = RunLaunchContext {
+            effective_uid: 0,
+            sudo_user: Some("supergut".to_owned()),
+            sudo_uid: Some("1000".to_owned()),
+            wayland_display: Some("wayland-1".to_owned()),
+            xdg_session_type: Some("wayland".to_owned()),
+            display: Some(":0".to_owned()),
+        };
+
+        launch_run_package(
+            &executor,
+            SelectedInputBackend::WaydroidShell,
+            "com.android.settings",
+            Path::new("/tmp/settings.json"),
+            &launch_context,
+        )
+        .unwrap();
+
+        assert_eq!(
+            executor.calls(),
+            vec![InputCall::WaydroidAppLaunchPackageAsUser {
+                package: "com.android.settings".to_owned(),
+                user: "supergut".to_owned(),
+                session_env: wroid_waydroid::WaydroidAppLaunchEnv {
+                    xdg_runtime_dir: "/run/user/1000".to_owned(),
+                    dbus_session_bus_address: "unix:path=/run/user/1000/bus".to_owned(),
+                    wayland_display: "wayland-1".to_owned(),
+                    xdg_session_type: "wayland".to_owned(),
+                    display: Some(":0".to_owned()),
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn run_launch_uses_normal_waydroid_app_launch_when_not_root() {
+        let executor = FakeInputExecutor::default();
+        let launch_context = RunLaunchContext {
+            effective_uid: 1000,
+            sudo_user: Some("alice".to_owned()),
+            sudo_uid: Some("1000".to_owned()),
+            wayland_display: None,
+            xdg_session_type: None,
+            display: None,
+        };
+
+        launch_run_package(
+            &executor,
+            SelectedInputBackend::WaydroidShell,
+            "com.example.game",
+            Path::new("/tmp/game.json"),
+            &launch_context,
+        )
+        .unwrap();
+
+        assert_eq!(
+            executor.calls(),
+            vec![InputCall::WaydroidAppLaunchPackage(
+                "com.example.game".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn run_launch_keeps_adb_backend_unchanged_under_sudo_like_env() {
+        let executor = FakeInputExecutor::default();
+        let launch_context = RunLaunchContext {
+            effective_uid: 0,
+            sudo_user: Some("alice".to_owned()),
+            sudo_uid: Some("1000".to_owned()),
+            wayland_display: None,
+            xdg_session_type: None,
+            display: None,
+        };
+
+        launch_run_package(
+            &executor,
+            SelectedInputBackend::Adb,
+            "com.example.game",
+            Path::new("/tmp/game.json"),
+            &launch_context,
+        )
+        .unwrap();
+
+        assert_eq!(
+            executor.calls(),
+            vec![InputCall::AdbLaunchPackage("com.example.game".to_owned())]
+        );
+    }
+
+    #[test]
+    fn run_launch_as_sudo_user_error_includes_dbus_recovery_commands() {
+        let executor = FakeInputExecutor {
+            fail_launch: true,
+            ..FakeInputExecutor::default()
+        };
+        let launch_context = RunLaunchContext {
+            effective_uid: 0,
+            sudo_user: Some("alice".to_owned()),
+            sudo_uid: Some("1000".to_owned()),
+            wayland_display: None,
+            xdg_session_type: None,
+            display: None,
+        };
+
+        let err = launch_run_package(
+            &executor,
+            SelectedInputBackend::WaydroidShell,
+            "com.example.game",
+            Path::new("/tmp/game.json"),
+            &launch_context,
+        )
+        .unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("DBus session"));
+        assert!(message
+            .contains("target/debug/wroid app launch com.example.game --backend waydroid-shell"));
+        assert!(message
+            .contains("sudo target/debug/wroid play /tmp/game.json --backend waydroid-shell"));
+        assert_eq!(
+            executor.calls(),
+            vec![InputCall::WaydroidAppLaunchPackageAsUser {
+                package: "com.example.game".to_owned(),
+                user: "alice".to_owned(),
+                session_env: wroid_waydroid::WaydroidAppLaunchEnv {
+                    xdg_runtime_dir: "/run/user/1000".to_owned(),
+                    dbus_session_bus_address: "unix:path=/run/user/1000/bus".to_owned(),
+                    wayland_display: "wayland-0".to_owned(),
+                    xdg_session_type: "wayland".to_owned(),
+                    display: None,
+                },
+            }]
+        );
     }
 
     #[test]
