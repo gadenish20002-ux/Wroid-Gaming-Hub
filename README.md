@@ -23,6 +23,10 @@ cargo run -p wroid-cli -- profile remove-binding /tmp/wroid-profile.json fire
 cargo run -p wroid-cli -- input tap 500 400
 cargo run -p wroid-cli -- input swipe 400 500 800 500 180
 cargo run -p wroid-cli -- input keyevent 3
+cargo run -p wroid-cli -- app list --backend waydroid-shell
+cargo run -p wroid-cli -- app launch com.android.settings --backend waydroid-shell
+cargo run -p wroid-cli -- app install-apk ./game.apk --backend waydroid-shell
+cargo run -p wroid-cli -- app current --backend waydroid-shell
 cargo run -p wroid-cli -- binding run profiles/examples/shooter-basic.json fire
 cargo run -p wroid-cli -- play profiles/examples/shooter-basic.json
 ```
@@ -35,6 +39,10 @@ cargo run -p wroid-cli -- input tap 500 400 --backend adb
 cargo run -p wroid-cli -- input tap 500 400 --backend waydroid-shell
 cargo run -p wroid-cli -- input swipe 400 500 800 500 180 --backend waydroid-shell
 cargo run -p wroid-cli -- input keyevent 3 --backend waydroid-shell
+cargo run -p wroid-cli -- app list --backend waydroid-shell
+cargo run -p wroid-cli -- app launch com.android.settings --backend waydroid-shell
+cargo run -p wroid-cli -- app install-apk ./game.apk --backend waydroid-shell
+cargo run -p wroid-cli -- app current --backend waydroid-shell
 cargo run -p wroid-cli -- binding run profiles/examples/shooter-basic.json fire --backend auto
 cargo run -p wroid-cli -- play profiles/examples/shooter-basic.json --backend adb
 cargo run -p wroid-cli -- play profiles/examples/shooter-basic.json --backend waydroid-shell
@@ -53,7 +61,9 @@ Keyboard bindings:
   D -> look_right
 ```
 
-On some systems, `waydroid shell input ...` requires root privileges. If `--backend waydroid-shell` fails with `Action "shell" needs root access`, run the CLI itself with `sudo`, for example:
+For app management, `--backend waydroid-shell` uses `waydroid app list`, `waydroid app launch`, and `waydroid app install` where available. Current-app detection still uses `waydroid shell dumpsys activity activities` because Waydroid does not expose the focused Android activity through `waydroid app`.
+
+On some systems, `waydroid shell ...` operations require root privileges. This affects shell-backed input commands and `app current`; `waydroid app launch` may work without sudo. If `--backend waydroid-shell` fails with `Action "shell" needs root access`, run the CLI itself with `sudo`, for example:
 
 ```sh
 sudo target/debug/wroid input tap 500 400 --backend waydroid-shell
