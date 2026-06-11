@@ -146,6 +146,63 @@ pub(crate) fn add_swipe_binding(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_joystick_binding(
+    path: PathBuf,
+    name: String,
+    up: String,
+    left: String,
+    down: String,
+    right: String,
+    center: String,
+    radius: u32,
+    tick_ms: u64,
+    swipe_duration_ms: u64,
+) -> Result<()> {
+    let mut profile = load_validated_profile(&path)?;
+    ensure_binding_name_available(&profile, &name)?;
+
+    let center = parse_point_arg(&center, "--center")?;
+    if [up.as_str(), left.as_str(), down.as_str(), right.as_str()]
+        .iter()
+        .any(|key| key.trim().is_empty())
+    {
+        bail!("joystick directional keys must not be empty");
+    }
+    if radius == 0 {
+        bail!("joystick radius must be greater than zero");
+    }
+    if tick_ms == 0 {
+        bail!("joystick tick interval must be greater than zero");
+    }
+    if swipe_duration_ms == 0 {
+        bail!("joystick swipe duration must be greater than zero");
+    }
+    ensure_point_in_bounds(&profile, center, "--center point")?;
+
+    profile.bindings.push(Binding {
+        name: name.clone(),
+        input: BindingInput::KeyCluster {
+            up: normalize_key(&up),
+            left: normalize_key(&left),
+            down: normalize_key(&down),
+            right: normalize_key(&right),
+        },
+        action: BindingAction::VirtualJoystick {
+            center,
+            radius,
+            tick_ms,
+            swipe_duration_ms,
+        },
+    });
+    profile
+        .validate()
+        .with_context(|| format!("updated profile {} is invalid", path.display()))?;
+    save_profile(&profile, &path)?;
+    println!("added joystick binding: {name}");
+    Ok(())
+}
+
 pub(crate) fn remove_binding(path: PathBuf, binding_name: &str) -> Result<()> {
     let mut profile = load_validated_profile(&path)?;
     let index = profile
@@ -343,6 +400,46 @@ mod tests {
                     from: Point { x: 300, y: 400 },
                     to: Point { x: 600, y: 400 },
                     duration_ms: 180,
+                },
+            }]
+        );
+        profile.validate().unwrap();
+    }
+
+    #[test]
+    fn adds_joystick_binding() {
+        let (_dir, path) = new_empty_profile();
+
+        add_joystick_binding(
+            path.clone(),
+            "movement".to_owned(),
+            "W".to_owned(),
+            "A".to_owned(),
+            "S".to_owned(),
+            "D".to_owned(),
+            "320,640".to_owned(),
+            120,
+            80,
+            70,
+        )
+        .unwrap();
+
+        let profile = ControlProfile::load_from_path(&path).unwrap();
+        assert_eq!(
+            profile.bindings,
+            vec![Binding {
+                name: "movement".to_owned(),
+                input: BindingInput::KeyCluster {
+                    up: "w".to_owned(),
+                    left: "a".to_owned(),
+                    down: "s".to_owned(),
+                    right: "d".to_owned(),
+                },
+                action: BindingAction::VirtualJoystick {
+                    center: Point { x: 320, y: 640 },
+                    radius: 120,
+                    tick_ms: 80,
+                    swipe_duration_ms: 70,
                 },
             }]
         );

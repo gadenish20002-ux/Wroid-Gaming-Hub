@@ -1,6 +1,6 @@
 # Wroid Gaming Hub
 
-Wroid Gaming Hub is a Linux gaming frontend for Waydroid. MVP-0 is a CLI-only skeleton that loads JSON control profiles and executes tap/swipe bindings through ADB or Waydroid shell input.
+Wroid Gaming Hub is a Linux gaming frontend for Waydroid. It is currently a CLI-focused gaming layer that loads JSON control profiles, executes tap/swipe bindings through ADB or Waydroid shell input, and models virtual joystick controls for upcoming interactive execution.
 
 ## Workspace
 
@@ -23,6 +23,7 @@ cargo run -p wroid-cli -- profile registry-new-current --name "Android Settings"
 cargo run -p wroid-cli -- profile scale profiles/examples/shooter-basic.json /tmp/shooter-1050.json --width 1920 --height 1050 --force
 cargo run -p wroid-cli -- profile add-tap /tmp/wroid-profile.json --name fire --key F --x 1640 --y 540
 cargo run -p wroid-cli -- profile add-swipe /tmp/wroid-profile.json --name look_right --key D --from 960,540 --to 1260,540 --duration-ms 180
+cargo run -p wroid-cli -- profile add-joystick /tmp/wroid-profile.json --name movement --up W --left A --down S --right D --center 320,780 --radius 120
 cargo run -p wroid-cli -- profile remove-binding /tmp/wroid-profile.json fire
 cargo run -p wroid-cli -- profile import /tmp/settings.json
 cargo run -p wroid-cli -- profile list
@@ -37,6 +38,7 @@ cargo run -p wroid-cli -- app current --backend waydroid-shell
 cargo run -p wroid-cli -- binding run profiles/examples/shooter-basic.json fire
 cargo run -p wroid-cli -- play profiles/examples/shooter-basic.json
 cargo run -p wroid-cli -- play profiles/examples/shooter-basic.json --scale-to-current
+cargo run -p wroid-cli -- play profiles/examples/joystick-basic.json --scale-to-current
 cargo run -p wroid-cli -- run profiles/examples/shooter-basic.json --backend waydroid-shell
 cargo run -p wroid-cli -- run profiles/examples/shooter-basic.json --backend waydroid-shell --no-launch
 cargo run -p wroid-cli -- run-profile com.android.settings --backend waydroid-shell
@@ -59,6 +61,7 @@ cargo run -p wroid-cli -- binding run profiles/examples/shooter-basic.json fire 
 cargo run -p wroid-cli -- play profiles/examples/shooter-basic.json --backend adb
 cargo run -p wroid-cli -- play profiles/examples/shooter-basic.json --backend waydroid-shell
 cargo run -p wroid-cli -- play profiles/examples/shooter-basic.json --backend waydroid-shell --scale-to-current
+cargo run -p wroid-cli -- play profiles/examples/joystick-basic.json --backend waydroid-shell --scale-to-current
 cargo run -p wroid-cli -- run profiles/examples/shooter-basic.json --backend waydroid-shell
 cargo run -p wroid-cli -- run profiles/examples/shooter-basic.json --backend waydroid-shell --launch-delay-ms 2500
 cargo run -p wroid-cli -- run profiles/examples/shooter-basic.json --backend waydroid-shell --no-launch
@@ -124,7 +127,29 @@ Profiles are JSON files with a target resolution and named bindings:
 }
 ```
 
-Supported MVP action kinds are `tap` and `swipe`. `virtual_joystick`, `mouse_aim`, and `macro` exist in the schema as placeholders and intentionally fail normal validation until implemented. The interactive `play` runner tolerates those placeholder actions so it can print a clear unsupported-action message and continue running.
+Supported action kinds are `tap`, `swipe`, and `virtual_joystick`. Virtual joystick bindings use a `key_cluster` input and store a center point, radius, tick interval, and swipe duration:
+
+```json
+{
+  "name": "movement",
+  "input": {
+    "kind": "key_cluster",
+    "up": "w",
+    "left": "a",
+    "down": "s",
+    "right": "d"
+  },
+  "action": {
+    "kind": "virtual_joystick",
+    "center": { "x": 320, "y": 780 },
+    "radius": 120,
+    "tick_ms": 80,
+    "swipe_duration_ms": 70
+  }
+}
+```
+
+`virtual_joystick` currently validates, lists, saves, and scales, but live hold-loop execution is scheduled for the next milestone. `mouse_aim` and `macro` remain schema placeholders and intentionally fail normal validation until implemented.
 
 Profiles can also be edited from the CLI:
 
@@ -132,6 +157,7 @@ Profiles can also be edited from the CLI:
 cargo run -p wroid-cli -- profile new profiles/local/my-game.json --name "My Game" --package com.example.game --width 1920 --height 1080
 cargo run -p wroid-cli -- profile add-tap profiles/local/my-game.json --name fire --key F --x 1640 --y 540
 cargo run -p wroid-cli -- profile add-swipe profiles/local/my-game.json --name look_right --key D --from 960,540 --to 1260,540 --duration-ms 180
+cargo run -p wroid-cli -- profile add-joystick profiles/local/my-game.json --name movement --up W --left A --down S --right D --center 320,780 --radius 120 --tick-ms 80 --swipe-duration-ms 70
 cargo run -p wroid-cli -- profile list-bindings profiles/local/my-game.json
 cargo run -p wroid-cli -- profile remove-binding profiles/local/my-game.json fire
 ```
@@ -152,6 +178,8 @@ wroid profile scale profiles/examples/shooter-basic.json /tmp/shooter-1050.json 
 sudo target/debug/wroid play /tmp/shooter-1050.json --backend waydroid-shell
 sudo target/debug/wroid play profiles/examples/shooter-basic.json --backend waydroid-shell --scale-to-current
 ```
+
+Scaling also updates virtual joystick centers. Joystick radius is scaled with the average of the horizontal and vertical scale factors because radius is a single scalar while screens can change by different x/y ratios.
 
 Profiles can be imported into the user-owned local registry at `$XDG_CONFIG_HOME/wroid/profiles/`, or `~/.config/wroid/profiles/` when `XDG_CONFIG_HOME` is not set. By default, the registry ID is the profile's `package_name`:
 

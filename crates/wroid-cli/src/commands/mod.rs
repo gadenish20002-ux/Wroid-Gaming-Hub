@@ -79,6 +79,29 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
                 to,
                 duration_ms,
             } => profile::add_swipe_binding(path, name, key, from, to, duration_ms),
+            ProfileCommand::AddJoystick {
+                path,
+                name,
+                up,
+                left,
+                down,
+                right,
+                center,
+                radius,
+                tick_ms,
+                swipe_duration_ms,
+            } => profile::add_joystick_binding(
+                path,
+                name,
+                up,
+                left,
+                down,
+                right,
+                center,
+                radius,
+                tick_ms,
+                swipe_duration_ms,
+            ),
             ProfileCommand::RemoveBinding { path, binding_name } => {
                 profile::remove_binding(path, &binding_name)
             }

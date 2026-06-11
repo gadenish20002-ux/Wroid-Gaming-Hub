@@ -53,9 +53,28 @@ fn print_keyboard_bindings(profile: &ControlProfile) {
     let mut printed = false;
 
     for binding in keyboard_bindings(&profile.bindings) {
-        if let BindingInput::Key { key } = &binding.input {
-            println!("  {} -> {}", display_key(key), binding.name);
-            printed = true;
+        match &binding.input {
+            BindingInput::Key { key } => {
+                println!("  {} -> {}", display_key(key), binding.name);
+                printed = true;
+            }
+            BindingInput::KeyCluster {
+                up,
+                left,
+                down,
+                right,
+            } => {
+                println!(
+                    "  {}/{}/{}/{} -> {}",
+                    display_key(up),
+                    display_key(left),
+                    display_key(down),
+                    display_key(right),
+                    binding.name
+                );
+                printed = true;
+            }
+            BindingInput::MouseButton { .. } => {}
         }
     }
 
@@ -65,18 +84,27 @@ fn print_keyboard_bindings(profile: &ControlProfile) {
 }
 
 fn keyboard_bindings(bindings: &[Binding]) -> impl Iterator<Item = &Binding> {
-    bindings
-        .iter()
-        .filter(|binding| matches!(binding.input, BindingInput::Key { .. }))
+    bindings.iter().filter(|binding| {
+        matches!(
+            binding.input,
+            BindingInput::Key { .. } | BindingInput::KeyCluster { .. }
+        )
+    })
 }
 
 pub(crate) fn resolve_key_binding<'a>(bindings: &'a [Binding], key: &str) -> Option<&'a Binding> {
     let normalized_key = normalize_key(key);
-    keyboard_bindings(bindings).find(|binding| {
-        let BindingInput::Key { key } = &binding.input else {
-            return false;
-        };
-        normalize_key(key) == normalized_key
+    keyboard_bindings(bindings).find(|binding| match &binding.input {
+        BindingInput::Key { key } => normalize_key(key) == normalized_key,
+        BindingInput::KeyCluster {
+            up,
+            left,
+            down,
+            right,
+        } => [up, left, down, right]
+            .iter()
+            .any(|key| normalize_key(key) == normalized_key),
+        BindingInput::MouseButton { .. } => false,
     })
 }
 
@@ -159,6 +187,13 @@ fn execute_interactive_binding(
                 to.y,
                 *duration_ms,
             )
+        }
+        BindingAction::VirtualJoystick { .. } => {
+            println!(
+                "\r{} uses virtual_joystick; live hold execution is not implemented yet",
+                binding.name
+            );
+            Ok(())
         }
         unsupported => {
             println!(
@@ -248,6 +283,37 @@ mod tests {
         };
 
         assert!(resolve_key_binding(&profile.bindings, "F").is_none());
+    }
+
+    #[test]
+    fn resolves_key_cluster_direction_to_joystick_binding() {
+        let profile = ControlProfile {
+            name: "Joystick Profile".to_owned(),
+            package_name: "com.example.joystick".to_owned(),
+            resolution: Resolution {
+                width: 1280,
+                height: 720,
+            },
+            bindings: vec![Binding {
+                name: "movement".to_owned(),
+                input: BindingInput::KeyCluster {
+                    up: "w".to_owned(),
+                    left: "a".to_owned(),
+                    down: "s".to_owned(),
+                    right: "d".to_owned(),
+                },
+                action: BindingAction::VirtualJoystick {
+                    center: Point { x: 320, y: 640 },
+                    radius: 120,
+                    tick_ms: 80,
+                    swipe_duration_ms: 70,
+                },
+            }],
+        };
+
+        let binding = resolve_key_binding(&profile.bindings, "W").unwrap();
+
+        assert_eq!(binding.name, "movement");
     }
 
     fn keyboard_test_profile() -> ControlProfile {

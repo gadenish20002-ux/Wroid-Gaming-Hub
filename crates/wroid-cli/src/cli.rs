@@ -140,6 +140,27 @@ pub(crate) enum ProfileCommand {
         #[arg(long)]
         duration_ms: u64,
     },
+    AddJoystick {
+        path: PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        up: String,
+        #[arg(long)]
+        left: String,
+        #[arg(long)]
+        down: String,
+        #[arg(long)]
+        right: String,
+        #[arg(long)]
+        center: String,
+        #[arg(long)]
+        radius: u32,
+        #[arg(long, default_value_t = 80)]
+        tick_ms: u64,
+        #[arg(long, default_value_t = 70)]
+        swipe_duration_ms: u64,
+    },
     RemoveBinding {
         path: PathBuf,
         binding_name: String,
@@ -403,6 +424,61 @@ mod tests {
         assert_eq!(binding_name, "fire");
         assert_eq!(backend, InputBackend::WaydroidShell);
         assert!(scale_to_current);
+    }
+
+    #[test]
+    fn profile_add_joystick_uses_default_timing() {
+        let cli = Cli::try_parse_from([
+            "wroid",
+            "profile",
+            "add-joystick",
+            "profiles/my-game.json",
+            "--name",
+            "movement",
+            "--up",
+            "W",
+            "--left",
+            "A",
+            "--down",
+            "S",
+            "--right",
+            "D",
+            "--center",
+            "320,780",
+            "--radius",
+            "120",
+        ])
+        .unwrap();
+
+        let Commands::Profile { command } = cli.command else {
+            panic!("expected profile command");
+        };
+        let ProfileCommand::AddJoystick {
+            path,
+            name,
+            up,
+            left,
+            down,
+            right,
+            center,
+            radius,
+            tick_ms,
+            swipe_duration_ms,
+        } = command
+        else {
+            panic!("expected add-joystick command");
+        };
+
+        assert_eq!(path, PathBuf::from("profiles/my-game.json"));
+        assert_eq!(name, "movement");
+        assert_eq!(up, "W");
+        assert_eq!(left, "A");
+        assert_eq!(down, "S");
+        assert_eq!(right, "D");
+        assert_eq!(center, "320,780");
+        assert_eq!(radius, 120);
+        assert_eq!(tick_ms, 80);
+        assert_eq!(swipe_duration_ms, 70);
     }
 
     #[test]

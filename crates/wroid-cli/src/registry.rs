@@ -404,7 +404,7 @@ fn profile_error_hint(error: &ProfileError) -> Option<&'static str> {
     if message.contains("missing field `kind`") {
         Some("profile input and action objects are tagged; include a `kind` field such as `key`, `tap`, or `swipe`.")
     } else if message.contains("unknown variant") {
-        Some("check `kind` values. Supported MVP input kind: `key`; supported MVP action kinds: `tap` and `swipe`.")
+        Some("check `kind` values. Supported input kinds include `key` and `key_cluster`; supported action kinds include `tap`, `swipe`, and `virtual_joystick`.")
     } else if message.contains("invalid type: map, expected a sequence") {
         Some("check array fields. `bindings` must be a JSON array, and macro `steps` must be an array.")
     } else {
@@ -444,6 +444,18 @@ pub(crate) fn binding_description(binding: &Binding) -> String {
 fn input_description(input: &BindingInput) -> String {
     match input {
         BindingInput::Key { key } => key.trim().to_owned(),
+        BindingInput::KeyCluster {
+            up,
+            left,
+            down,
+            right,
+        } => format!(
+            "key_cluster up={} left={} down={} right={}",
+            up.trim(),
+            left.trim(),
+            down.trim(),
+            right.trim()
+        ),
         BindingInput::MouseButton { button } => format!("mouse_button {}", button.trim()),
     }
 }
@@ -456,6 +468,14 @@ fn action_description(action: &BindingAction) -> String {
             to,
             duration_ms,
         } => format!("swipe {from} to {to} ({duration_ms} ms)"),
+        BindingAction::VirtualJoystick {
+            center,
+            radius,
+            tick_ms,
+            swipe_duration_ms,
+        } => format!(
+            "virtual_joystick center {center} radius {radius} tick {tick_ms} ms swipe {swipe_duration_ms} ms"
+        ),
         unsupported => format!("unsupported {}", action_kind(unsupported)),
     }
 }
@@ -482,7 +502,7 @@ pub(crate) fn effective_uid() -> u32 {
 mod tests {
     use std::cell::RefCell;
 
-    use wroid_core::{BindingAction, ControlProfile, Point, Resolution};
+    use wroid_core::{Binding, BindingAction, BindingInput, ControlProfile, Point, Resolution};
 
     use crate::commands::run::{resolve_registered_profile_and_run, RunOptions};
     use crate::test_support::{FakeInputExecutor, InputCall};
@@ -760,6 +780,30 @@ mod tests {
     }
 
     #[test]
+    fn binding_description_formats_joystick_binding() {
+        let binding = Binding {
+            name: "movement".to_owned(),
+            input: BindingInput::KeyCluster {
+                up: "w".to_owned(),
+                left: "a".to_owned(),
+                down: "s".to_owned(),
+                right: "d".to_owned(),
+            },
+            action: BindingAction::VirtualJoystick {
+                center: Point { x: 320, y: 640 },
+                radius: 120,
+                tick_ms: 80,
+                swipe_duration_ms: 70,
+            },
+        };
+
+        assert_eq!(
+            binding_description(&binding),
+            "key_cluster up=w left=a down=s right=d -> movement -> virtual_joystick center 320,640 radius 120 tick 80 ms swipe 70 ms"
+        );
+    }
+
+    #[test]
     fn binding_description_formats_swipe_binding() {
         let binding = &ControlProfile::example().bindings[2];
 
@@ -817,13 +861,12 @@ Bindings:
     #[test]
     fn unsupported_actions_are_listed_without_validation_execution() {
         let mut profile = ControlProfile::example();
-        profile.bindings[0].action = BindingAction::VirtualJoystick {
-            center: Point { x: 100, y: 100 },
-            radius: 50,
+        profile.bindings[0].action = BindingAction::MouseAim {
+            anchor: Point { x: 100, y: 100 },
         };
 
         let listing = profile_bindings_listing(&profile);
 
-        assert!(listing.contains("unsupported virtual_joystick"));
+        assert!(listing.contains("unsupported mouse_aim"));
     }
 }
