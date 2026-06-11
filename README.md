@@ -1,6 +1,6 @@
 # Wroid Gaming Hub
 
-Wroid Gaming Hub is a Linux gaming frontend for Waydroid. It is currently a CLI-focused gaming layer that loads JSON control profiles, executes tap/swipe bindings through ADB or Waydroid shell input, and models virtual joystick controls for upcoming interactive execution.
+Wroid Gaming Hub is a Linux gaming frontend for Waydroid. It is currently a CLI-focused gaming layer that loads JSON control profiles and executes tap, swipe, and virtual joystick bindings through ADB or Waydroid shell input.
 
 ## Workspace
 
@@ -80,6 +80,8 @@ Keyboard bindings:
   D -> look_right
 ```
 
+For `virtual_joystick` bindings, `play` tracks the directional `key_cluster`, computes normalized diagonal movement, and repeatedly emits `input swipe center target duration` while a direction is held. Terminal input must remain focused; this is not global input capture yet. Key release tracking depends on terminal support for enhanced keyboard events, so terminals without release events may not provide reliable hold/release behavior.
+
 `run` loads the same profile, launches `package_name`, waits 1500 ms by default, then starts the same interactive keymapper used by `play`:
 
 ```sh
@@ -149,7 +151,7 @@ Supported action kinds are `tap`, `swipe`, and `virtual_joystick`. Virtual joyst
 }
 ```
 
-`virtual_joystick` currently validates, lists, saves, and scales, but live hold-loop execution is scheduled for the next milestone. `mouse_aim` and `macro` remain schema placeholders and intentionally fail normal validation until implemented.
+`virtual_joystick` validates, lists, saves, scales, and runs in terminal `play` mode. `mouse_aim` and `macro` remain schema placeholders and intentionally fail normal validation until implemented.
 
 Profiles can also be edited from the CLI:
 
