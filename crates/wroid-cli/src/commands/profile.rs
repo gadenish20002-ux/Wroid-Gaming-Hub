@@ -9,10 +9,12 @@ use crate::device::detect_device_screen;
 use crate::interactive::normalize_key;
 use crate::output::write_stdout;
 use crate::registry::{
-    create_current_profile_in_registry, ensure_binding_name_available, ensure_point_in_bounds,
+    create_current_profile_in_registry, duplicate_profile_in_registry,
+    ensure_binding_name_available, ensure_point_in_bounds, export_profile_from_registry,
     import_profile_to_registry, load_validated_profile, new_empty_control_profile, parse_point_arg,
     profile_bindings_listing, profile_registry_dir, profile_registry_file_path,
-    profile_registry_listing, registered_profile_bindings_listing, save_profile,
+    profile_registry_listing, registered_profile_bindings_listing, remove_profile_from_registry,
+    rename_profile_in_registry, save_profile,
 };
 
 pub(crate) fn validate_profile(path: PathBuf) -> Result<()> {
@@ -237,6 +239,48 @@ pub(crate) fn import_profile(
     println!("Imported profile:");
     println!("  ID: {}", imported.id);
     println!("  Path: {}", imported.path.display());
+    Ok(())
+}
+
+pub(crate) fn export_profile(profile_id: &str, output_path: PathBuf, force: bool) -> Result<()> {
+    let registry_dir = profile_registry_dir()?;
+    let path = export_profile_from_registry(profile_id, &output_path, force, &registry_dir)?;
+
+    println!("Exported profile:");
+    println!("  ID: {profile_id}");
+    println!("  Path: {}", path.display());
+    Ok(())
+}
+
+pub(crate) fn remove_profile(profile_id: &str) -> Result<()> {
+    let registry_dir = profile_registry_dir()?;
+    let path = remove_profile_from_registry(profile_id, &registry_dir)?;
+
+    println!("Removed profile:");
+    println!("  ID: {profile_id}");
+    println!("  Path: {}", path.display());
+    Ok(())
+}
+
+pub(crate) fn rename_profile(old_id: &str, new_id: &str) -> Result<()> {
+    let registry_dir = profile_registry_dir()?;
+    let (_old_path, new_path) = rename_profile_in_registry(old_id, new_id, &registry_dir)?;
+
+    println!("Renamed profile:");
+    println!("  Old ID: {old_id}");
+    println!("  New ID: {new_id}");
+    println!("  Path: {}", new_path.display());
+    Ok(())
+}
+
+pub(crate) fn duplicate_profile(source_id: &str, target_id: &str) -> Result<()> {
+    let registry_dir = profile_registry_dir()?;
+    let path = duplicate_profile_in_registry(source_id, target_id, &registry_dir)?;
+
+    println!("Duplicated profile:");
+    println!("  Source ID: {source_id}");
+    println!("  Target ID: {target_id}");
+    println!("  Path: {}", path.display());
     Ok(())
 }
 

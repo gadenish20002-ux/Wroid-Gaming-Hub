@@ -175,6 +175,23 @@ pub(crate) enum ProfileCommand {
         #[arg(long)]
         force: bool,
     },
+    Export {
+        profile_id: String,
+        output_path: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
+    Remove {
+        profile_id: String,
+    },
+    Rename {
+        old_id: String,
+        new_id: String,
+    },
+    Duplicate {
+        source_id: String,
+        target_id: String,
+    },
     RegistryNewCurrent {
         #[arg(long)]
         name: String,

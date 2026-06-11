@@ -28,6 +28,10 @@ cargo run -p wroid-cli -- profile remove-binding /tmp/wroid-profile.json fire
 cargo run -p wroid-cli -- profile import /tmp/settings.json
 cargo run -p wroid-cli -- profile list
 cargo run -p wroid-cli -- profile show com.android.settings
+cargo run -p wroid-cli -- profile export com.android.settings /tmp/settings-export.json
+cargo run -p wroid-cli -- profile duplicate com.android.settings com.android.settings-copy
+cargo run -p wroid-cli -- profile rename com.android.settings-copy com.android.settings-backup
+cargo run -p wroid-cli -- profile remove com.android.settings-backup
 cargo run -p wroid-cli -- input tap 500 400
 cargo run -p wroid-cli -- input swipe 400 500 800 500 180
 cargo run -p wroid-cli -- input keyevent 3
@@ -189,6 +193,10 @@ Profiles can be imported into the user-owned local registry at `$XDG_CONFIG_HOME
 wroid profile import /tmp/settings.json
 wroid profile list
 wroid profile show com.android.settings
+wroid profile export com.android.settings /tmp/settings-export.json
+wroid profile duplicate com.android.settings com.android.settings-copy
+wroid profile rename com.android.settings-copy com.android.settings-backup
+wroid profile remove com.android.settings-backup
 sudo target/debug/wroid run-profile com.android.settings --backend waydroid-shell
 sudo target/debug/wroid run-profile com.android.settings --backend waydroid-shell --no-launch
 ```

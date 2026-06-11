@@ -107,6 +107,17 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
             }
             ProfileCommand::ListBindings { profile_path } => profile::list_bindings(profile_path),
             ProfileCommand::Import { path, id, force } => profile::import_profile(path, id, force),
+            ProfileCommand::Export {
+                profile_id,
+                output_path,
+                force,
+            } => profile::export_profile(&profile_id, output_path, force),
+            ProfileCommand::Remove { profile_id } => profile::remove_profile(&profile_id),
+            ProfileCommand::Rename { old_id, new_id } => profile::rename_profile(&old_id, &new_id),
+            ProfileCommand::Duplicate {
+                source_id,
+                target_id,
+            } => profile::duplicate_profile(&source_id, &target_id),
             ProfileCommand::RegistryNewCurrent {
                 name,
                 package,
