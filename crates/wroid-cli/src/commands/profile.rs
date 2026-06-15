@@ -9,10 +9,12 @@ use crate::device::detect_device_screen;
 use crate::interactive::normalize_key;
 use crate::output::write_stdout;
 use crate::registry::{
-    create_current_profile_in_registry, ensure_binding_name_available, ensure_point_in_bounds,
+    create_current_profile_in_registry, duplicate_profile_in_registry,
+    ensure_binding_name_available, ensure_point_in_bounds, export_profile_from_registry,
     import_profile_to_registry, load_validated_profile, new_empty_control_profile, parse_point_arg,
     profile_bindings_listing, profile_registry_dir, profile_registry_file_path,
-    profile_registry_listing, registered_profile_bindings_listing, save_profile,
+    profile_registry_listing, registered_profile_bindings_listing, remove_profile_from_registry,
+    rename_profile_in_registry, save_profile,
 };
 
 pub(crate) fn validate_profile(path: PathBuf) -> Result<()> {
@@ -146,6 +148,63 @@ pub(crate) fn add_swipe_binding(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn add_joystick_binding(
+    path: PathBuf,
+    name: String,
+    up: String,
+    left: String,
+    down: String,
+    right: String,
+    center: String,
+    radius: u32,
+    tick_ms: u64,
+    swipe_duration_ms: u64,
+) -> Result<()> {
+    let mut profile = load_validated_profile(&path)?;
+    ensure_binding_name_available(&profile, &name)?;
+
+    let center = parse_point_arg(&center, "--center")?;
+    if [up.as_str(), left.as_str(), down.as_str(), right.as_str()]
+        .iter()
+        .any(|key| key.trim().is_empty())
+    {
+        bail!("joystick directional keys must not be empty");
+    }
+    if radius == 0 {
+        bail!("joystick radius must be greater than zero");
+    }
+    if tick_ms == 0 {
+        bail!("joystick tick interval must be greater than zero");
+    }
+    if swipe_duration_ms == 0 {
+        bail!("joystick swipe duration must be greater than zero");
+    }
+    ensure_point_in_bounds(&profile, center, "--center point")?;
+
+    profile.bindings.push(Binding {
+        name: name.clone(),
+        input: BindingInput::KeyCluster {
+            up: normalize_key(&up),
+            left: normalize_key(&left),
+            down: normalize_key(&down),
+            right: normalize_key(&right),
+        },
+        action: BindingAction::VirtualJoystick {
+            center,
+            radius,
+            tick_ms,
+            swipe_duration_ms,
+        },
+    });
+    profile
+        .validate()
+        .with_context(|| format!("updated profile {} is invalid", path.display()))?;
+    save_profile(&profile, &path)?;
+    println!("added joystick binding: {name}");
+    Ok(())
+}
+
 pub(crate) fn remove_binding(path: PathBuf, binding_name: &str) -> Result<()> {
     let mut profile = load_validated_profile(&path)?;
     let index = profile
@@ -180,6 +239,48 @@ pub(crate) fn import_profile(
     println!("Imported profile:");
     println!("  ID: {}", imported.id);
     println!("  Path: {}", imported.path.display());
+    Ok(())
+}
+
+pub(crate) fn export_profile(profile_id: &str, output_path: PathBuf, force: bool) -> Result<()> {
+    let registry_dir = profile_registry_dir()?;
+    let path = export_profile_from_registry(profile_id, &output_path, force, &registry_dir)?;
+
+    println!("Exported profile:");
+    println!("  ID: {profile_id}");
+    println!("  Path: {}", path.display());
+    Ok(())
+}
+
+pub(crate) fn remove_profile(profile_id: &str) -> Result<()> {
+    let registry_dir = profile_registry_dir()?;
+    let path = remove_profile_from_registry(profile_id, &registry_dir)?;
+
+    println!("Removed profile:");
+    println!("  ID: {profile_id}");
+    println!("  Path: {}", path.display());
+    Ok(())
+}
+
+pub(crate) fn rename_profile(old_id: &str, new_id: &str) -> Result<()> {
+    let registry_dir = profile_registry_dir()?;
+    let (_old_path, new_path) = rename_profile_in_registry(old_id, new_id, &registry_dir)?;
+
+    println!("Renamed profile:");
+    println!("  Old ID: {old_id}");
+    println!("  New ID: {new_id}");
+    println!("  Path: {}", new_path.display());
+    Ok(())
+}
+
+pub(crate) fn duplicate_profile(source_id: &str, target_id: &str) -> Result<()> {
+    let registry_dir = profile_registry_dir()?;
+    let path = duplicate_profile_in_registry(source_id, target_id, &registry_dir)?;
+
+    println!("Duplicated profile:");
+    println!("  Source ID: {source_id}");
+    println!("  Target ID: {target_id}");
+    println!("  Path: {}", path.display());
     Ok(())
 }
 
@@ -343,6 +444,46 @@ mod tests {
                     from: Point { x: 300, y: 400 },
                     to: Point { x: 600, y: 400 },
                     duration_ms: 180,
+                },
+            }]
+        );
+        profile.validate().unwrap();
+    }
+
+    #[test]
+    fn adds_joystick_binding() {
+        let (_dir, path) = new_empty_profile();
+
+        add_joystick_binding(
+            path.clone(),
+            "movement".to_owned(),
+            "W".to_owned(),
+            "A".to_owned(),
+            "S".to_owned(),
+            "D".to_owned(),
+            "320,640".to_owned(),
+            120,
+            80,
+            70,
+        )
+        .unwrap();
+
+        let profile = ControlProfile::load_from_path(&path).unwrap();
+        assert_eq!(
+            profile.bindings,
+            vec![Binding {
+                name: "movement".to_owned(),
+                input: BindingInput::KeyCluster {
+                    up: "w".to_owned(),
+                    left: "a".to_owned(),
+                    down: "s".to_owned(),
+                    right: "d".to_owned(),
+                },
+                action: BindingAction::VirtualJoystick {
+                    center: Point { x: 320, y: 640 },
+                    radius: 120,
+                    tick_ms: 80,
+                    swipe_duration_ms: 70,
                 },
             }]
         );

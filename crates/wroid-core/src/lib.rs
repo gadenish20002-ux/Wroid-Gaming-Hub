@@ -134,8 +134,18 @@ pub struct Binding {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BindingInput {
-    Key { key: String },
-    MouseButton { button: String },
+    Key {
+        key: String,
+    },
+    KeyCluster {
+        up: String,
+        left: String,
+        down: String,
+        right: String,
+    },
+    MouseButton {
+        button: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +162,8 @@ pub enum BindingAction {
     VirtualJoystick {
         center: Point,
         radius: u32,
+        tick_ms: u64,
+        swipe_duration_ms: u64,
     },
     MouseAim {
         anchor: Point,
@@ -222,6 +234,12 @@ pub enum ValidationError {
     },
     #[error("binding {binding} has a swipe duration of zero")]
     ZeroSwipeDuration { binding: String },
+    #[error("binding {binding} has a virtual joystick radius of zero")]
+    ZeroJoystickRadius { binding: String },
+    #[error("binding {binding} has a virtual joystick tick interval of zero")]
+    ZeroJoystickTick { binding: String },
+    #[error("binding {binding} has a virtual joystick swipe duration of zero")]
+    ZeroJoystickSwipeDuration { binding: String },
     #[error("binding {binding} uses unsupported action kind: {kind}")]
     UnsupportedAction { binding: String, kind: String },
 }
@@ -263,9 +281,16 @@ pub fn scale_action(
             to: scale_point(*to, from_resolution, to_resolution),
             duration_ms: *duration_ms,
         },
-        BindingAction::VirtualJoystick { center, radius } => BindingAction::VirtualJoystick {
-            center: *center,
-            radius: *radius,
+        BindingAction::VirtualJoystick {
+            center,
+            radius,
+            tick_ms,
+            swipe_duration_ms,
+        } => BindingAction::VirtualJoystick {
+            center: scale_point(*center, from_resolution, to_resolution),
+            radius: scale_radius_average(*radius, from_resolution, to_resolution),
+            tick_ms: *tick_ms,
+            swipe_duration_ms: *swipe_duration_ms,
         },
         BindingAction::MouseAim { anchor } => BindingAction::MouseAim { anchor: *anchor },
         BindingAction::Macro { steps } => BindingAction::Macro {
@@ -294,9 +319,45 @@ fn scale_axis(value: u32, from: u32, to: u32) -> u32 {
     clamped as u32
 }
 
+fn scale_radius_average(
+    radius: u32,
+    from_resolution: Resolution,
+    to_resolution: Resolution,
+) -> u32 {
+    if radius == 0
+        || from_resolution.width == 0
+        || from_resolution.height == 0
+        || to_resolution.width == 0
+        || to_resolution.height == 0
+    {
+        return 0;
+    }
+
+    // Joystick radius is a single scalar, so use the average of the x/y scale factors.
+    let numerator = radius as u128
+        * ((to_resolution.width as u128 * from_resolution.height as u128)
+            + (to_resolution.height as u128 * from_resolution.width as u128));
+    let denominator = 2_u128 * from_resolution.width as u128 * from_resolution.height as u128;
+    let scaled = (numerator + denominator / 2) / denominator;
+    scaled.max(1).min(u32::MAX as u128) as u32
+}
+
 fn validate_input(input: &BindingInput, binding: &str, errors: &mut Vec<ValidationError>) {
     match input {
         BindingInput::Key { key } if key.trim().is_empty() => {
+            errors.push(ValidationError::EmptyInputValue {
+                binding: binding.to_owned(),
+            });
+        }
+        BindingInput::KeyCluster {
+            up,
+            left,
+            down,
+            right,
+        } if [up, left, down, right]
+            .iter()
+            .any(|key| key.trim().is_empty()) =>
+        {
             errors.push(ValidationError::EmptyInputValue {
                 binding: binding.to_owned(),
             });
@@ -306,7 +367,9 @@ fn validate_input(input: &BindingInput, binding: &str, errors: &mut Vec<Validati
                 binding: binding.to_owned(),
             });
         }
-        BindingInput::Key { .. } | BindingInput::MouseButton { .. } => {}
+        BindingInput::Key { .. }
+        | BindingInput::KeyCluster { .. }
+        | BindingInput::MouseButton { .. } => {}
     }
 }
 
@@ -331,10 +394,29 @@ fn validate_action(
                 });
             }
         }
-        BindingAction::VirtualJoystick { .. } => errors.push(ValidationError::UnsupportedAction {
-            binding: binding.to_owned(),
-            kind: "virtual_joystick".to_owned(),
-        }),
+        BindingAction::VirtualJoystick {
+            center,
+            radius,
+            tick_ms,
+            swipe_duration_ms,
+        } => {
+            validate_point(*center, binding, *resolution, errors);
+            if *radius == 0 {
+                errors.push(ValidationError::ZeroJoystickRadius {
+                    binding: binding.to_owned(),
+                });
+            }
+            if *tick_ms == 0 {
+                errors.push(ValidationError::ZeroJoystickTick {
+                    binding: binding.to_owned(),
+                });
+            }
+            if *swipe_duration_ms == 0 {
+                errors.push(ValidationError::ZeroJoystickSwipeDuration {
+                    binding: binding.to_owned(),
+                });
+            }
+        }
         BindingAction::MouseAim { .. } => errors.push(ValidationError::UnsupportedAction {
             binding: binding.to_owned(),
             kind: "mouse_aim".to_owned(),
@@ -415,6 +497,49 @@ mod tests {
             .errors
             .iter()
             .any(|error| matches!(error, ValidationError::ZeroSwipeDuration { .. })));
+    }
+
+    #[test]
+    fn valid_virtual_joystick_profile_passes_validation() {
+        let profile = joystick_profile();
+
+        profile.validate().unwrap();
+    }
+
+    #[test]
+    fn invalid_virtual_joystick_center_fails_validation() {
+        let mut profile = joystick_profile();
+        profile.bindings[0].action = BindingAction::VirtualJoystick {
+            center: Point { x: 1280, y: 360 },
+            radius: 120,
+            tick_ms: 80,
+            swipe_duration_ms: 70,
+        };
+
+        let err = profile.validate().unwrap_err();
+
+        assert!(err
+            .errors
+            .iter()
+            .any(|error| matches!(error, ValidationError::PointOutOfBounds { .. })));
+    }
+
+    #[test]
+    fn zero_virtual_joystick_radius_fails_validation() {
+        let mut profile = joystick_profile();
+        profile.bindings[0].action = BindingAction::VirtualJoystick {
+            center: Point { x: 320, y: 640 },
+            radius: 0,
+            tick_ms: 80,
+            swipe_duration_ms: 70,
+        };
+
+        let err = profile.validate().unwrap_err();
+
+        assert!(err
+            .errors
+            .iter()
+            .any(|error| matches!(error, ValidationError::ZeroJoystickRadius { .. })));
     }
 
     #[test]
@@ -530,5 +655,61 @@ mod tests {
                 duration_ms: 180,
             }
         );
+    }
+
+    #[test]
+    fn scale_action_scales_virtual_joystick_center_and_radius() {
+        let scaled = scale_action(
+            &BindingAction::VirtualJoystick {
+                center: Point { x: 320, y: 780 },
+                radius: 120,
+                tick_ms: 80,
+                swipe_duration_ms: 70,
+            },
+            Resolution {
+                width: 1920,
+                height: 1080,
+            },
+            Resolution {
+                width: 1280,
+                height: 720,
+            },
+        );
+
+        assert_eq!(
+            scaled,
+            BindingAction::VirtualJoystick {
+                center: Point { x: 213, y: 520 },
+                radius: 80,
+                tick_ms: 80,
+                swipe_duration_ms: 70,
+            }
+        );
+    }
+
+    fn joystick_profile() -> ControlProfile {
+        ControlProfile {
+            name: "Joystick".to_owned(),
+            package_name: "com.example.joystick".to_owned(),
+            resolution: Resolution {
+                width: 1280,
+                height: 720,
+            },
+            bindings: vec![Binding {
+                name: "movement".to_owned(),
+                input: BindingInput::KeyCluster {
+                    up: "w".to_owned(),
+                    left: "a".to_owned(),
+                    down: "s".to_owned(),
+                    right: "d".to_owned(),
+                },
+                action: BindingAction::VirtualJoystick {
+                    center: Point { x: 320, y: 640 },
+                    radius: 120,
+                    tick_ms: 80,
+                    swipe_duration_ms: 70,
+                },
+            }],
+        }
     }
 }

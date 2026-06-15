@@ -1,10 +1,11 @@
 pub(crate) mod app;
 pub(crate) mod device;
+pub(crate) mod doctor;
 pub(crate) mod input;
 pub(crate) mod profile;
 pub(crate) mod run;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use wroid_core::Resolution;
 
 use crate::backend::InputExecutor;
@@ -14,7 +15,7 @@ use crate::cli::{
 
 pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
     match cli.command {
-        Commands::Doctor => doctor(),
+        Commands::Doctor { backend } => doctor::doctor(input_executor, backend),
         Commands::Profile { command } => match command {
             ProfileCommand::Validate { path } => profile::validate_profile(path),
             ProfileCommand::Example { path } => profile::write_example_profile(path),
@@ -79,11 +80,45 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
                 to,
                 duration_ms,
             } => profile::add_swipe_binding(path, name, key, from, to, duration_ms),
+            ProfileCommand::AddJoystick {
+                path,
+                name,
+                up,
+                left,
+                down,
+                right,
+                center,
+                radius,
+                tick_ms,
+                swipe_duration_ms,
+            } => profile::add_joystick_binding(
+                path,
+                name,
+                up,
+                left,
+                down,
+                right,
+                center,
+                radius,
+                tick_ms,
+                swipe_duration_ms,
+            ),
             ProfileCommand::RemoveBinding { path, binding_name } => {
                 profile::remove_binding(path, &binding_name)
             }
             ProfileCommand::ListBindings { profile_path } => profile::list_bindings(profile_path),
             ProfileCommand::Import { path, id, force } => profile::import_profile(path, id, force),
+            ProfileCommand::Export {
+                profile_id,
+                output_path,
+                force,
+            } => profile::export_profile(&profile_id, output_path, force),
+            ProfileCommand::Remove { profile_id } => profile::remove_profile(&profile_id),
+            ProfileCommand::Rename { old_id, new_id } => profile::rename_profile(&old_id, &new_id),
+            ProfileCommand::Duplicate {
+                source_id,
+                target_id,
+            } => profile::duplicate_profile(&source_id, &target_id),
             ProfileCommand::RegistryNewCurrent {
                 name,
                 package,
@@ -127,9 +162,11 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
                 package_name,
                 backend,
             } => app::app_launch(input_executor, backend, &package_name),
-            AppCommand::InstallApk { path, backend } => {
-                app::app_install_apk(input_executor, backend, path)
-            }
+            AppCommand::InstallApk {
+                path,
+                backend,
+                allow_any_extension,
+            } => app::app_install_apk(input_executor, backend, path, allow_any_extension),
             AppCommand::Current { backend } => app::app_current(input_executor, backend),
         },
         Commands::Binding { command } => match command {
@@ -183,34 +220,5 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
                 scale_to_current,
             },
         ),
-    }
-}
-
-fn doctor() -> Result<()> {
-    println!("adb: {}", availability(wroid_adb::is_available()));
-    println!("waydroid: {}", availability(wroid_waydroid::is_available()));
-
-    if wroid_adb::is_available() {
-        let devices = wroid_adb::devices().context("failed to list adb devices")?;
-        println!("adb devices: {}", devices.len());
-        for device in devices {
-            println!("  {} {}", device.serial, device.state);
-        }
-    }
-
-    if wroid_waydroid::is_available() {
-        let status = wroid_waydroid::status().context("failed to read waydroid status")?;
-        println!("waydroid status:");
-        println!("{status}");
-    }
-
-    Ok(())
-}
-
-fn availability(is_available: bool) -> &'static str {
-    if is_available {
-        "available"
-    } else {
-        "missing"
     }
 }

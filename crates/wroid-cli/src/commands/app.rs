@@ -1,3 +1,4 @@
+use std::env;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -54,22 +55,30 @@ pub(crate) fn app_install_apk(
     input_executor: &impl InputExecutor,
     backend: InputBackend,
     path: PathBuf,
+    allow_any_extension: bool,
 ) -> Result<()> {
-    ensure_apk_path_exists(&path)?;
+    let apk_path = validate_apk_path(&path, allow_any_extension)?;
 
     let selected_backend = select_input_backend(input_executor, backend);
+    println!(
+        "Installing APK {} via {selected_backend}...",
+        apk_path.display()
+    );
     match selected_backend {
-        SelectedInputBackend::Adb => input_executor.adb_install_apk(&path),
-        SelectedInputBackend::WaydroidShell => input_executor.waydroid_app_install(&path),
+        SelectedInputBackend::Adb => input_executor.adb_install_apk(&apk_path),
+        SelectedInputBackend::WaydroidShell => input_executor.waydroid_app_install(&apk_path),
     }
     .with_context(|| {
         format!(
             "failed to install APK {} via {selected_backend}",
-            path.display()
+            apk_path.display()
         )
     })?;
 
-    println!("Installed APK {} via {selected_backend}.", path.display());
+    println!(
+        "Installed APK {} via {selected_backend}.",
+        apk_path.display()
+    );
     Ok(())
 }
 
@@ -97,16 +106,42 @@ pub(crate) fn app_current(
     Ok(())
 }
 
-pub(crate) fn ensure_apk_path_exists(path: &Path) -> Result<()> {
+pub(crate) fn validate_apk_path(path: &Path, allow_any_extension: bool) -> Result<PathBuf> {
+    let display_path = absolute_display_path(path)?;
+
     if !path.exists() {
-        bail!("APK path does not exist: {}", path.display());
+        bail!("APK path does not exist: {}", display_path.display());
     }
 
     if !path.is_file() {
-        bail!("APK path is not a file: {}", path.display());
+        bail!("APK path is not a file: {}", display_path.display());
     }
 
-    Ok(())
+    if !allow_any_extension && !has_apk_extension(path) {
+        bail!(
+            "APK path must end with .apk: {}. Pass --allow-any-extension to install anyway.",
+            display_path.display()
+        );
+    }
+
+    path.canonicalize()
+        .with_context(|| format!("failed to resolve APK path {}", display_path.display()))
+}
+
+fn absolute_display_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_owned())
+    } else {
+        Ok(env::current_dir()
+            .context("failed to determine current directory")?
+            .join(path))
+    }
+}
+
+fn has_apk_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("apk"))
 }
 
 pub(crate) fn package_listing(packages: &[String]) -> String {
@@ -181,9 +216,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing.apk");
 
-        let err = ensure_apk_path_exists(&path).unwrap_err();
+        let err = validate_apk_path(&path, false).unwrap_err();
 
         assert!(err.to_string().contains("APK path does not exist"));
+        assert!(err.to_string().contains(path.to_str().unwrap()));
     }
 
     #[test]
@@ -192,7 +228,7 @@ mod tests {
         let path = dir.path().join("missing.apk");
         let executor = FakeInputExecutor::default();
 
-        let err = app_install_apk(&executor, InputBackend::Adb, path).unwrap_err();
+        let err = app_install_apk(&executor, InputBackend::Adb, path, false).unwrap_err();
 
         assert!(err.to_string().contains("APK path does not exist"));
         assert!(executor.calls().is_empty());
@@ -206,9 +242,35 @@ mod tests {
         fs::write(&path, b"fake apk").unwrap();
         let executor = FakeInputExecutor::default();
 
-        app_install_apk(&executor, InputBackend::Adb, path.clone()).unwrap();
+        app_install_apk(&executor, InputBackend::Adb, path.clone(), false).unwrap();
 
-        assert_eq!(executor.calls(), vec![InputCall::AdbInstallApk(path)]);
+        assert_eq!(
+            executor.calls(),
+            vec![InputCall::AdbInstallApk(path.canonicalize().unwrap())]
+        );
         assert_eq!(executor.device_queries.get(), 0);
+    }
+
+    #[test]
+    fn apk_path_validation_rejects_non_apk_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("game.zip");
+        fs::write(&path, b"fake apk").unwrap();
+
+        let err = validate_apk_path(&path, false).unwrap_err();
+
+        assert!(err.to_string().contains("must end with .apk"));
+        assert!(err.to_string().contains("--allow-any-extension"));
+    }
+
+    #[test]
+    fn apk_path_validation_accepts_non_apk_with_allow_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("game.zip");
+        fs::write(&path, b"fake apk").unwrap();
+
+        let validated = validate_apk_path(&path, true).unwrap();
+
+        assert_eq!(validated, path.canonicalize().unwrap());
     }
 }

@@ -1,33 +1,52 @@
 # Wroid Gaming Hub SPEC
 
-Wroid Gaming Hub is a Linux gaming frontend for Waydroid.
+Wroid Gaming Hub is a Linux gaming frontend for Android games running through Waydroid.
 
-Goal:
-Build a BlueStacks-like gaming layer for Linux focused on Android games.
+## Goal
 
-MVP goal:
-Load a control profile JSON and execute tap/swipe bindings through ADB.
+Build a BlueStacks-like gaming layer for Linux focused on Android games, with profile-driven controls and Waydroid-friendly workflows.
 
-Core principles:
-- Rust core
-- Waydroid is an external dependency
-- ADB backend first
-- evdev/uinput later
-- profiles stored as JSON
-- no GUI in MVP-0
-- no overlay editor in MVP-0
-- no macros in MVP-0
-- no gamepad in MVP-0
+## Current Scope
 
-Architecture:
-- wroid-core: profile schema, validation, action execution
-- wroid-adb: ADB command wrapper
-- wroid-waydroid: Waydroid command wrapper
-- wroid-cli: CLI interface
+The project is currently a CLI-first foundation. It supports:
 
-Acceptance criteria for MVP-0:
-- cargo test passes
-- example profile validates
-- invalid coordinates fail validation
-- duplicate binding names fail validation
-- CLI can run a binding by name
+- JSON control profiles.
+- Tap and swipe bindings.
+- Terminal keymapper execution.
+- Virtual joystick profile bindings and terminal execution.
+- ADB and Waydroid shell input backends.
+- App list, launch, install APK, and current activity commands.
+- Device screen and density detection.
+- Local profile registry management.
+- Profile coordinate scaling.
+- Doctor diagnostics and backend recommendation.
+
+## Core Principles
+
+- Rust workspace.
+- Waydroid remains an external dependency.
+- ADB and Waydroid shell are explicit backends.
+- Profiles are stored as JSON.
+- CLI orchestration stays in `wroid-cli`.
+- Profile model and validation stay in `wroid-core`.
+- Command wrappers stay in `wroid-adb` and `wroid-waydroid`.
+
+## Out of Scope
+
+- GUI.
+- Overlay editor.
+- Global input capture.
+- evdev/uinput.
+- Gamepad mapping.
+- Mouse aim.
+- Macro execution.
+- XAPK/APKM/OBB install flows.
+- Anti-cheat bypasses or protection evasion.
+
+## Acceptance Gates
+
+- `cargo fmt`
+- `cargo test --workspace`
+- Example profiles validate.
+- Existing CLI behavior remains compatible.
+- New behavior has focused unit coverage.

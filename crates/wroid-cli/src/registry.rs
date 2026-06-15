@@ -114,6 +114,77 @@ pub(crate) fn create_current_profile_in_registry(
     })
 }
 
+pub(crate) fn export_profile_from_registry(
+    profile_id: &str,
+    output_path: &Path,
+    force: bool,
+    registry_dir: &Path,
+) -> Result<PathBuf> {
+    let source_path = registry_profile_file_path(registry_dir, profile_id)?;
+    ensure_registry_profile_exists(profile_id, &source_path)?;
+    if output_path.exists() && !force {
+        bail!(
+            "profile {} already exists; pass --force to overwrite",
+            output_path.display()
+        );
+    }
+
+    copy_profile_json(&source_path, output_path)?;
+    Ok(output_path.to_owned())
+}
+
+pub(crate) fn remove_profile_from_registry(
+    profile_id: &str,
+    registry_dir: &Path,
+) -> Result<PathBuf> {
+    let path = registry_profile_file_path(registry_dir, profile_id)?;
+    ensure_registry_profile_exists(profile_id, &path)?;
+    fs::remove_file(&path)
+        .with_context(|| format!("failed to remove profile {}", path.display()))?;
+    Ok(path)
+}
+
+pub(crate) fn rename_profile_in_registry(
+    old_id: &str,
+    new_id: &str,
+    registry_dir: &Path,
+) -> Result<(PathBuf, PathBuf)> {
+    let old_path = registry_profile_file_path(registry_dir, old_id)?;
+    let new_path = registry_profile_file_path(registry_dir, new_id)?;
+    ensure_registry_profile_exists(old_id, &old_path)?;
+    if new_path.exists() {
+        bail!("profile {new_id} already exists at {}", new_path.display());
+    }
+
+    fs::rename(&old_path, &new_path).with_context(|| {
+        format!(
+            "failed to rename profile {} to {}",
+            old_path.display(),
+            new_path.display()
+        )
+    })?;
+    Ok((old_path, new_path))
+}
+
+pub(crate) fn duplicate_profile_in_registry(
+    source_id: &str,
+    target_id: &str,
+    registry_dir: &Path,
+) -> Result<PathBuf> {
+    let source_path = registry_profile_file_path(registry_dir, source_id)?;
+    let target_path = registry_profile_file_path(registry_dir, target_id)?;
+    ensure_registry_profile_exists(source_id, &source_path)?;
+    if target_path.exists() {
+        bail!(
+            "profile {target_id} already exists at {}",
+            target_path.display()
+        );
+    }
+
+    copy_profile_json(&source_path, &target_path)?;
+    Ok(target_path)
+}
+
 pub(crate) fn profile_registry_listing(registry_dir: &Path) -> Result<String> {
     if !registry_dir.exists() {
         return Ok(empty_profile_registry_message(registry_dir));
@@ -175,6 +246,36 @@ pub(crate) fn profile_registry_listing(registry_dir: &Path) -> Result<String> {
     }
 
     Ok(output)
+}
+
+fn ensure_registry_profile_exists(profile_id: &str, path: &Path) -> Result<()> {
+    if !path.exists() {
+        bail!(
+            "profile {profile_id} not found in registry at {}",
+            path.display()
+        );
+    }
+
+    Ok(())
+}
+
+fn copy_profile_json(source_path: &Path, target_path: &Path) -> Result<()> {
+    if let Some(parent) = target_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create profile directory {}", parent.display()))?;
+    }
+
+    fs::copy(source_path, target_path).with_context(|| {
+        format!(
+            "failed to copy profile {} to {}",
+            source_path.display(),
+            target_path.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn empty_profile_registry_message(registry_dir: &Path) -> String {
@@ -404,7 +505,7 @@ fn profile_error_hint(error: &ProfileError) -> Option<&'static str> {
     if message.contains("missing field `kind`") {
         Some("profile input and action objects are tagged; include a `kind` field such as `key`, `tap`, or `swipe`.")
     } else if message.contains("unknown variant") {
-        Some("check `kind` values. Supported MVP input kind: `key`; supported MVP action kinds: `tap` and `swipe`.")
+        Some("check `kind` values. Supported input kinds include `key` and `key_cluster`; supported action kinds include `tap`, `swipe`, and `virtual_joystick`.")
     } else if message.contains("invalid type: map, expected a sequence") {
         Some("check array fields. `bindings` must be a JSON array, and macro `steps` must be an array.")
     } else {
@@ -444,6 +545,18 @@ pub(crate) fn binding_description(binding: &Binding) -> String {
 fn input_description(input: &BindingInput) -> String {
     match input {
         BindingInput::Key { key } => key.trim().to_owned(),
+        BindingInput::KeyCluster {
+            up,
+            left,
+            down,
+            right,
+        } => format!(
+            "key_cluster up={} left={} down={} right={}",
+            up.trim(),
+            left.trim(),
+            down.trim(),
+            right.trim()
+        ),
         BindingInput::MouseButton { button } => format!("mouse_button {}", button.trim()),
     }
 }
@@ -456,6 +569,14 @@ fn action_description(action: &BindingAction) -> String {
             to,
             duration_ms,
         } => format!("swipe {from} to {to} ({duration_ms} ms)"),
+        BindingAction::VirtualJoystick {
+            center,
+            radius,
+            tick_ms,
+            swipe_duration_ms,
+        } => format!(
+            "virtual_joystick center {center} radius {radius} tick {tick_ms} ms swipe {swipe_duration_ms} ms"
+        ),
         unsupported => format!("unsupported {}", action_kind(unsupported)),
     }
 }
@@ -482,7 +603,7 @@ pub(crate) fn effective_uid() -> u32 {
 mod tests {
     use std::cell::RefCell;
 
-    use wroid_core::{BindingAction, ControlProfile, Point, Resolution};
+    use wroid_core::{Binding, BindingAction, BindingInput, ControlProfile, Point, Resolution};
 
     use crate::commands::run::{resolve_registered_profile_and_run, RunOptions};
     use crate::test_support::{FakeInputExecutor, InputCall};
@@ -668,6 +789,82 @@ mod tests {
     }
 
     #[test]
+    fn export_profile_writes_expected_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_dir = dir.path().join("registry");
+        fs::create_dir_all(&registry_dir).unwrap();
+        let source_path = registry_dir.join("com.example.game.json");
+        let output_path = dir.path().join("exports").join("game.json");
+        let source_json = valid_profile_json("Game", "com.example.game");
+        fs::write(&source_path, source_json.as_bytes()).unwrap();
+
+        let exported =
+            export_profile_from_registry("com.example.game", &output_path, false, &registry_dir)
+                .unwrap();
+
+        assert_eq!(exported, output_path);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), source_json);
+    }
+
+    #[test]
+    fn remove_profile_deletes_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_dir = dir.path().join("registry");
+        fs::create_dir_all(&registry_dir).unwrap();
+        let path = registry_dir.join("com.example.game.json");
+        fs::write(&path, valid_profile_json("Game", "com.example.game")).unwrap();
+
+        let removed = remove_profile_from_registry("com.example.game", &registry_dir).unwrap();
+
+        assert_eq!(removed, path);
+        assert!(!removed.exists());
+    }
+
+    #[test]
+    fn rename_profile_rejects_existing_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_dir = dir.path().join("registry");
+        fs::create_dir_all(&registry_dir).unwrap();
+        fs::write(
+            registry_dir.join("com.example.source.json"),
+            valid_profile_json("Source", "com.example.source"),
+        )
+        .unwrap();
+        fs::write(
+            registry_dir.join("com.example.target.json"),
+            valid_profile_json("Target", "com.example.target"),
+        )
+        .unwrap();
+
+        let err =
+            rename_profile_in_registry("com.example.source", "com.example.target", &registry_dir)
+                .unwrap_err();
+
+        assert!(err.to_string().contains("already exists"));
+        assert!(registry_dir.join("com.example.source.json").exists());
+        assert!(registry_dir.join("com.example.target.json").exists());
+    }
+
+    #[test]
+    fn duplicate_profile_creates_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry_dir = dir.path().join("registry");
+        fs::create_dir_all(&registry_dir).unwrap();
+        let source_path = registry_dir.join("com.example.source.json");
+        let target_path = registry_dir.join("com.example.copy.json");
+        let source_json = valid_profile_json("Source", "com.example.source");
+        fs::write(&source_path, source_json.as_bytes()).unwrap();
+
+        let duplicated =
+            duplicate_profile_in_registry("com.example.source", "com.example.copy", &registry_dir)
+                .unwrap();
+
+        assert_eq!(duplicated, target_path);
+        assert_eq!(fs::read_to_string(target_path).unwrap(), source_json);
+        assert_eq!(fs::read_to_string(source_path).unwrap(), source_json);
+    }
+
+    #[test]
     fn list_profiles_handles_empty_registry() {
         let dir = tempfile::tempdir().unwrap();
         let registry_dir = dir.path().join("registry");
@@ -760,6 +957,30 @@ mod tests {
     }
 
     #[test]
+    fn binding_description_formats_joystick_binding() {
+        let binding = Binding {
+            name: "movement".to_owned(),
+            input: BindingInput::KeyCluster {
+                up: "w".to_owned(),
+                left: "a".to_owned(),
+                down: "s".to_owned(),
+                right: "d".to_owned(),
+            },
+            action: BindingAction::VirtualJoystick {
+                center: Point { x: 320, y: 640 },
+                radius: 120,
+                tick_ms: 80,
+                swipe_duration_ms: 70,
+            },
+        };
+
+        assert_eq!(
+            binding_description(&binding),
+            "key_cluster up=w left=a down=s right=d -> movement -> virtual_joystick center 320,640 radius 120 tick 80 ms swipe 70 ms"
+        );
+    }
+
+    #[test]
     fn binding_description_formats_swipe_binding() {
         let binding = &ControlProfile::example().bindings[2];
 
@@ -817,13 +1038,18 @@ Bindings:
     #[test]
     fn unsupported_actions_are_listed_without_validation_execution() {
         let mut profile = ControlProfile::example();
-        profile.bindings[0].action = BindingAction::VirtualJoystick {
-            center: Point { x: 100, y: 100 },
-            radius: 50,
+        profile.bindings[0].action = BindingAction::MouseAim {
+            anchor: Point { x: 100, y: 100 },
         };
 
         let listing = profile_bindings_listing(&profile);
 
-        assert!(listing.contains("unsupported virtual_joystick"));
+        assert!(listing.contains("unsupported mouse_aim"));
+    }
+
+    fn valid_profile_json(name: &str, package_name: &str) -> String {
+        format!(
+            "{{\n  \"name\": \"{name}\",\n  \"package_name\": \"{package_name}\",\n  \"resolution\": {{ \"width\": 1280, \"height\": 720 }},\n  \"bindings\": []\n}}\n"
+        )
     }
 }

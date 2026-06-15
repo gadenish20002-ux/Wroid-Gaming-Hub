@@ -14,7 +14,10 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Commands {
-    Doctor,
+    Doctor {
+        #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
+        backend: InputBackend,
+    },
     Profile {
         #[command(subcommand)]
         command: ProfileCommand,
@@ -140,6 +143,27 @@ pub(crate) enum ProfileCommand {
         #[arg(long)]
         duration_ms: u64,
     },
+    AddJoystick {
+        path: PathBuf,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        up: String,
+        #[arg(long)]
+        left: String,
+        #[arg(long)]
+        down: String,
+        #[arg(long)]
+        right: String,
+        #[arg(long)]
+        center: String,
+        #[arg(long)]
+        radius: u32,
+        #[arg(long, default_value_t = 80)]
+        tick_ms: u64,
+        #[arg(long, default_value_t = 70)]
+        swipe_duration_ms: u64,
+    },
     RemoveBinding {
         path: PathBuf,
         binding_name: String,
@@ -153,6 +177,23 @@ pub(crate) enum ProfileCommand {
         id: Option<String>,
         #[arg(long)]
         force: bool,
+    },
+    Export {
+        profile_id: String,
+        output_path: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
+    Remove {
+        profile_id: String,
+    },
+    Rename {
+        old_id: String,
+        new_id: String,
+    },
+    Duplicate {
+        source_id: String,
+        target_id: String,
     },
     RegistryNewCurrent {
         #[arg(long)]
@@ -230,6 +271,8 @@ pub(crate) enum AppCommand {
         path: PathBuf,
         #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
         backend: InputBackend,
+        #[arg(long)]
+        allow_any_extension: bool,
     },
     Current {
         #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
@@ -295,6 +338,17 @@ mod tests {
         assert_eq!(launch_delay_ms, DEFAULT_LAUNCH_DELAY_MS);
         assert!(!no_launch);
         assert!(!scale_to_current);
+    }
+
+    #[test]
+    fn doctor_accepts_backend_option() {
+        let cli = Cli::try_parse_from(["wroid", "doctor", "--backend", "waydroid-shell"]).unwrap();
+
+        let Commands::Doctor { backend } = cli.command else {
+            panic!("expected doctor command");
+        };
+
+        assert_eq!(backend, InputBackend::WaydroidShell);
     }
 
     #[test]
@@ -403,6 +457,91 @@ mod tests {
         assert_eq!(binding_name, "fire");
         assert_eq!(backend, InputBackend::WaydroidShell);
         assert!(scale_to_current);
+    }
+
+    #[test]
+    fn profile_add_joystick_uses_default_timing() {
+        let cli = Cli::try_parse_from([
+            "wroid",
+            "profile",
+            "add-joystick",
+            "profiles/my-game.json",
+            "--name",
+            "movement",
+            "--up",
+            "W",
+            "--left",
+            "A",
+            "--down",
+            "S",
+            "--right",
+            "D",
+            "--center",
+            "320,780",
+            "--radius",
+            "120",
+        ])
+        .unwrap();
+
+        let Commands::Profile { command } = cli.command else {
+            panic!("expected profile command");
+        };
+        let ProfileCommand::AddJoystick {
+            path,
+            name,
+            up,
+            left,
+            down,
+            right,
+            center,
+            radius,
+            tick_ms,
+            swipe_duration_ms,
+        } = command
+        else {
+            panic!("expected add-joystick command");
+        };
+
+        assert_eq!(path, PathBuf::from("profiles/my-game.json"));
+        assert_eq!(name, "movement");
+        assert_eq!(up, "W");
+        assert_eq!(left, "A");
+        assert_eq!(down, "S");
+        assert_eq!(right, "D");
+        assert_eq!(center, "320,780");
+        assert_eq!(radius, 120);
+        assert_eq!(tick_ms, 80);
+        assert_eq!(swipe_duration_ms, 70);
+    }
+
+    #[test]
+    fn app_install_apk_accepts_allow_any_extension() {
+        let cli = Cli::try_parse_from([
+            "wroid",
+            "app",
+            "install-apk",
+            "downloads/game.bin",
+            "--backend",
+            "waydroid-shell",
+            "--allow-any-extension",
+        ])
+        .unwrap();
+
+        let Commands::App { command } = cli.command else {
+            panic!("expected app command");
+        };
+        let AppCommand::InstallApk {
+            path,
+            backend,
+            allow_any_extension,
+        } = command
+        else {
+            panic!("expected install-apk command");
+        };
+
+        assert_eq!(path, PathBuf::from("downloads/game.bin"));
+        assert_eq!(backend, InputBackend::WaydroidShell);
+        assert!(allow_any_extension);
     }
 
     #[test]

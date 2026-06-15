@@ -1,0 +1,30 @@
+{
+  "name": "Joystick Basic",
+  "package_name": "com.example.joystick",
+  "resolution": {
+    "width": 1280,
+    "height": 720
+  },
+  "bindings": [
+    {
+      "name": "movement",
+      "input": {
+        "kind": "key_cluster",
+        "up": "w",
+        "left": "a",
+        "down": "s",
+        "right": "d"
+      },
+      "action": {
+        "kind": "virtual_joystick",
+        "center": {
+          "x": 320,
+          "y": 640
+        },
+        "radius": 120,
+        "tick_ms": 80,
+        "swipe_duration_ms": 70
+      }
+    }
+  ]
+}
