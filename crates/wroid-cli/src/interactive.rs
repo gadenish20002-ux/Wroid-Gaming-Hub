@@ -310,10 +310,6 @@ impl JoystickKeyState {
             JoystickDirection::Right => self.right = is_pressed,
         }
     }
-
-    fn is_active(&self) -> bool {
-        self.up || self.left || self.down || self.right
-    }
 }
 
 #[derive(Debug)]
@@ -384,16 +380,14 @@ impl JoystickRuntime {
 
         for (binding_index, direction) in mapped {
             let binding = &mut self.bindings[*binding_index];
-            let was_active = binding.keys.is_active();
             match kind {
                 KeyEventKind::Press | KeyEventKind::Repeat => binding.keys.set(*direction, true),
                 KeyEventKind::Release => binding.keys.set(*direction, false),
             }
-            let is_active = binding.keys.is_active();
 
-            if is_active && !was_active {
-                binding.next_tick = Some(now);
-            } else if !is_active {
+            if joystick_target_point(binding.center, binding.radius, binding.keys).is_some() {
+                binding.next_tick.get_or_insert(now);
+            } else {
                 binding.next_tick = None;
             }
         }
@@ -660,6 +654,29 @@ mod tests {
         assert!(runtime
             .due_swipes(now + Duration::from_millis(80))
             .is_empty());
+    }
+
+    #[test]
+    fn joystick_runtime_resumes_after_opposite_direction_is_released() {
+        let profile = joystick_test_profile();
+        let mut runtime = JoystickRuntime::from_bindings(&profile.bindings);
+        let now = Instant::now();
+
+        runtime.handle_key_event("W", KeyEventKind::Press, now);
+        runtime.handle_key_event("S", KeyEventKind::Press, now);
+        assert!(runtime.due_swipes(now).is_empty());
+
+        runtime.handle_key_event("S", KeyEventKind::Release, now);
+
+        assert_eq!(
+            runtime.due_swipes(now),
+            vec![JoystickSwipe {
+                binding_name: "movement".to_owned(),
+                from: Point { x: 320, y: 640 },
+                to: Point { x: 320, y: 520 },
+                duration_ms: 70,
+            }]
+        );
     }
 
     fn keyboard_test_profile() -> ControlProfile {

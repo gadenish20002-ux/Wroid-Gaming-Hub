@@ -1,10 +1,11 @@
 pub(crate) mod app;
 pub(crate) mod device;
+pub(crate) mod doctor;
 pub(crate) mod input;
 pub(crate) mod profile;
 pub(crate) mod run;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use wroid_core::Resolution;
 
 use crate::backend::InputExecutor;
@@ -14,7 +15,7 @@ use crate::cli::{
 
 pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
     match cli.command {
-        Commands::Doctor => doctor(),
+        Commands::Doctor { backend } => doctor::doctor(input_executor, backend),
         Commands::Profile { command } => match command {
             ProfileCommand::Validate { path } => profile::validate_profile(path),
             ProfileCommand::Example { path } => profile::write_example_profile(path),
@@ -161,9 +162,11 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
                 package_name,
                 backend,
             } => app::app_launch(input_executor, backend, &package_name),
-            AppCommand::InstallApk { path, backend } => {
-                app::app_install_apk(input_executor, backend, path)
-            }
+            AppCommand::InstallApk {
+                path,
+                backend,
+                allow_any_extension,
+            } => app::app_install_apk(input_executor, backend, path, allow_any_extension),
             AppCommand::Current { backend } => app::app_current(input_executor, backend),
         },
         Commands::Binding { command } => match command {
@@ -217,34 +220,5 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
                 scale_to_current,
             },
         ),
-    }
-}
-
-fn doctor() -> Result<()> {
-    println!("adb: {}", availability(wroid_adb::is_available()));
-    println!("waydroid: {}", availability(wroid_waydroid::is_available()));
-
-    if wroid_adb::is_available() {
-        let devices = wroid_adb::devices().context("failed to list adb devices")?;
-        println!("adb devices: {}", devices.len());
-        for device in devices {
-            println!("  {} {}", device.serial, device.state);
-        }
-    }
-
-    if wroid_waydroid::is_available() {
-        let status = wroid_waydroid::status().context("failed to read waydroid status")?;
-        println!("waydroid status:");
-        println!("{status}");
-    }
-
-    Ok(())
-}
-
-fn availability(is_available: bool) -> &'static str {
-    if is_available {
-        "available"
-    } else {
-        "missing"
     }
 }

@@ -9,10 +9,65 @@ Wroid Gaming Hub is a Linux gaming frontend for Waydroid. It is currently a CLI-
 - `wroid-waydroid`: thin Waydroid command wrapper
 - `wroid-cli`: `wroid` command-line interface
 
+## Current Capabilities
+
+- Validate, create, edit, scale, import, export, duplicate, rename, and remove JSON profiles.
+- Run tap, swipe, keyevent, and virtual joystick actions through ADB or Waydroid shell input.
+- Launch Android packages from profiles and start the terminal keymapper.
+- List, launch, install APKs, and inspect current Android apps.
+- Detect device screen size and density for profile creation and scaling.
+- Diagnose ADB/Waydroid state with backend recommendations.
+
+## Tested Environment
+
+The current local development environment is CachyOS / Arch-based Linux on Wayland with Waydroid available. On this system, `waydroid app launch` works as the normal desktop user, while `waydroid shell input ...` may require sudo. Waydroid can report `IP address: UNKNOWN`, which makes ADB unreliable even when the Waydroid session and container are running.
+
+## Build and Install
+
+Install Rust, ADB, and Waydroid with your distribution tooling. On Arch/CachyOS:
+
+```sh
+sudo pacman -S rust cargo adb waydroid
+```
+
+Build and test:
+
+```sh
+cargo build --workspace
+cargo test --workspace
+```
+
+The CLI binary is `target/debug/wroid` after a debug build. During development, `cargo run -p wroid-cli -- <command>` is equivalent.
+
+## Basic Workflow
+
+```sh
+cargo run -p wroid-cli -- doctor
+sudo target/debug/wroid device info --backend waydroid-shell
+sudo target/debug/wroid profile new-current /tmp/settings.json --name "Android Settings" --package com.android.settings --backend waydroid-shell --force
+target/debug/wroid profile add-tap /tmp/settings.json --name home --key H --x 500 --y 900
+target/debug/wroid profile add-joystick /tmp/settings.json --name movement --up W --left A --down S --right D --center 320,780 --radius 120
+target/debug/wroid profile import /tmp/settings.json
+wroid profile list
+wroid profile show com.android.settings
+target/debug/wroid app launch com.android.settings --backend waydroid-shell
+sudo target/debug/wroid run-profile com.android.settings --backend waydroid-shell --no-launch
+```
+
+For a new game profile, create a profile with the current Android surface size, add bindings, import it, then use `run-profile`. If the app is already launched or sudo app launch hangs, use `--no-launch`.
+
+## More Docs
+
+- [Architecture](docs/architecture.md)
+- [Input model](docs/input-model.md)
+- [Waydroid notes](docs/waydroid-notes.md)
+- [Roadmap](docs/roadmap.md)
+
 ## Usage
 
 ```sh
 cargo run -p wroid-cli -- doctor
+cargo run -p wroid-cli -- doctor --backend waydroid-shell
 cargo run -p wroid-cli -- profile validate profiles/examples/shooter-basic.json
 cargo run -p wroid-cli -- profile list-bindings profiles/examples/shooter-basic.json
 cargo run -p wroid-cli -- profile example /tmp/wroid-profile.json
@@ -38,6 +93,7 @@ cargo run -p wroid-cli -- input keyevent 3
 cargo run -p wroid-cli -- app list --backend waydroid-shell
 cargo run -p wroid-cli -- app launch com.android.settings --backend waydroid-shell
 cargo run -p wroid-cli -- app install-apk ./game.apk --backend waydroid-shell
+cargo run -p wroid-cli -- app install-apk ./downloaded-file.bin --backend waydroid-shell --allow-any-extension
 cargo run -p wroid-cli -- app current --backend waydroid-shell
 cargo run -p wroid-cli -- binding run profiles/examples/shooter-basic.json fire
 cargo run -p wroid-cli -- play profiles/examples/shooter-basic.json
@@ -60,6 +116,7 @@ cargo run -p wroid-cli -- input keyevent 3 --backend waydroid-shell
 cargo run -p wroid-cli -- app list --backend waydroid-shell
 cargo run -p wroid-cli -- app launch com.android.settings --backend waydroid-shell
 cargo run -p wroid-cli -- app install-apk ./game.apk --backend waydroid-shell
+cargo run -p wroid-cli -- app install-apk ./downloaded-file.bin --backend waydroid-shell --allow-any-extension
 cargo run -p wroid-cli -- app current --backend waydroid-shell
 cargo run -p wroid-cli -- binding run profiles/examples/shooter-basic.json fire --backend auto
 cargo run -p wroid-cli -- play profiles/examples/shooter-basic.json --backend adb
@@ -70,6 +127,8 @@ cargo run -p wroid-cli -- run profiles/examples/shooter-basic.json --backend way
 cargo run -p wroid-cli -- run profiles/examples/shooter-basic.json --backend waydroid-shell --launch-delay-ms 2500
 cargo run -p wroid-cli -- run profiles/examples/shooter-basic.json --backend waydroid-shell --no-launch
 ```
+
+`doctor` reports ADB availability, ADB device states, Waydroid availability/status, screen and density probes for the selected backend, and a backend recommendation. If Waydroid reports `IP address: UNKNOWN` while the session/container are running, ADB may not connect; use `--backend waydroid-shell` for shell input on systems where Waydroid shell works.
 
 `play` loads and validates a profile, prints the profile metadata and keyboard bindings, then listens for key presses until `Esc` or `Ctrl+C`:
 
@@ -86,6 +145,10 @@ Keyboard bindings:
 
 For `virtual_joystick` bindings, `play` tracks the directional `key_cluster`, computes normalized diagonal movement, and repeatedly emits `input swipe center target duration` while a direction is held. Terminal input must remain focused; this is not global input capture yet. Key release tracking depends on terminal support for enhanced keyboard events, so terminals without release events may not provide reliable hold/release behavior.
 
+```sh
+sudo target/debug/wroid play profiles/examples/joystick-basic.json --backend waydroid-shell --scale-to-current
+```
+
 `run` loads the same profile, launches `package_name`, waits 1500 ms by default, then starts the same interactive keymapper used by `play`:
 
 ```sh
@@ -97,6 +160,8 @@ sudo target/debug/wroid run profiles/my-game.json --backend waydroid-shell --no-
 With `--no-launch`, `run` and `run-profile` load and validate the profile, skip launching `package_name`, skip the launch delay, and start the interactive keymapper immediately.
 
 For app management, `--backend waydroid-shell` uses `waydroid app list`, `waydroid app launch`, and `waydroid app install` where available. Current-app detection still uses `waydroid shell dumpsys activity activities` because Waydroid does not expose the focused Android activity through `waydroid app`.
+
+`app install-apk` checks that the path exists, is a file, and ends in `.apk` before dispatching to the selected backend. It prints the resolved absolute path for install attempts. Pass `--allow-any-extension` only when the file is known to be an APK despite its name.
 
 On some systems, `waydroid shell ...` operations require root privileges. This affects shell-backed input commands and `app current`; `waydroid app launch` may work without sudo. On those systems, `wroid run` handles app launch as the original user when `SUDO_USER` and `SUDO_UID` are available, restores that user's DBus and Wayland session environment for the launch subprocess, then keeps the keymapper in the current sudo process for shell input. If `--backend waydroid-shell` fails with `Action "shell" needs root access`, run the CLI itself with `sudo`, for example:
 

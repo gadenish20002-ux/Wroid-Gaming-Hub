@@ -64,7 +64,7 @@ pub(crate) fn run(
                 &launch_context,
             )
         },
-        |duration| std::thread::sleep(duration),
+        std::thread::sleep,
         || {
             println!("Starting keymapper ...");
             start_interactive_keymapper(input_executor, &profile, selected_backend)

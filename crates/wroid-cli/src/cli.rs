@@ -14,7 +14,10 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Commands {
-    Doctor,
+    Doctor {
+        #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
+        backend: InputBackend,
+    },
     Profile {
         #[command(subcommand)]
         command: ProfileCommand,
@@ -268,6 +271,8 @@ pub(crate) enum AppCommand {
         path: PathBuf,
         #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
         backend: InputBackend,
+        #[arg(long)]
+        allow_any_extension: bool,
     },
     Current {
         #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
@@ -333,6 +338,17 @@ mod tests {
         assert_eq!(launch_delay_ms, DEFAULT_LAUNCH_DELAY_MS);
         assert!(!no_launch);
         assert!(!scale_to_current);
+    }
+
+    #[test]
+    fn doctor_accepts_backend_option() {
+        let cli = Cli::try_parse_from(["wroid", "doctor", "--backend", "waydroid-shell"]).unwrap();
+
+        let Commands::Doctor { backend } = cli.command else {
+            panic!("expected doctor command");
+        };
+
+        assert_eq!(backend, InputBackend::WaydroidShell);
     }
 
     #[test]
@@ -496,6 +512,36 @@ mod tests {
         assert_eq!(radius, 120);
         assert_eq!(tick_ms, 80);
         assert_eq!(swipe_duration_ms, 70);
+    }
+
+    #[test]
+    fn app_install_apk_accepts_allow_any_extension() {
+        let cli = Cli::try_parse_from([
+            "wroid",
+            "app",
+            "install-apk",
+            "downloads/game.bin",
+            "--backend",
+            "waydroid-shell",
+            "--allow-any-extension",
+        ])
+        .unwrap();
+
+        let Commands::App { command } = cli.command else {
+            panic!("expected app command");
+        };
+        let AppCommand::InstallApk {
+            path,
+            backend,
+            allow_any_extension,
+        } = command
+        else {
+            panic!("expected install-apk command");
+        };
+
+        assert_eq!(path, PathBuf::from("downloads/game.bin"));
+        assert_eq!(backend, InputBackend::WaydroidShell);
+        assert!(allow_any_extension);
     }
 
     #[test]
