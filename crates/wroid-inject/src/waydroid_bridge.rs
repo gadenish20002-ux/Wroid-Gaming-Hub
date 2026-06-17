@@ -52,7 +52,10 @@ impl InputDeviceNode {
             ));
         }
 
-        let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
         if !file_name.starts_with("event") {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -214,7 +217,10 @@ pub fn remove_bridge(paths: &WaydroidBridgePaths) -> io::Result<()> {
 
 pub fn render_bridge_config(node: &InputDeviceNode, cgroup_mode: CgroupMode) -> io::Result<String> {
     let source = node.path.to_str().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "input device path is not UTF-8")
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "input device path is not UTF-8",
+        )
     })?;
     if source.contains(['\n', '\r']) {
         return Err(io::Error::new(
@@ -271,7 +277,9 @@ fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
 
     let temporary = parent.join(format!(
         ".{}.wroid-{}-tmp",
-        path.file_name().and_then(|name| name.to_str()).unwrap_or("config"),
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("config"),
         std::process::id()
     ));
     fs::write(&temporary, contents)?;
