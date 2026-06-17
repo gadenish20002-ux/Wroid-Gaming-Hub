@@ -231,7 +231,7 @@ pub fn render_bridge_config(node: &InputDeviceNode, cgroup_mode: CgroupMode) -> 
     let destination = source.trim_start_matches('/');
 
     Ok(format!(
-        "{MANAGED_HEADER}\n{} = c {}:{} rwm\nlxc.mount.entry = {source} {destination} none bind,create=file 0 0\n",
+        "{MANAGED_HEADER}\n{} = c {}:{} rwm\nlxc.mount.entry = tmpfs dev/input tmpfs mode=0755,create=dir 0 0\nlxc.mount.entry = {source} {destination} none bind,create=file 0 0\n",
         cgroup_mode.allow_key(),
         node.major,
         node.minor
@@ -306,8 +306,15 @@ mod tests {
 
         assert!(config.contains("lxc.cgroup2.devices.allow = c 13:93 rwm"));
         assert!(config.contains(
+            "lxc.mount.entry = tmpfs dev/input tmpfs mode=0755,create=dir 0 0"
+        ));
+        assert!(config.contains(
             "lxc.mount.entry = /dev/input/event29 dev/input/event29 none bind,create=file 0 0"
         ));
+        assert!(
+            config.find("tmpfs dev/input").unwrap()
+                < config.find("dev/input/event29").unwrap()
+        );
     }
 
     #[test]
