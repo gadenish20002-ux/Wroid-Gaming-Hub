@@ -69,7 +69,9 @@ fn run_smoke() -> Result<(), Box<dyn Error>> {
     cleanup_result?;
 
     println!("Waydroid detected the virtual touchscreen and Android getevent received touch data.");
-    println!("The user session and container were stopped, and the temporary LXC bridge was removed.");
+    println!(
+        "The user session and container were stopped, and the temporary LXC bridge was removed."
+    );
     Ok(())
 }
 
@@ -93,20 +95,29 @@ impl DesktopUser {
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "SUDO_UID is not set"))?
             .parse::<u32>()
             .map_err(|error| {
-                io::Error::new(io::ErrorKind::InvalidInput, format!("invalid SUDO_UID: {error}"))
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid SUDO_UID: {error}"),
+                )
             })?;
         let home = home_directory(&name)?;
         let runtime_dir = PathBuf::from(format!("/run/user/{uid}"));
         if !runtime_dir.is_dir() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("desktop runtime directory is missing: {}", runtime_dir.display()),
+                format!(
+                    "desktop runtime directory is missing: {}",
+                    runtime_dir.display()
+                ),
             ));
         }
         if !runtime_dir.join("bus").exists() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("desktop DBus socket is missing: {}/bus", runtime_dir.display()),
+                format!(
+                    "desktop DBus socket is missing: {}/bus",
+                    runtime_dir.display()
+                ),
             ));
         }
 
