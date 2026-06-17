@@ -224,7 +224,7 @@ pub struct TouchEngine<I> {
 impl<I: TouchInjector> TouchEngine<I> {
     pub fn new(injector: I) -> Self {
         Self {
-            injector: I,
+            injector,
             state: TouchState::default(),
         }
     }
