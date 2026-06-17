@@ -50,14 +50,26 @@ Select `Wroid Gaming Touchscreen`. The expected capabilities include:
 - `ABS_MT_TRACKING_ID`
 - `ABS_MT_POSITION_X` and `ABS_MT_POSITION_Y`
 
+The kernel may omit events whose value does not change. For example, slot `0`
+may not be printed when it is already selected, and an unchanged Y coordinate
+may be absent from a move frame. When the smoke process exits, `evtest` reports
+that the device disappeared; this is expected because closing the uinput file
+descriptor destroys the virtual device.
+
 ## Waydroid visibility gate
 
-The host device being correct does not prove Android can see it. With Waydroid
-running, inspect Android input devices:
+The host device being correct does not prove Android can see it. Waydroid uses
+`argparse` for the `shell` command, so pass `--` before Android command options:
 
 ```bash
-sudo waydroid shell getevent -pl
-sudo waydroid shell dumpsys input
+sudo waydroid shell -- getevent -pl
+sudo waydroid shell -- dumpsys input
+```
+
+To search only for the Wroid device:
+
+```bash
+sudo waydroid shell -- getevent -pl | grep -i -A20 -B3 'Wroid Gaming Touchscreen'
 ```
 
 The current milestone is complete only for host-side injection. A later change
