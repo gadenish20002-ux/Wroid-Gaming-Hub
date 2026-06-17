@@ -2,8 +2,7 @@ use std::io;
 
 use evdev::uinput::VirtualDevice;
 use evdev::{
-    AbsInfo, AbsoluteAxisCode, AttributeSet, InputEvent, KeyCode, PropType,
-    UinputAbsSetup,
+    AbsInfo, AbsoluteAxisCode, AttributeSet, InputEvent, KeyCode, PropType, UinputAbsSetup,
 };
 
 use crate::config::MAX_EVENTS_PER_FRAME;
