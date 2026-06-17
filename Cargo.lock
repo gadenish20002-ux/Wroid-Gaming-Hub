@@ -885,6 +885,7 @@ name = "wroid-inject"
 version = "0.1.0"
 dependencies = [
  "evdev",
+ "tempfile",
  "thiserror",
  "wroid-core",
  "wroid-runtime",
