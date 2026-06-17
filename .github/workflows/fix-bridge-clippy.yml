@@ -1,0 +1,27 @@
+name: Fix bridge Clippy once
+
+on:
+  push:
+    branches:
+      - codex/waydroid-input-bridge
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/waydroid-input-bridge
+
+      - name: Remove unnecessary mutable binding
+        run: |
+          sed -i 's/let mut capture = Command::new/let capture = Command::new/' crates/wroid-inject/src/bin/wroid-waydroid-input-smoke.rs
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/wroid-inject/src/bin/wroid-waydroid-input-smoke.rs
+          git commit -m "Fix bridge smoke Clippy warning"
+          git push origin HEAD:codex/waydroid-input-bridge
