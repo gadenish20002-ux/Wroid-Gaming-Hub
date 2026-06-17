@@ -91,7 +91,7 @@ fn verify_android_input(
     let event_path = event_node.to_str().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "event node path is not UTF-8")
     })?;
-    let mut capture = Command::new("waydroid")
+    let capture = Command::new("waydroid")
         .args(["shell", "--", "getevent", "-c", "10", event_path])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
