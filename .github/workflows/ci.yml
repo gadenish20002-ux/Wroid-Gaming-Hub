@@ -32,6 +32,20 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Capture rustfmt patch
+        if: failure()
+        run: |
+          cargo fmt --all
+          git diff --binary > rustfmt.patch
+
+      - name: Upload rustfmt patch
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustfmt-patch
+          path: rustfmt.patch
+          if-no-files-found: ignore
+
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
