@@ -277,12 +277,12 @@ impl<I: TouchInjector> TouchEngine<I> {
     }
 
     pub fn end_contact(&mut self, contact_id: ContactId) -> Result<(), TouchEngineError> {
-        let position = self
-            .state
-            .position(contact_id)
-            .ok_or(TouchStateError::ContactNotActive {
-                contact_id: contact_id.get(),
-            })?;
+        let position =
+            self.state
+                .position(contact_id)
+                .ok_or(TouchStateError::ContactNotActive {
+                    contact_id: contact_id.get(),
+                })?;
         self.submit(TouchFrame::single(TouchEvent::new(
             contact_id,
             TouchPhase::Up,
@@ -302,9 +302,7 @@ impl<I: TouchInjector> TouchEngine<I> {
         let events: Vec<_> = self
             .state
             .active_contacts()
-            .map(|(contact_id, position)| {
-                TouchEvent::new(contact_id, TouchPhase::Cancel, position)
-            })
+            .map(|(contact_id, position)| TouchEvent::new(contact_id, TouchPhase::Cancel, position))
             .collect();
         self.submit(TouchFrame::new(events))?;
         Ok(true)
@@ -363,9 +361,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            TouchEngineError::InvalidState(TouchStateError::ContactAlreadyActive {
-                contact_id: 7
-            })
+            TouchEngineError::InvalidState(TouchStateError::ContactAlreadyActive { contact_id: 7 })
         ));
         assert_eq!(engine.injector().frames.len(), 1);
         assert_eq!(engine.state().position(contact), Some(point(10, 20)));
