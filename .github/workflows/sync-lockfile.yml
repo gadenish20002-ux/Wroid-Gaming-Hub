@@ -1,0 +1,32 @@
+name: Sync lockfile once
+
+on:
+  push:
+    branches:
+      - codex/low-latency-touch
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/low-latency-touch
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Generate and commit Cargo.lock
+        run: |
+          cargo generate-lockfile
+          if git diff --quiet -- Cargo.lock; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "Update Cargo.lock for low-latency input"
+          git push origin HEAD:codex/low-latency-touch
