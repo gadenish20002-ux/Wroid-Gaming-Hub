@@ -29,9 +29,8 @@ fn first_contact_emits_btn_touch_first_and_type_b_sequence() {
 #[test]
 fn allocates_independent_slots_for_ten_contacts() {
     let mut injector = UinputTouchInjector::with_sink(config(10), RecordingSink::default());
-    let frame = TouchFrame::new(
-        (0..10).map(|id| event(id, TouchPhase::Down, u32::from(id) * 10, 400)),
-    );
+    let frame =
+        TouchFrame::new((0..10).map(|id| event(id, TouchPhase::Down, u32::from(id) * 10, 400)));
 
     injector.inject_frame(&frame).unwrap();
 

@@ -25,12 +25,7 @@ impl EventSink for RecordingSink {
     }
 }
 
-pub(super) fn event(
-    contact_id: u16,
-    phase: TouchPhase,
-    x: u32,
-    y: u32,
-) -> TouchEvent {
+pub(super) fn event(contact_id: u16, phase: TouchPhase, x: u32, y: u32) -> TouchEvent {
     TouchEvent::new(ContactId::new(contact_id), phase, Point { x, y })
 }
 

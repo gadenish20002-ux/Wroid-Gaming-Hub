@@ -19,11 +19,7 @@ impl DeviceConfig {
         Self::with_name_and_slots(DEVICE_NAME, width, height, DEFAULT_SLOT_COUNT)
     }
 
-    pub fn with_slots(
-        width: u32,
-        height: u32,
-        slot_count: u16,
-    ) -> Result<Self, DeviceConfigError> {
+    pub fn with_slots(width: u32, height: u32, slot_count: u16) -> Result<Self, DeviceConfigError> {
         Self::with_name_and_slots(DEVICE_NAME, width, height, slot_count)
     }
 

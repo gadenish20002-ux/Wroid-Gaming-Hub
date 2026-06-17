@@ -12,9 +12,7 @@ pub enum UinputFrameError {
     ContactNotActive { contact_id: u16 },
     #[error("no free uinput slot is available for contact {contact_id}")]
     NoFreeSlot { contact_id: u16 },
-    #[error(
-        "contact {contact_id} coordinate ({x}, {y}) exceeds touch surface {width}x{height}"
-    )]
+    #[error("contact {contact_id} coordinate ({x}, {y}) exceeds touch surface {width}x{height}")]
     CoordinateOutOfRange {
         contact_id: u16,
         x: u32,

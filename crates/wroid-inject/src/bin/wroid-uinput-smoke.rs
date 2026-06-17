@@ -40,11 +40,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn parse_dimension(
-    index: usize,
-    default: u32,
-    label: &str,
-) -> Result<u32, Box<dyn Error>> {
+fn parse_dimension(index: usize, default: u32, label: &str) -> Result<u32, Box<dyn Error>> {
     let Some(value) = std::env::args().nth(index) else {
         return Ok(default);
     };

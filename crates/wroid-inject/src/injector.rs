@@ -4,7 +4,7 @@ use wroid_runtime::{TouchFrame, TouchInjectionError, TouchInjector};
 
 use crate::config::MAX_EVENTS_PER_FRAME;
 use crate::state::SlotState;
-use crate::{DeviceConfig, EventSink, EvdevEventSink, LinuxInputEvent};
+use crate::{DeviceConfig, EvdevEventSink, EventSink, LinuxInputEvent};
 
 pub struct UinputTouchInjector<S = EvdevEventSink> {
     pub(crate) config: DeviceConfig,
