@@ -1,0 +1,11 @@
+[package]
+name = "wroid-inject"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+evdev.workspace = true
+thiserror.workspace = true
+wroid-core = { path = "../wroid-core" }
+wroid-runtime = { path = "../wroid-runtime" }

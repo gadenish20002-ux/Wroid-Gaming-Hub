@@ -15,11 +15,11 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 
 ## Phase 1: Low-latency Linux input
 
-- [ ] Implement a Type-B multitouch `uinput` injector.
+- [x] Implement a Type-B multitouch `uinput` injector.
 - [ ] Make the virtual touchscreen visible inside Waydroid.
 - [ ] Add evdev keyboard and relative-mouse capture.
 - [ ] Implement focus-loss and crash-safe contact cancellation.
-- [ ] Validate at least ten simultaneous contacts.
+- [ ] Validate at least ten simultaneous contacts on a real Waydroid session.
 - [ ] Measure capture-to-inject p50/p95/p99 latency.
 
 ## Phase 2: Runtime daemon and security boundary
@@ -71,7 +71,7 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - No GUI.
 - No overlay editor.
 - No global input capture.
-- No evdev/uinput backend.
+- The host `uinput` backend is not yet exposed inside Waydroid.
 - No gamepad mapping.
 - No mouse aim behavior.
 - No macro execution.
@@ -80,13 +80,14 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 
 ## Next Useful Milestones
 
-1. Improve terminal joystick ergonomics.
-   - Better handling for terminals without release events.
-   - Optional on-screen debug output for active directions.
-   - Clearer runtime warnings when release events are unavailable.
+1. Expose the persistent virtual touchscreen inside Waydroid.
+   - Confirm host capabilities with `evtest`.
+   - Lease the event node through a minimal privileged boundary.
+   - Verify Android InputReader classifies it as a direct multitouch touchscreen.
 
-2. Add non-global input backends only when safe.
-   - Investigate evdev/uinput with explicit user permissions.
+2. Add safe host input capture.
+   - Capture keyboard and relative mouse through evdev/libinput-compatible paths.
+   - Preserve explicit user permissions and focus ownership.
    - Keep behavior transparent and avoid protection evasion.
 
 3. Build a profile authoring workflow.
