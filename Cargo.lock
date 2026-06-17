@@ -821,6 +821,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wroid-runtime"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "wroid-core",
+]
+
+[[package]]
 name = "wroid-waydroid"
 version = "0.1.0"
 dependencies = [
