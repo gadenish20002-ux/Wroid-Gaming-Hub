@@ -29,6 +29,23 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Verify Cargo.lock
+        run: cargo metadata --locked --format-version 1 > /dev/null
+
+      - name: Capture Cargo.lock patch
+        if: failure()
+        run: |
+          cargo generate-lockfile
+          git diff --binary -- Cargo.lock > cargo-lock.patch
+
+      - name: Upload Cargo.lock patch
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-lock-patch
+          path: cargo-lock.patch
+          if-no-files-found: ignore
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -49,7 +66,7 @@ jobs:
       - name: Run Clippy
         run: |
           set -o pipefail
-          cargo clippy --workspace --all-targets --all-features -- -D warnings 2>&1 | tee clippy.log
+          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings 2>&1 | tee clippy.log
 
       - name: Upload Clippy log
         if: failure()
@@ -60,4 +77,4 @@ jobs:
           if-no-files-found: ignore
 
       - name: Run tests
-        run: cargo test --workspace --all-features
+        run: cargo test --locked --workspace --all-features
