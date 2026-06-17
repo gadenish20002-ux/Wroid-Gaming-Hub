@@ -305,15 +305,12 @@ mod tests {
         let config = render_bridge_config(&node, CgroupMode::V2).unwrap();
 
         assert!(config.contains("lxc.cgroup2.devices.allow = c 13:93 rwm"));
-        assert!(config.contains(
-            "lxc.mount.entry = tmpfs dev/input tmpfs mode=0755,create=dir 0 0"
-        ));
+        assert!(config.contains("lxc.mount.entry = tmpfs dev/input tmpfs mode=0755,create=dir 0 0"));
         assert!(config.contains(
             "lxc.mount.entry = /dev/input/event29 dev/input/event29 none bind,create=file 0 0"
         ));
         assert!(
-            config.find("tmpfs dev/input").unwrap()
-                < config.find("dev/input/event29").unwrap()
+            config.find("tmpfs dev/input").unwrap() < config.find("dev/input/event29").unwrap()
         );
     }
 
