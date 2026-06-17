@@ -224,7 +224,7 @@ pub struct TouchEngine<I> {
 impl<I: TouchInjector> TouchEngine<I> {
     pub fn new(injector: I) -> Self {
         Self {
-            injector,
+            injector: I,
             state: TouchState::default(),
         }
     }
@@ -369,8 +369,10 @@ mod tests {
 
     #[test]
     fn backend_failure_does_not_commit_runtime_state() {
-        let mut injector = RecordingInjector::default();
-        injector.fail_next = true;
+        let injector = RecordingInjector {
+            fail_next: true,
+            ..RecordingInjector::default()
+        };
         let mut engine = TouchEngine::new(injector);
         let contact = ContactId::new(4);
 
