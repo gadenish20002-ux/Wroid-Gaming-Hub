@@ -1,0 +1,32 @@
+name: Sync bridge lockfile once
+
+on:
+  push:
+    branches:
+      - codex/waydroid-input-bridge
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/waydroid-input-bridge
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Generate and commit Cargo.lock
+        run: |
+          cargo generate-lockfile
+          if git diff --quiet -- Cargo.lock; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "Update Cargo.lock for Waydroid input bridge"
+          git push origin HEAD:codex/waydroid-input-bridge
