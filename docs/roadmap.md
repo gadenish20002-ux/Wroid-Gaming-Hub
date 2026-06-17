@@ -1,9 +1,61 @@
 # Roadmap
 
+The delivery order is performance-first: persistent input and runtime ownership
+precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
+[performance budget](performance-budget.md).
+
+## Phase 0: Runtime foundation (in progress)
+
+- [x] Define backend-independent touch contacts and synchronized frames.
+- [x] Guarantee atomic runtime state commit after successful injection.
+- [x] Add CI quality gates for formatting, Clippy, and workspace tests.
+- [x] Accept architecture decisions for persistent input and privilege separation.
+- [ ] Split package, display, lifecycle, diagnostics, and input interfaces.
+- [ ] Add a benchmark harness for the shell compatibility backend.
+
+## Phase 1: Low-latency Linux input
+
+- [ ] Implement a Type-B multitouch `uinput` injector.
+- [ ] Make the virtual touchscreen visible inside Waydroid.
+- [ ] Add evdev keyboard and relative-mouse capture.
+- [ ] Implement focus-loss and crash-safe contact cancellation.
+- [ ] Validate at least ten simultaneous contacts.
+- [ ] Measure capture-to-inject p50/p95/p99 latency.
+
+## Phase 2: Runtime daemon and security boundary
+
+- [ ] Add the per-user `wroidd` daemon and versioned typed IPC.
+- [ ] Add the minimal privileged helper with leased device access.
+- [ ] Move CLI execution onto the daemon API.
+- [ ] Add session lifecycle and configuration rollback.
+
+## Phase 3: Profile v2 and gaming controls
+
+- [ ] Add normalized coordinates and aspect-aware viewport transforms.
+- [ ] Add schema migrations, layers, modifiers, hold/toggle modes, and dead zones.
+- [ ] Implement persistent virtual joystick and relative mouse aim.
+- [ ] Add physical and virtual gamepad support.
+
+## Phase 4: Desktop gaming hub
+
+- [ ] Add library, game details, performance settings, and diagnostics.
+- [ ] Add a visual controls editor with live input testing.
+- [ ] Add first-run hardware and Waydroid validation.
+
+## Phase 5: Compatibility and release
+
+- [ ] Inspect APK ABI and package format before installation.
+- [ ] Support split APK bundles and game data packages.
+- [ ] Add optional image components and ARM translation integration points.
+- [ ] Test Intel, AMD, and NVIDIA across supported compositors.
+- [ ] Package signed beta releases for major Linux distribution families.
+
+## Legacy MVP checklist
+
 ## Completed CLI Foundation
 
 - Rust workspace with `wroid-core`, `wroid-adb`, `wroid-waydroid`, and `wroid-cli`.
-- Profile schema, JSON loading/saving, validation, and example profiles.
+- Profile schema, JSON loading/saving, testing, and example profiles.
 - ADB and Waydroid command wrappers.
 - `wroid binding run` for single tap/swipe bindings.
 - `wroid play` terminal keymapper.

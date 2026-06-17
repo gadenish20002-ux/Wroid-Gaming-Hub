@@ -3,6 +3,7 @@ members = [
     "crates/wroid-core",
     "crates/wroid-adb",
     "crates/wroid-waydroid",
+    "crates/wroid-runtime",
     "crates/wroid-cli",
 ]
 resolver = "2"
