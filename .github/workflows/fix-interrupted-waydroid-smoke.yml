@@ -1,3 +1,4 @@
+# One-shot maintenance workflow; removed after it commits the fix.
 name: Fix interrupted Waydroid smoke once
 
 on:
