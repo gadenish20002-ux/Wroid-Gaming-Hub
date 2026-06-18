@@ -122,8 +122,7 @@ fn verify_android_input(
         && captured.contains("0003 0039 00000001")
         && captured.contains(&expected_start);
     let has_move = captured.contains(&expected_end);
-    let has_up = captured.contains("0001 014a 00000000")
-        && captured.contains("0003 0039 ffffffff");
+    let has_up = captured.contains("0001 014a 00000000") && captured.contains("0003 0039 ffffffff");
     let has_sync = captured.contains("0000 0000 00000000");
     if captured.trim().is_empty() || !(has_down && has_move && has_up && has_sync) {
         return Err(io::Error::other(format!(
