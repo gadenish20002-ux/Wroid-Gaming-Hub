@@ -19,6 +19,7 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - [x] Make the virtual touchscreen visible inside Waydroid and verify events with Android `getevent`.
 - [ ] Productionize bridge lifecycle, reconciliation, and stable device discovery.
 - [x] Add evdev keyboard capture, capability validation, and WASD normalization.
+- [x] Exercise live physical keyboard input through a temporary managed Waydroid session.
 - [ ] Add relative-mouse capture.
 - [ ] Implement focus-loss and crash-safe contact cancellation across the complete session lifecycle.
 - [ ] Validate at least ten simultaneous contacts on a real Waydroid session.
@@ -29,7 +30,7 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - [ ] Add the per-user `wroidd` daemon and versioned typed IPC.
 - [ ] Add the minimal privileged helper with leased device access.
 - [ ] Move CLI execution onto the daemon API.
-- [ ] Add session lifecycle and configuration rollback.
+- [ ] Add production session lifecycle, focus ownership, and configuration rollback.
 
 ## Phase 3: Profile v2 and gaming controls
 
@@ -37,7 +38,8 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - [ ] Add schema migrations, layers, modifiers, hold/toggle modes, and dead zones.
 - [x] Add a persistent virtual joystick runtime state machine.
 - [x] Wire physical WASD input to the persistent joystick in a host smoke path.
-- [ ] Integrate captured controls with the managed Waydroid session lifecycle.
+- [x] Wire physical WASD through the temporary Waydroid bridge into Android.
+- [ ] Connect profile-defined controls to the daemon-managed Waydroid session.
 - [ ] Implement relative mouse aim.
 - [ ] Add physical and virtual gamepad support.
 
@@ -92,11 +94,11 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
    - Verify ten simultaneous contacts and deterministic cleanup.
 
 2. Integrate safe host input capture with the managed session.
-   - Reuse the completed evdev keyboard reader and WASD normalizer.
+   - Reuse the completed evdev keyboard reader, WASD normalizer, and live Android smoke path.
    - Add relative mouse capture through an evdev/libinput-compatible path.
    - Preserve explicit user permissions and focus ownership.
    - Keep behavior transparent and avoid protection evasion.
-   - Drive the persistent joystick runtime instead of repeated shell swipes.
+   - Move temporary root-owned orchestration behind the daemon/helper boundary.
 
 3. Build a profile authoring workflow.
    - Inspect current app/package.
