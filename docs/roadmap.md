@@ -16,9 +16,10 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 ## Phase 1: Low-latency Linux input
 
 - [x] Implement a Type-B multitouch `uinput` injector.
-- [ ] Make the virtual touchscreen visible inside Waydroid.
+- [x] Make the virtual touchscreen visible inside Waydroid and verify events with Android `getevent`.
+- [ ] Productionize bridge lifecycle, reconciliation, and stable device discovery.
 - [ ] Add evdev keyboard and relative-mouse capture.
-- [ ] Implement focus-loss and crash-safe contact cancellation.
+- [ ] Implement focus-loss and crash-safe contact cancellation across the complete session lifecycle.
 - [ ] Validate at least ten simultaneous contacts on a real Waydroid session.
 - [ ] Measure capture-to-inject p50/p95/p99 latency.
 
@@ -33,7 +34,9 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 
 - [ ] Add normalized coordinates and aspect-aware viewport transforms.
 - [ ] Add schema migrations, layers, modifiers, hold/toggle modes, and dead zones.
-- [ ] Implement persistent virtual joystick and relative mouse aim.
+- [x] Add a persistent virtual joystick runtime state machine.
+- [ ] Wire persistent virtual joystick controls to captured host input.
+- [ ] Implement relative mouse aim.
 - [ ] Add physical and virtual gamepad support.
 
 ## Phase 4: Desktop gaming hub
@@ -71,7 +74,7 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - No GUI.
 - No overlay editor.
 - No global input capture.
-- The host `uinput` backend is not yet exposed inside Waydroid.
+- The production bridge lifecycle and privilege boundary are not implemented yet.
 - No gamepad mapping.
 - No mouse aim behavior.
 - No macro execution.
@@ -80,20 +83,22 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 
 ## Next Useful Milestones
 
-1. Expose the persistent virtual touchscreen inside Waydroid.
-   - Confirm host capabilities with `evtest`.
-   - Lease the event node through a minimal privileged boundary.
-   - Verify Android InputReader classifies it as a direct multitouch touchscreen.
+1. Productionize the persistent touchscreen bridge.
+   - Keep the successful Android `getevent` integration path.
+   - Add stable device discovery and bridge reconciliation.
+   - Move privileged bridge operations behind a minimal helper.
+   - Verify ten simultaneous contacts and deterministic cleanup.
 
 2. Add safe host input capture.
    - Capture keyboard and relative mouse through evdev/libinput-compatible paths.
    - Preserve explicit user permissions and focus ownership.
    - Keep behavior transparent and avoid protection evasion.
+   - Drive the persistent joystick runtime instead of repeated shell swipes.
 
 3. Build a profile authoring workflow.
    - Inspect current app/package.
-   - Capture screen size.
-   - Create profile from current display.
+   - Capture screen size and content viewport.
+   - Create profile from the current display.
    - Add bindings from CLI or a future editor.
 
 4. GUI and overlay editor.
