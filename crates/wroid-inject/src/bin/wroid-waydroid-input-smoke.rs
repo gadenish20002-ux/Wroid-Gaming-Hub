@@ -18,6 +18,7 @@ use wroid_runtime::{ContactId, TouchEngine};
 const DEVICE_NAME: &str = "Wroid Gaming Touchscreen";
 const STATUS_ATTEMPTS: usize = 60;
 const STATUS_INTERVAL: Duration = Duration::from_millis(500);
+const CAPTURE_EVENT_COUNT: &str = "7";
 
 fn main() -> Result<(), Box<dyn Error>> {
     ensure_root()?;
@@ -266,8 +267,15 @@ fn verify_android_input(
     let event_path = event_node.to_str().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "event node path is not UTF-8")
     })?;
-    let mut capture = Command::new("waydroid")
-        .args(["shell", "--", "getevent", event_path])
+    let capture = Command::new("waydroid")
+        .args([
+            "shell",
+            "--",
+            "getevent",
+            "-c",
+            CAPTURE_EVENT_COUNT,
+            event_path,
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -288,10 +296,6 @@ fn verify_android_input(
     sleep(Duration::from_millis(50));
     engine.end_contact(contact)?;
 
-    sleep(Duration::from_millis(500));
-    if capture.try_wait()?.is_none() {
-        capture.kill()?;
-    }
     let output = capture.wait_with_output()?;
     let captured = combined_output(&output);
     let has_touch = captured.contains("0003 0039")
