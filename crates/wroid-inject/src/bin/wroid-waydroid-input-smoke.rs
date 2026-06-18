@@ -18,7 +18,7 @@ use wroid_runtime::{ContactId, TouchEngine};
 const DEVICE_NAME: &str = "Wroid Gaming Touchscreen";
 const STATUS_ATTEMPTS: usize = 60;
 const STATUS_INTERVAL: Duration = Duration::from_millis(500);
-const CAPTURE_EVENT_COUNT: &str = "7";
+const CAPTURE_EVENT_COUNT: &str = "13";
 
 fn main() -> Result<(), Box<dyn Error>> {
     ensure_root()?;
@@ -225,7 +225,7 @@ impl DesktopWaydroidSession {
         let mut last_status = String::new();
         for _ in 0..STATUS_ATTEMPTS {
             last_status = waydroid_status()?;
-            if container_state(&last_status) == Some("STOPPED") {
+            if waydroid_is_stopped(&last_status) {
                 self.active = false;
                 let _ = self.child.wait();
                 return match user_stop_error {
@@ -298,12 +298,18 @@ fn verify_android_input(
 
     let output = capture.wait_with_output()?;
     let captured = combined_output(&output);
-    let has_touch = captured.contains("0003 0039")
-        && captured.contains("0001 014a")
-        && captured.contains("0000 0000");
-    if captured.trim().is_empty() || !has_touch {
+    let expected_start = format!("0003 0035 {:08x}", start.x);
+    let expected_end = format!("0003 0035 {:08x}", end.x);
+    let has_down = captured.contains("0001 014a 00000001")
+        && captured.contains("0003 0039 00000001")
+        && captured.contains(&expected_start);
+    let has_move = captured.contains(&expected_end);
+    let has_up = captured.contains("0001 014a 00000000")
+        && captured.contains("0003 0039 ffffffff");
+    let has_sync = captured.contains("0000 0000 00000000");
+    if captured.trim().is_empty() || !(has_down && has_move && has_up && has_sync) {
         return Err(io::Error::other(format!(
-            "Android getevent did not capture injected events\n{captured}"
+            "Android getevent did not capture a complete down/move/up sequence\n{captured}"
         ))
         .into());
     }
@@ -350,11 +356,23 @@ fn waydroid_status() -> io::Result<String> {
     Ok(combined_output(&output))
 }
 
-fn container_state(status: &str) -> Option<&str> {
+fn status_field<'a>(status: &'a str, field: &str) -> Option<&'a str> {
     status.lines().find_map(|line| {
         let (key, value) = line.split_once(':')?;
-        (key.trim() == "Container").then_some(value.trim())
+        (key.trim() == field).then_some(value.trim())
     })
+}
+
+fn container_state(status: &str) -> Option<&str> {
+    status_field(status, "Container")
+}
+
+fn waydroid_is_stopped(status: &str) -> bool {
+    match container_state(status) {
+        Some("STOPPED") => true,
+        Some("RUNNING") => false,
+        _ => status_field(status, "Session") == Some("STOPPED"),
+    }
 }
 
 fn run_waydroid(arguments: &[&str]) -> io::Result<()> {
@@ -456,4 +474,30 @@ fn parse_dimension(index: usize, default: u32, label: &str) -> Result<u32, Box<d
         )
         .into()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_stopped_waydroid_without_container_field() {
+        let status = "Session:\tSTOPPED\nVendor type:\tMAINLINE\n";
+
+        assert!(waydroid_is_stopped(status));
+    }
+
+    #[test]
+    fn running_container_wins_over_stopped_session() {
+        let status = "Session:\tSTOPPED\nContainer:\tRUNNING\nVendor type:\tMAINLINE\n";
+
+        assert!(!waydroid_is_stopped(status));
+    }
+
+    #[test]
+    fn detects_explicitly_stopped_container() {
+        let status = "Session:\tSTOPPED\nContainer:\tSTOPPED\nVendor type:\tMAINLINE\n";
+
+        assert!(waydroid_is_stopped(status));
+    }
 }
