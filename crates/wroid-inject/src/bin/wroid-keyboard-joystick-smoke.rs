@@ -26,13 +26,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         )
     })?;
     let width = parse_dimension(positional.get(1).map(|value| value.as_str()), 1920, "width")?;
-    let height = parse_dimension(positional.get(2).map(|value| value.as_str()), 1080, "height")?;
+    let height = parse_dimension(
+        positional.get(2).map(|value| value.as_str()),
+        1080,
+        "height",
+    )?;
     if positional.len() > 3 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "too many positional arguments",
-        )
-        .into());
+        return Err(
+            io::Error::new(io::ErrorKind::InvalidInput, "too many positional arguments").into(),
+        );
     }
 
     let mut keyboard = EvdevKeyboard::open(keyboard_path)?;
@@ -65,7 +67,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut engine = TouchEngine::new(injector);
     let mut state = DirectionalKeyState::default();
 
-    println!("Keyboard: {} ({})", keyboard.name(), keyboard.path().display());
+    println!(
+        "Keyboard: {} ({})",
+        keyboard.name(),
+        keyboard.path().display()
+    );
     println!("Virtual touchscreen: {}", event_node.display());
     println!(
         "Controls: W/A/S/D move the persistent touch contact; Esc exits. Exclusive grab: {}.",
@@ -103,11 +109,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn parse_dimension(
-    value: Option<&str>,
-    default: u32,
-    label: &str,
-) -> Result<u32, Box<dyn Error>> {
+fn parse_dimension(value: Option<&str>, default: u32, label: &str) -> Result<u32, Box<dyn Error>> {
     let Some(value) = value else {
         return Ok(default);
     };
