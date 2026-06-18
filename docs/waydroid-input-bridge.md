@@ -17,9 +17,16 @@ that Android lists `Wroid Gaming Touchscreen`, and captures injected touch data
 with Android `getevent`. It then stops the user session and container and restores
 the original config.
 
-The bridge grants the container access only to the dynamically created Wroid
-event node. It does not bind the host `/dev/input` directory and does not expose
-physical keyboards or mice.
+Waydroid mounts a fresh tmpfs at container `/dev`, so the bridge first creates an
+empty container-local `/dev/input` mountpoint and then bind-mounts only the
+dynamically created Wroid event node. It does not bind the host `/dev/input`
+directory and does not expose physical keyboards or mice.
+
+The bridge deliberately does not add `lxc.cgroup*.devices.allow` or
+`lxc.cgroup*.devices.deny` rules. On cgroup v2, a specific allow rule creates an
+allowlist program that blocks every device not listed, including Binder devices
+required to boot Android. The smoke bridge preserves Waydroid's existing device
+policy and narrows visibility through the mount namespace instead.
 
 ## Build
 
