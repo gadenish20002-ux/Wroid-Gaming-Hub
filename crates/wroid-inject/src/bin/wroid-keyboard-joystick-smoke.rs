@@ -19,11 +19,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         .iter()
         .filter(|argument| argument.as_str() != "--grab")
         .collect::<Vec<_>>();
-    let keyboard_path = positional
-        .first()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "keyboard event node is required"))?;
-    let width = parse_dimension(positional.get(1).map(String::as_str), 1920, "width")?;
-    let height = parse_dimension(positional.get(2).map(String::as_str), 1080, "height")?;
+    let keyboard_path = positional.first().copied().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "keyboard event node is required",
+        )
+    })?;
+    let width = parse_dimension(positional.get(1).map(|value| value.as_str()), 1920, "width")?;
+    let height = parse_dimension(positional.get(2).map(|value| value.as_str()), 1080, "height")?;
     if positional.len() > 3 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -66,7 +69,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Virtual touchscreen: {}", event_node.display());
     println!(
         "Controls: W/A/S/D move the persistent touch contact; Esc exits. Exclusive grab: {}.",
-        if keyboard.is_grabbed() { "enabled" } else { "disabled" }
+        if keyboard.is_grabbed() {
+            "enabled"
+        } else {
+            "disabled"
+        }
     );
     println!("Attach evtest to the virtual touchscreen in a second terminal if desired.");
 
@@ -117,5 +124,7 @@ fn print_usage() {
     println!(
         "Usage: wroid-keyboard-joystick-smoke <keyboard-event-node> [width] [height] [--grab]"
     );
-    println!("Example: sudo ./target/release/wroid-keyboard-joystick-smoke /dev/input/event7 1920 1050 --grab");
+    println!(
+        "Example: sudo ./target/release/wroid-keyboard-joystick-smoke /dev/input/event7 1920 1050 --grab"
+    );
 }
