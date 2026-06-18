@@ -171,9 +171,9 @@ impl EvdevKeyboard {
         })?;
         let name = device.name().unwrap_or("Unnamed evdev device").to_owned();
 
-        let supported = device.supported_keys().ok_or_else(|| {
-            KeyboardDeviceError::MissingKeyCapabilities { path: path.clone() }
-        })?;
+        let supported = device
+            .supported_keys()
+            .ok_or_else(|| KeyboardDeviceError::MissingKeyCapabilities { path: path.clone() })?;
         let missing = REQUIRED_KEYS
             .iter()
             .filter_map(|(code, label)| (!supported.contains(*code)).then_some(*label))
