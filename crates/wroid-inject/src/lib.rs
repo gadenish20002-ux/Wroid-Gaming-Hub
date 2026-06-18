@@ -13,6 +13,7 @@ mod state;
 mod transition;
 mod translate;
 mod waydroid_bridge;
+mod waydroid_session;
 
 pub use config::{DeviceConfig, DeviceConfigError, DEFAULT_SLOT_COUNT, MAX_SLOT_COUNT};
 pub use error::UinputFrameError;
@@ -23,6 +24,10 @@ pub use waydroid_bridge::{
     remove_bridge, remove_default_bridge, render_bridge_config, CgroupMode, InputDeviceNode,
     InstalledWaydroidBridge, WaydroidBridgePaths, DEFAULT_WAYDROID_BRIDGE_CONFIG,
     DEFAULT_WAYDROID_CONFIG,
+};
+pub use waydroid_session::{
+    ensure_container_stopped, ensure_root, spawn_android_getevent_trace, stop_child,
+    wait_for_android_input_device, DesktopUser, DesktopWaydroidSession, WROID_TOUCHSCREEN_NAME,
 };
 
 #[cfg(test)]
