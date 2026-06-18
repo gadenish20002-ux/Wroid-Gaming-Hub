@@ -1,0 +1,45 @@
+name: Fix smoke capture once
+
+on:
+  push:
+    branches:
+      - codex/waydroid-input-bridge
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/waydroid-input-bridge
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Bound Android getevent capture
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('crates/wroid-inject/src/bin/wroid-waydroid-input-smoke.rs')
+          text = path.read_text()
+          text = text.replace(
+              'let capture = Command::new("waydroid")\n        .args(["shell", "--", "getevent", "-c", "10", event_path])',
+              'let mut capture = Command::new("waydroid")\n        .args(["shell", "--", "getevent", event_path])',
+              1,
+          )
+          text = text.replace(
+              '    let output = capture.wait_with_output()?;\n    let captured = combined_output(&output);\n    if !output.status.success() || captured.trim().is_empty() {',
+              '    sleep(Duration::from_millis(500));\n    if capture.try_wait()?.is_none() {\n        capture.kill()?;\n    }\n    let output = capture.wait_with_output()?;\n    let captured = combined_output(&output);\n    let has_touch = captured.contains("0003 0039")\n        && captured.contains("0001 014a")\n        && captured.contains("0000 0000");\n    if captured.trim().is_empty() || !has_touch {',
+              1,
+          )
+          path.write_text(text)
+          PY
+          cargo fmt --all
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/wroid-inject/src/bin/wroid-waydroid-input-smoke.rs
+          git commit -m "Bound Android input capture duration"
+          git push origin HEAD:codex/waydroid-input-bridge
