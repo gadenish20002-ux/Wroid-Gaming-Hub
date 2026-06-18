@@ -9,3 +9,6 @@ evdev.workspace = true
 thiserror.workspace = true
 wroid-core = { path = "../wroid-core" }
 wroid-runtime = { path = "../wroid-runtime" }
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,4 +1,5 @@
 use std::io;
+use std::path::PathBuf;
 
 use evdev::uinput::VirtualDevice;
 use evdev::{
@@ -55,6 +56,10 @@ impl EvdevEventSink {
             device,
             raw_events: Vec::with_capacity(MAX_EVENTS_PER_FRAME),
         })
+    }
+
+    pub fn event_nodes(&mut self) -> io::Result<Vec<PathBuf>> {
+        self.device.enumerate_dev_nodes_blocking()?.collect()
     }
 }
 

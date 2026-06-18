@@ -12,12 +12,18 @@ mod sink;
 mod state;
 mod transition;
 mod translate;
+mod waydroid_bridge;
 
 pub use config::{DeviceConfig, DeviceConfigError, DEFAULT_SLOT_COUNT, MAX_SLOT_COUNT};
 pub use error::UinputFrameError;
 pub use event::{EventSink, LinuxInputEvent};
 pub use injector::UinputTouchInjector;
 pub use sink::EvdevEventSink;
+pub use waydroid_bridge::{
+    remove_bridge, remove_default_bridge, render_bridge_config, CgroupMode, InputDeviceNode,
+    InstalledWaydroidBridge, WaydroidBridgePaths, DEFAULT_WAYDROID_BRIDGE_CONFIG,
+    DEFAULT_WAYDROID_CONFIG,
+};
 
 #[cfg(test)]
 mod tests;
