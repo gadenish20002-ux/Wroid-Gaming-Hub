@@ -4,6 +4,7 @@ members = [
     "crates/wroid-adb",
     "crates/wroid-waydroid",
     "crates/wroid-runtime",
+    "crates/wroid-input",
     "crates/wroid-inject",
     "crates/wroid-cli",
 ]
