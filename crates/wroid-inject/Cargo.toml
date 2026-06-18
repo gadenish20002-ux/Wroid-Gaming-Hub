@@ -8,6 +8,7 @@ license.workspace = true
 evdev.workspace = true
 thiserror.workspace = true
 wroid-core = { path = "../wroid-core" }
+wroid-input = { path = "../wroid-input" }
 wroid-runtime = { path = "../wroid-runtime" }
 
 [dev-dependencies]
