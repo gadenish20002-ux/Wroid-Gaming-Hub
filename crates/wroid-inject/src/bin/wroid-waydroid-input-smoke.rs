@@ -266,8 +266,8 @@ fn verify_android_input(
     let event_path = event_node.to_str().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "event node path is not UTF-8")
     })?;
-    let capture = Command::new("waydroid")
-        .args(["shell", "--", "getevent", "-c", "10", event_path])
+    let mut capture = Command::new("waydroid")
+        .args(["shell", "--", "getevent", event_path])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
@@ -288,9 +288,16 @@ fn verify_android_input(
     sleep(Duration::from_millis(50));
     engine.end_contact(contact)?;
 
+    sleep(Duration::from_millis(500));
+    if capture.try_wait()?.is_none() {
+        capture.kill()?;
+    }
     let output = capture.wait_with_output()?;
     let captured = combined_output(&output);
-    if !output.status.success() || captured.trim().is_empty() {
+    let has_touch = captured.contains("0003 0039")
+        && captured.contains("0001 014a")
+        && captured.contains("0000 0000");
+    if captured.trim().is_empty() || !has_touch {
         return Err(io::Error::other(format!(
             "Android getevent did not capture injected events\n{captured}"
         ))
