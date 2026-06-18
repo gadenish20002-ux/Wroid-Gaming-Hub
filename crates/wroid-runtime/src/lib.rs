@@ -10,6 +10,10 @@ use std::error::Error;
 use thiserror::Error;
 use wroid_core::Point;
 
+mod joystick;
+
+pub use joystick::{DirectionalInput, VirtualJoystick, VirtualJoystickConfigError};
+
 /// Stable identifier for one logical finger on the Android touch surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContactId(u16);
