@@ -1,3 +1,4 @@
+# Triggered once to patch the smoke capture; removed after the bot commit.
 name: Fix smoke capture once
 
 on:
