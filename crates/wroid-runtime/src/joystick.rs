@@ -42,9 +42,7 @@ pub enum VirtualJoystickConfigError {
     ZeroRadius,
     #[error("virtual joystick resolution must be non-zero, got {width}x{height}")]
     InvalidResolution { width: u32, height: u32 },
-    #[error(
-        "virtual joystick center {x},{y} is outside resolution {width}x{height}"
-    )]
+    #[error("virtual joystick center {x},{y} is outside resolution {width}x{height}")]
     CenterOutOfBounds {
         x: u32,
         y: u32,
@@ -259,10 +257,7 @@ mod tests {
             )
             .unwrap());
         assert!(joystick
-            .apply(
-                &mut engine,
-                DirectionalInput::new(true, false, false, true),
-            )
+            .apply(&mut engine, DirectionalInput::new(true, false, false, true),)
             .unwrap());
         assert!(joystick
             .apply(&mut engine, DirectionalInput::default())
