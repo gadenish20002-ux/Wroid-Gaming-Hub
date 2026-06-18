@@ -18,7 +18,8 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - [x] Implement a Type-B multitouch `uinput` injector.
 - [x] Make the virtual touchscreen visible inside Waydroid and verify events with Android `getevent`.
 - [ ] Productionize bridge lifecycle, reconciliation, and stable device discovery.
-- [ ] Add evdev keyboard and relative-mouse capture.
+- [x] Add evdev keyboard capture, capability validation, and WASD normalization.
+- [ ] Add relative-mouse capture.
 - [ ] Implement focus-loss and crash-safe contact cancellation across the complete session lifecycle.
 - [ ] Validate at least ten simultaneous contacts on a real Waydroid session.
 - [ ] Measure capture-to-inject p50/p95/p99 latency.
@@ -35,7 +36,8 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - [ ] Add normalized coordinates and aspect-aware viewport transforms.
 - [ ] Add schema migrations, layers, modifiers, hold/toggle modes, and dead zones.
 - [x] Add a persistent virtual joystick runtime state machine.
-- [ ] Wire persistent virtual joystick controls to captured host input.
+- [x] Wire physical WASD input to the persistent joystick in a host smoke path.
+- [ ] Integrate captured controls with the managed Waydroid session lifecycle.
 - [ ] Implement relative mouse aim.
 - [ ] Add physical and virtual gamepad support.
 
@@ -73,7 +75,7 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 
 - No GUI.
 - No overlay editor.
-- No global input capture.
+- No production daemon-managed global input capture.
 - The production bridge lifecycle and privilege boundary are not implemented yet.
 - No gamepad mapping.
 - No mouse aim behavior.
@@ -89,8 +91,9 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
    - Move privileged bridge operations behind a minimal helper.
    - Verify ten simultaneous contacts and deterministic cleanup.
 
-2. Add safe host input capture.
-   - Capture keyboard and relative mouse through evdev/libinput-compatible paths.
+2. Integrate safe host input capture with the managed session.
+   - Reuse the completed evdev keyboard reader and WASD normalizer.
+   - Add relative mouse capture through an evdev/libinput-compatible path.
    - Preserve explicit user permissions and focus ownership.
    - Keep behavior transparent and avoid protection evasion.
    - Drive the persistent joystick runtime instead of repeated shell swipes.
