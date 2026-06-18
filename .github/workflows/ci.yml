@@ -43,7 +43,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cargo-lock-patch
-          path: cargo-lock.patch
+          path: |
+            cargo-lock.patch
+            Cargo.lock
           if-no-files-found: ignore
 
       - name: Check formatting
