@@ -5,10 +5,9 @@ use std::process::Child;
 
 use wroid_core::{Point, Resolution};
 use wroid_inject::{
-    ensure_container_stopped, ensure_root, remove_default_bridge,
-    spawn_android_getevent_trace, stop_child, wait_for_android_input_device, DesktopUser,
-    DesktopWaydroidSession, DeviceConfig, InputDeviceNode, InstalledWaydroidBridge,
-    UinputTouchInjector, WROID_TOUCHSCREEN_NAME,
+    ensure_container_stopped, ensure_root, remove_default_bridge, spawn_android_getevent_trace,
+    stop_child, wait_for_android_input_device, DesktopUser, DesktopWaydroidSession, DeviceConfig,
+    InputDeviceNode, InstalledWaydroidBridge, UinputTouchInjector, WROID_TOUCHSCREEN_NAME,
 };
 use wroid_input::{DirectionalKeyState, EvdevKeyboard, KeyboardAction};
 use wroid_runtime::{ContactId, TouchEngine, VirtualJoystick};
@@ -229,11 +228,7 @@ fn is_supported_flag(argument: &str) -> bool {
     )
 }
 
-fn parse_dimension(
-    value: Option<&str>,
-    default: u32,
-    label: &str,
-) -> Result<u32, Box<dyn Error>> {
+fn parse_dimension(value: Option<&str>, default: u32, label: &str) -> Result<u32, Box<dyn Error>> {
     let Some(value) = value else {
         return Ok(default);
     };
@@ -293,11 +288,8 @@ mod tests {
 
     #[test]
     fn rejects_unknown_options() {
-        let error = parse_options(&[
-            "/dev/input/event7".to_owned(),
-            "--unsafe".to_owned(),
-        ])
-        .unwrap_err();
+        let error =
+            parse_options(&["/dev/input/event7".to_owned(), "--unsafe".to_owned()]).unwrap_err();
 
         assert!(error.to_string().contains("unknown option"));
     }
