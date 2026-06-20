@@ -520,7 +520,8 @@ mod tests {
 
     #[test]
     fn accepts_legacy_explicit_grab_flag() {
-        let options = parse_options(&["/dev/input/event7".to_owned(), "--grab".to_owned()]).unwrap();
+        let options =
+            parse_options(&["/dev/input/event7".to_owned(), "--grab".to_owned()]).unwrap();
 
         assert!(options.grab);
     }
