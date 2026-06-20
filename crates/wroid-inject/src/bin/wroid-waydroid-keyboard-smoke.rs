@@ -350,7 +350,7 @@ fn release_contact(
 
 fn parse_options(args: &[String]) -> Result<Options, Box<dyn Error>> {
     let mut positional = Vec::new();
-    let mut grab = false;
+    let mut grab = true;
     let mut show_ui = true;
     let mut trace_android = true;
     let mut reaffirm_interval = Some(DEFAULT_REAFFIRM_INTERVAL);
@@ -360,6 +360,7 @@ fn parse_options(args: &[String]) -> Result<Options, Box<dyn Error>> {
     while index < args.len() {
         match args[index].as_str() {
             "--grab" => grab = true,
+            "--no-grab" => grab = false,
             "--no-ui" => show_ui = false,
             "--no-trace" => trace_android = false,
             "--no-reaffirm" => reaffirm_interval = None,
@@ -452,11 +453,12 @@ fn interval_label(interval: Option<Duration>) -> String {
 
 fn print_usage() {
     println!(
-        "Usage: wroid-waydroid-keyboard-smoke <keyboard-event-node> [width] [height] [--grab] [--no-ui] [--no-trace] [--reaffirm-ms N|--no-reaffirm] [--hold-log-ms N|--no-hold-log]"
+        "Usage: wroid-waydroid-keyboard-smoke <keyboard-event-node> [width] [height] [--no-grab] [--no-ui] [--no-trace] [--reaffirm-ms N|--no-reaffirm] [--hold-log-ms N|--no-hold-log]"
     );
     println!(
-        "Example: sudo ./target/release/wroid-waydroid-keyboard-smoke /dev/input/event7 1920 1050 --grab"
+        "Example: sudo ./target/release/wroid-waydroid-keyboard-smoke /dev/input/event7 1920 1050"
     );
+    println!("Diagnostics without exclusive keyboard grab: add --no-grab");
     println!("Recovery: sudo ./target/release/wroid-waydroid-keyboard-smoke --cleanup");
 }
 
@@ -471,7 +473,7 @@ mod tests {
         assert_eq!(options.keyboard_path, PathBuf::from("/dev/input/event7"));
         assert_eq!(options.width, 1920);
         assert_eq!(options.height, 1080);
-        assert!(!options.grab);
+        assert!(options.grab);
         assert!(options.show_ui);
         assert!(options.trace_android);
         assert_eq!(options.reaffirm_interval, Some(DEFAULT_REAFFIRM_INTERVAL));
@@ -484,7 +486,7 @@ mod tests {
             "/dev/input/event7".to_owned(),
             "1600".to_owned(),
             "900".to_owned(),
-            "--grab".to_owned(),
+            "--no-grab".to_owned(),
             "--no-ui".to_owned(),
             "--no-trace".to_owned(),
             "--reaffirm-ms".to_owned(),
@@ -496,7 +498,7 @@ mod tests {
 
         assert_eq!(options.width, 1600);
         assert_eq!(options.height, 900);
-        assert!(options.grab);
+        assert!(!options.grab);
         assert!(!options.show_ui);
         assert!(!options.trace_android);
         assert_eq!(options.reaffirm_interval, Some(Duration::from_millis(75)));
@@ -514,6 +516,14 @@ mod tests {
 
         assert_eq!(options.reaffirm_interval, None);
         assert_eq!(options.hold_log_interval, None);
+    }
+
+    #[test]
+    fn accepts_legacy_explicit_grab_flag() {
+        let options =
+            parse_options(&["/dev/input/event7".to_owned(), "--grab".to_owned()]).unwrap();
+
+        assert!(options.grab);
     }
 
     #[test]
