@@ -33,6 +33,13 @@ struct Options {
     hold_log_interval: Option<Duration>,
 }
 
+#[derive(Debug, Default)]
+struct HoldTimers {
+    started_at: Option<Instant>,
+    next_reaffirm_at: Option<Instant>,
+    next_log_at: Option<Instant>,
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() || args.iter().any(|argument| argument == "--help") {
@@ -208,36 +215,16 @@ fn run_keyboard_loop(
     engine: &mut TouchEngine<UinputTouchInjector>,
     options: &Options,
 ) -> Result<(), Box<dyn Error>> {
-    let mut hold_started_at: Option<Instant> = None;
-    let mut next_reaffirm_at: Option<Instant> = None;
-    let mut next_hold_log_at: Option<Instant> = None;
+    let mut timers = HoldTimers::default();
 
     loop {
-        match receiver.recv_timeout(next_timeout(next_reaffirm_at, next_hold_log_at)) {
+        match receiver.recv_timeout(next_timeout(&timers)) {
             Ok(event) => {
-                if handle_keyboard_event(
-                    event,
-                    state,
-                    joystick,
-                    engine,
-                    options,
-                    &mut hold_started_at,
-                    &mut next_reaffirm_at,
-                    &mut next_hold_log_at,
-                )? {
+                if handle_keyboard_event(event, state, joystick, engine, options, &mut timers)? {
                     return Ok(());
                 }
                 while let Ok(event) = receiver.try_recv() {
-                    if handle_keyboard_event(
-                        event,
-                        state,
-                        joystick,
-                        engine,
-                        options,
-                        &mut hold_started_at,
-                        &mut next_reaffirm_at,
-                        &mut next_hold_log_at,
-                    )? {
+                    if handle_keyboard_event(event, state, joystick, engine, options, &mut timers)? {
                         return Ok(());
                     }
                 }
@@ -252,15 +239,7 @@ fn run_keyboard_loop(
             }
         }
 
-        service_hold_timers(
-            state,
-            joystick,
-            engine,
-            options,
-            hold_started_at,
-            &mut next_reaffirm_at,
-            &mut next_hold_log_at,
-        )?;
+        service_hold_timers(state, joystick, engine, options, &mut timers)?;
     }
 }
 
@@ -270,9 +249,7 @@ fn handle_keyboard_event(
     joystick: &VirtualJoystick,
     engine: &mut TouchEngine<UinputTouchInjector>,
     options: &Options,
-    hold_started_at: &mut Option<Instant>,
-    next_reaffirm_at: &mut Option<Instant>,
-    next_hold_log_at: &mut Option<Instant>,
+    timers: &mut HoldTimers,
 ) -> Result<bool, Box<dyn Error>> {
     match state.apply(event) {
         KeyboardAction::DirectionChanged(input) => {
@@ -281,13 +258,7 @@ fn handle_keyboard_event(
                 "direction up={} left={} down={} right={}",
                 input.up, input.left, input.down, input.right
             );
-            refresh_hold_timers(
-                input,
-                options,
-                hold_started_at,
-                next_reaffirm_at,
-                next_hold_log_at,
-            );
+            refresh_hold_timers(input, options, timers);
             Ok(false)
         }
         KeyboardAction::ExitRequested => Ok(true),
@@ -295,26 +266,18 @@ fn handle_keyboard_event(
     }
 }
 
-fn refresh_hold_timers(
-    input: DirectionalInput,
-    options: &Options,
-    hold_started_at: &mut Option<Instant>,
-    next_reaffirm_at: &mut Option<Instant>,
-    next_hold_log_at: &mut Option<Instant>,
-) {
+fn refresh_hold_timers(input: DirectionalInput, options: &Options, timers: &mut HoldTimers) {
     if input == DirectionalInput::default() {
-        *hold_started_at = None;
-        *next_reaffirm_at = None;
-        *next_hold_log_at = None;
+        *timers = HoldTimers::default();
         return;
     }
 
     let now = Instant::now();
-    if hold_started_at.is_none() {
-        *hold_started_at = Some(now);
+    if timers.started_at.is_none() {
+        timers.started_at = Some(now);
     }
-    *next_reaffirm_at = options.reaffirm_interval.map(|interval| now + interval);
-    *next_hold_log_at = options.hold_log_interval.map(|interval| now + interval);
+    timers.next_reaffirm_at = options.reaffirm_interval.map(|interval| now + interval);
+    timers.next_log_at = options.hold_log_interval.map(|interval| now + interval);
 }
 
 fn service_hold_timers(
@@ -322,30 +285,28 @@ fn service_hold_timers(
     joystick: &VirtualJoystick,
     engine: &mut TouchEngine<UinputTouchInjector>,
     options: &Options,
-    hold_started_at: Option<Instant>,
-    next_reaffirm_at: &mut Option<Instant>,
-    next_hold_log_at: &mut Option<Instant>,
+    timers: &mut HoldTimers,
 ) -> Result<(), Box<dyn Error>> {
     if state.current() == DirectionalInput::default() {
-        *next_reaffirm_at = None;
-        *next_hold_log_at = None;
+        timers.next_reaffirm_at = None;
+        timers.next_log_at = None;
         return Ok(());
     }
 
     let now = Instant::now();
-    if let (Some(due), Some(interval)) = (*next_reaffirm_at, options.reaffirm_interval) {
+    if let (Some(due), Some(interval)) = (timers.next_reaffirm_at, options.reaffirm_interval) {
         if now >= due {
             if let Some(position) = engine.state().position(joystick.contact_id()) {
                 engine.move_contact(joystick.contact_id(), position)?;
             }
-            *next_reaffirm_at = Some(now + interval);
+            timers.next_reaffirm_at = Some(now + interval);
         }
     }
 
     if let (Some(due), Some(interval), Some(started)) = (
-        *next_hold_log_at,
+        timers.next_log_at,
         options.hold_log_interval,
-        hold_started_at,
+        timers.started_at,
     ) {
         if now >= due {
             let input = state.current();
@@ -357,15 +318,15 @@ fn service_hold_timers(
                 input.right,
                 now.duration_since(started).as_millis()
             );
-            *next_hold_log_at = Some(now + interval);
+            timers.next_log_at = Some(now + interval);
         }
     }
 
     Ok(())
 }
 
-fn next_timeout(next_reaffirm_at: Option<Instant>, next_hold_log_at: Option<Instant>) -> Duration {
-    [next_reaffirm_at, next_hold_log_at]
+fn next_timeout(timers: &HoldTimers) -> Duration {
+    [timers.next_reaffirm_at, timers.next_log_at]
         .into_iter()
         .flatten()
         .min()
