@@ -69,7 +69,11 @@ struct HoldTimers {
 }
 
 pub fn run_live_keyboard_cli(args: &[String], binary_name: &str) -> LiveKeyboardResult<()> {
-    if args.is_empty() || args.iter().any(|argument| argument == "--help" || argument == "-h") {
+    if args.is_empty()
+        || args
+            .iter()
+            .any(|argument| argument == "--help" || argument == "-h")
+    {
         print_live_keyboard_usage(binary_name);
         return Ok(());
     }
@@ -438,7 +442,11 @@ pub fn parse_live_keyboard_command(args: &[String]) -> LiveKeyboardResult<LiveKe
 
     Ok(LiveKeyboardCommand::Run(LiveKeyboardOptions {
         keyboard_path: PathBuf::from(keyboard_path),
-        width: parse_dimension(positional.get(1).map(String::as_str), DEFAULT_LIVE_WIDTH, "width")?,
+        width: parse_dimension(
+            positional.get(1).map(String::as_str),
+            DEFAULT_LIVE_WIDTH,
+            "width",
+        )?,
         height: parse_dimension(
             positional.get(2).map(String::as_str),
             DEFAULT_LIVE_HEIGHT,
@@ -516,9 +524,8 @@ mod tests {
 
     #[test]
     fn parses_default_live_options() {
-        let options = run_options(
-            parse_live_keyboard_command(&["/dev/input/event7".to_owned()]).unwrap(),
-        );
+        let options =
+            run_options(parse_live_keyboard_command(&["/dev/input/event7".to_owned()]).unwrap());
 
         assert_eq!(options.keyboard_path, PathBuf::from("/dev/input/event7"));
         assert_eq!(options.width, DEFAULT_LIVE_WIDTH);
@@ -583,11 +590,8 @@ mod tests {
     #[test]
     fn accepts_legacy_explicit_grab_flag() {
         let options = run_options(
-            parse_live_keyboard_command(&[
-                "/dev/input/event7".to_owned(),
-                "--grab".to_owned(),
-            ])
-            .unwrap(),
+            parse_live_keyboard_command(&["/dev/input/event7".to_owned(), "--grab".to_owned()])
+                .unwrap(),
         );
 
         assert!(options.grab);
@@ -597,16 +601,16 @@ mod tests {
     fn rejects_missing_keyboard_path() {
         let error = parse_live_keyboard_command(&["--no-ui".to_owned()]).unwrap_err();
 
-        assert!(error.to_string().contains("keyboard event node is required"));
+        assert!(error
+            .to_string()
+            .contains("keyboard event node is required"));
     }
 
     #[test]
     fn rejects_unknown_options() {
-        let error = parse_live_keyboard_command(&[
-            "/dev/input/event7".to_owned(),
-            "--bogus".to_owned(),
-        ])
-        .unwrap_err();
+        let error =
+            parse_live_keyboard_command(&["/dev/input/event7".to_owned(), "--bogus".to_owned()])
+                .unwrap_err();
 
         assert!(error.to_string().contains("unknown option"));
     }
