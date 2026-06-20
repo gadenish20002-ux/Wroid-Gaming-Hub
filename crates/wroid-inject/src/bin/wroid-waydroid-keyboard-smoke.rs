@@ -224,7 +224,14 @@ fn run_keyboard_loop(
                     return Ok(());
                 }
                 while let Ok(event) = receiver.try_recv() {
-                    if handle_keyboard_event(event, state, joystick, engine, options, &mut timers)? {
+                    if handle_keyboard_event(
+                        event,
+                        state,
+                        joystick,
+                        engine,
+                        options,
+                        &mut timers,
+                    )? {
                         return Ok(());
                     }
                 }
