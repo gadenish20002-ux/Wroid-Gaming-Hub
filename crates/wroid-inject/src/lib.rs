@@ -8,6 +8,7 @@ mod config;
 mod error;
 mod event;
 mod injector;
+mod live_keyboard;
 mod sink;
 mod state;
 mod transition;
@@ -19,6 +20,11 @@ pub use config::{DeviceConfig, DeviceConfigError, DEFAULT_SLOT_COUNT, MAX_SLOT_C
 pub use error::UinputFrameError;
 pub use event::{EventSink, LinuxInputEvent};
 pub use injector::UinputTouchInjector;
+pub use live_keyboard::{
+    cleanup_live_keyboard_bridge, parse_live_keyboard_command, print_live_keyboard_usage,
+    run_live_keyboard_cli, run_live_keyboard_session, LiveKeyboardCommand, LiveKeyboardOptions,
+    DEFAULT_HOLD_LOG_INTERVAL, DEFAULT_LIVE_HEIGHT, DEFAULT_LIVE_WIDTH, DEFAULT_REAFFIRM_INTERVAL,
+};
 pub use sink::EvdevEventSink;
 pub use waydroid_bridge::{
     remove_bridge, remove_default_bridge, render_bridge_config, CgroupMode, InputDeviceNode,
