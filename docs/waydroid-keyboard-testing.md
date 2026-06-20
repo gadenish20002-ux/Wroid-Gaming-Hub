@@ -23,6 +23,11 @@ active, the tool reaffirms the current joystick position with a periodic
 keyboard key visible both in Android `getevent` and in the terminal without
 allocating a new tracking ID.
 
+Exclusive keyboard grab is enabled by default for live control. This prevents
+W/A/S/D from leaking into the terminal, compositor, or other desktop input
+fields. The grab is applied only after Android and the optional UI are ready, and
+is released on Esc or when the process closes the keyboard descriptor.
+
 ## Build
 
 ```bash
@@ -54,7 +59,7 @@ The expected status is `Session: STOPPED`. Some Waydroid versions omit a
 ## Run in one terminal
 
 This test normally uses **one terminal**. Do not start Waydroid or `evtest`
-separately. Start without exclusive keyboard grab first:
+separately:
 
 ```bash
 sudo ./target/release/wroid-waydroid-keyboard-smoke \
@@ -72,9 +77,10 @@ The tool performs these steps automatically:
 5. waits until Android lists the virtual touchscreen;
 6. opens the Waydroid full UI;
 7. starts Android `getevent -lt` tracing for the virtual touchscreen;
-8. maps W/A/S/D onto one persistent Android touch contact;
-9. reaffirms a held direction periodically until release;
-10. releases the contact, stops Waydroid, and removes the bridge after Esc.
+8. applies exclusive keyboard grab;
+9. maps W/A/S/D onto one persistent Android touch contact;
+10. reaffirms a held direction periodically until release;
+11. releases the contact, stops Waydroid, and removes the bridge after Esc.
 
 Expected readiness output:
 
@@ -82,7 +88,7 @@ Expected readiness output:
 Android detected Wroid Gaming Touchscreen.
 Opened the Waydroid full UI.
 Android getevent tracing is active.
-Controls are live: W/A/S/D move one persistent Android touch contact; Esc exits. Exclusive grab: disabled. Reaffirm: 50ms. Hold log: 1000ms.
+Controls are live: W/A/S/D move one persistent Android touch contact; Esc exits. Exclusive grab: enabled. Reaffirm: 50ms. Hold log: 1000ms.
 ```
 
 Press and hold W/A/S/D. Android trace lines should show one tracking ID while the
@@ -95,6 +101,9 @@ holding up=true left=false down=false right=false for 1000ms
 holding up=true left=false down=false right=false for 2000ms
 ```
 
+W/A/S/D should not type into the terminal or other desktop input fields while the
+exclusive grab is active.
+
 Releasing the final direction should emit `BTN_TOUCH 0` and
 `ABS_MT_TRACKING_ID -1`.
 
@@ -105,21 +114,21 @@ Keyboard capture stopped and the persistent contact was released.
 Waydroid stopped and the temporary LXC bridge was removed.
 ```
 
-## Exclusive grab
+## Diagnostic mode without exclusive grab
 
-After the non-exclusive run succeeds, repeat with:
+Use `--no-grab` only when you deliberately want to see the selected physical
+keyboard continue delivering events to the desktop:
 
 ```bash
 sudo ./target/release/wroid-waydroid-keyboard-smoke \
   /dev/input/event7 \
   1920 \
   1050 \
-  --grab
+  --no-grab
 ```
 
-`--grab` applies `EVIOCGRAB` only after Android and the optional UI are ready.
-The selected physical keyboard stops delivering events to the compositor and
-other applications until Esc exits or the process closes the device descriptor.
+In this mode, W/A/S/D may type into terminals or text fields if a desktop window
+has focus. That is expected and is why it is not the default live-control mode.
 
 ## Optional flags
 
