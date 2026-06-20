@@ -8,6 +8,7 @@ mod config;
 mod error;
 mod event;
 mod injector;
+#[allow(private_interfaces)]
 mod live_keyboard;
 mod sink;
 mod state;
