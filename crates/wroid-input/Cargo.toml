@@ -6,6 +6,5 @@ license.workspace = true
 
 [dependencies]
 evdev.workspace = true
-libc.workspace = true
 thiserror.workspace = true
 wroid-runtime = { path = "../wroid-runtime" }
