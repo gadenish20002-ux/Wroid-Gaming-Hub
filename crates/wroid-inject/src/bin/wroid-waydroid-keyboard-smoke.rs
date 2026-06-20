@@ -224,14 +224,8 @@ fn run_keyboard_loop(
                     return Ok(());
                 }
                 while let Ok(event) = receiver.try_recv() {
-                    if handle_keyboard_event(
-                        event,
-                        state,
-                        joystick,
-                        engine,
-                        options,
-                        &mut timers,
-                    )? {
+                    if handle_keyboard_event(event, state, joystick, engine, options, &mut timers)?
+                    {
                         return Ok(());
                     }
                 }
@@ -525,7 +519,7 @@ mod tests {
     #[test]
     fn rejects_unknown_options() {
         let error =
-            parse_options(&["/dev/input/event7".to_owned(), "--unsafe".to_owned()]).unwrap_err();
+            parse_options(&["/dev/input/event7".to_owned(), "--bogus".to_owned()]).unwrap_err();
 
         assert!(error.to_string().contains("unknown option"));
     }
