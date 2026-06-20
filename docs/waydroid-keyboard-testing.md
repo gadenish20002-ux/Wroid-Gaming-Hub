@@ -17,6 +17,12 @@ touchscreen, installs the bridge, starts Waydroid as the desktop user recorded b
 `sudo`, waits until Android sees the device, optionally opens the full UI, and
 then reads the physical keyboard until Esc is pressed.
 
+Held directions are game-compatible by default: while any W/A/S/D direction is
+active, the tool reaffirms the current joystick position with a periodic
+`Move` every 50 ms and prints a hold heartbeat every second. This makes a held
+keyboard key visible both in Android `getevent` and in the terminal without
+allocating a new tracking ID.
+
 ## Build
 
 ```bash
@@ -67,7 +73,8 @@ The tool performs these steps automatically:
 6. opens the Waydroid full UI;
 7. starts Android `getevent -lt` tracing for the virtual touchscreen;
 8. maps W/A/S/D onto one persistent Android touch contact;
-9. releases the contact, stops Waydroid, and removes the bridge after Esc.
+9. reaffirms a held direction periodically until release;
+10. releases the contact, stops Waydroid, and removes the bridge after Esc.
 
 Expected readiness output:
 
@@ -75,11 +82,20 @@ Expected readiness output:
 Android detected Wroid Gaming Touchscreen.
 Opened the Waydroid full UI.
 Android getevent tracing is active.
-Controls are live: W/A/S/D move one persistent Android touch contact; Esc exits.
+Controls are live: W/A/S/D move one persistent Android touch contact; Esc exits. Exclusive grab: disabled. Reaffirm: 50ms. Hold log: 1000ms.
 ```
 
 Press and hold W/A/S/D. Android trace lines should show one tracking ID while the
-direction changes. Releasing the final direction should emit `BTN_TOUCH 0` and
+direction changes. During a long hold, Android should continue receiving
+position `Move` samples at the reaffirm interval, and the terminal should print a
+heartbeat similar to:
+
+```text
+holding up=true left=false down=false right=false for 1000ms
+holding up=true left=false down=false right=false for 2000ms
+```
+
+Releasing the final direction should emit `BTN_TOUCH 0` and
 `ABS_MT_TRACKING_ID -1`.
 
 Press **Esc** to finish. Wait for both final messages:
@@ -106,6 +122,32 @@ The selected physical keyboard stops delivering events to the compositor and
 other applications until Esc exits or the process closes the device descriptor.
 
 ## Optional flags
+
+Tune the Android reaffirm interval:
+
+```bash
+sudo ./target/release/wroid-waydroid-keyboard-smoke \
+  /dev/input/event7 1920 1050 --reaffirm-ms 33
+```
+
+Disable reaffirming for comparison with the minimal event path:
+
+```bash
+sudo ./target/release/wroid-waydroid-keyboard-smoke \
+  /dev/input/event7 1920 1050 --no-reaffirm
+```
+
+Tune or disable terminal hold heartbeat logs:
+
+```bash
+sudo ./target/release/wroid-waydroid-keyboard-smoke \
+  /dev/input/event7 1920 1050 --hold-log-ms 500
+```
+
+```bash
+sudo ./target/release/wroid-waydroid-keyboard-smoke \
+  /dev/input/event7 1920 1050 --no-hold-log
+```
 
 Disable UI launch while retaining Android event tracing:
 

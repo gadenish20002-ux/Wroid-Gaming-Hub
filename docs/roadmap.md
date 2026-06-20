@@ -20,6 +20,7 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - [ ] Productionize bridge lifecycle, reconciliation, and stable device discovery.
 - [x] Add evdev keyboard capture, capability validation, and WASD normalization.
 - [x] Exercise live physical keyboard input through a temporary managed Waydroid session.
+- [x] Add periodic hold reaffirmation for Android joystick compatibility.
 - [ ] Add relative-mouse capture.
 - [ ] Implement focus-loss and crash-safe contact cancellation across the complete session lifecycle.
 - [ ] Validate at least ten simultaneous contacts on a real Waydroid session.
@@ -39,6 +40,7 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - [x] Add a persistent virtual joystick runtime state machine.
 - [x] Wire physical WASD input to the persistent joystick in a host smoke path.
 - [x] Wire physical WASD through the temporary Waydroid bridge into Android.
+- [x] Keep held WASD directions alive with periodic reaffirmation and hold diagnostics.
 - [ ] Connect profile-defined controls to the daemon-managed Waydroid session.
 - [ ] Implement relative mouse aim.
 - [ ] Add physical and virtual gamepad support.
@@ -94,7 +96,7 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
    - Verify ten simultaneous contacts and deterministic cleanup.
 
 2. Integrate safe host input capture with the managed session.
-   - Reuse the completed evdev keyboard reader, WASD normalizer, and live Android smoke path.
+   - Reuse the completed evdev keyboard reader, WASD normalizer, live Android smoke path, and hold reaffirmation loop.
    - Add relative mouse capture through an evdev/libinput-compatible path.
    - Preserve explicit user permissions and focus ownership.
    - Keep behavior transparent and avoid protection evasion.
