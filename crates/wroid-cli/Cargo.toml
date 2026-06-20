@@ -14,6 +14,7 @@ clap.workspace = true
 crossterm.workspace = true
 wroid-adb = { path = "../wroid-adb" }
 wroid-core = { path = "../wroid-core" }
+wroid-inject = { path = "../wroid-inject" }
 wroid-waydroid = { path = "../wroid-waydroid" }
 
 [dev-dependencies]
