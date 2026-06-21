@@ -152,20 +152,13 @@ fn is_movement_summary(summary: &EventSummary) -> bool {
         summary,
         EventSummary::Key(
             _,
-            KeyCode::KEY_W
-                | KeyCode::KEY_A
-                | KeyCode::KEY_S
-                | KeyCode::KEY_D
-                | KeyCode::KEY_ESC,
+            KeyCode::KEY_W | KeyCode::KEY_A | KeyCode::KEY_S | KeyCode::KEY_D | KeyCode::KEY_ESC,
             _
         )
     )
 }
 
-fn parse_next<T>(
-    args: &mut impl Iterator<Item = String>,
-    option: &str,
-) -> Result<T, Box<dyn Error>>
+fn parse_next<T>(args: &mut impl Iterator<Item = String>, option: &str) -> Result<T, Box<dyn Error>>
 where
     T: std::str::FromStr,
     T::Err: Error + Send + Sync + 'static,

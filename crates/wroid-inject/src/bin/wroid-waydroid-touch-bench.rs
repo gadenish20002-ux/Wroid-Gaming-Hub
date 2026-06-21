@@ -73,7 +73,9 @@ fn run_benchmark(options: Options) -> Result<(), Box<dyn Error>> {
         println!("Android detected {WROID_TOUCHSCREEN_NAME}.");
         if options.show_ui {
             session.show_full_ui()?;
-            println!("Requested Waydroid full UI. The benchmark does not require the window to appear.");
+            println!(
+                "Requested Waydroid full UI. The benchmark does not require the window to appear."
+            );
         }
 
         let capture = spawn_getevent_capture(&event_node, &options)?;
@@ -129,7 +131,11 @@ fn inject_taps(
         frame_samples.push(up_started.elapsed());
 
         if index + 1 == 1 || (index + 1) % 10 == 0 || index + 1 == options.samples {
-            println!("progress: {}/{} tap(s) injected", index + 1, options.samples);
+            println!(
+                "progress: {}/{} tap(s) injected",
+                index + 1,
+                options.samples
+            );
         }
 
         sleep(interval);
@@ -152,10 +158,14 @@ fn spawn_getevent_capture(event_node: &Path, options: &Options) -> io::Result<st
     let event_path = event_node.to_str().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "event node path is not UTF-8")
     })?;
-    let capture_count = options.samples.saturating_mul(GETEVENT_EVENTS_PER_TAP).max(1);
+    let capture_count = options
+        .samples
+        .saturating_mul(GETEVENT_EVENTS_PER_TAP)
+        .max(1);
     let expected_runtime_ms = options
         .samples
-        .saturating_mul((options.hold_ms + options.interval_ms) as usize) as u64;
+        .saturating_mul((options.hold_ms + options.interval_ms) as usize)
+        as u64;
     let timeout_seconds = (expected_runtime_ms / 1_000 + GETEVENT_TIMEOUT_GRACE_SECONDS).max(1);
 
     println!(
@@ -193,8 +203,14 @@ struct BenchmarkReport {
 
 impl BenchmarkReport {
     fn new(frame_samples: Vec<Duration>, captured: String) -> Self {
-        let android_downs = count_any(&captured, &["0001 014a 00000001", "BTN_TOUCH            DOWN"]);
-        let android_ups = count_any(&captured, &["0001 014a 00000000", "BTN_TOUCH            UP"]);
+        let android_downs = count_any(
+            &captured,
+            &["0001 014a 00000001", "BTN_TOUCH            DOWN"],
+        );
+        let android_ups = count_any(
+            &captured,
+            &["0001 014a 00000000", "BTN_TOUCH            UP"],
+        );
         let android_tracking_updates = count_any(&captured, &["0003 0039", "ABS_MT_TRACKING_ID"]);
         let android_syncs = count_any(&captured, &["0000 0000 00000000", "SYN_REPORT"]);
         Self {
@@ -222,9 +238,17 @@ impl BenchmarkReport {
 
         if print_events {
             println!();
-            println!("Captured Android getevent output:\n{}", self.captured.trim());
+            println!(
+                "Captured Android getevent output:\n{}",
+                self.captured.trim()
+            );
         } else {
-            let preview = self.captured.lines().take(20).collect::<Vec<_>>().join("\n");
+            let preview = self
+                .captured
+                .lines()
+                .take(20)
+                .collect::<Vec<_>>()
+                .join("\n");
             if !preview.trim().is_empty() {
                 println!();
                 println!("Captured Android getevent preview:\n{preview}");
@@ -294,7 +318,11 @@ impl Options {
                 value if value.starts_with("--") => {
                     return Err(invalid_input(format!("unknown option: {value}")));
                 }
-                value => return Err(invalid_input(format!("unexpected positional argument: {value}"))),
+                value => {
+                    return Err(invalid_input(format!(
+                        "unexpected positional argument: {value}"
+                    )))
+                }
             }
         }
 
@@ -310,10 +338,7 @@ fn count_any(haystack: &str, patterns: &[&str]) -> usize {
         .unwrap_or(0)
 }
 
-fn parse_next<T>(
-    args: &mut impl Iterator<Item = String>,
-    option: &str,
-) -> Result<T, Box<dyn Error>>
+fn parse_next<T>(args: &mut impl Iterator<Item = String>, option: &str) -> Result<T, Box<dyn Error>>
 where
     T: std::str::FromStr,
     T::Err: Error + Send + Sync + 'static,

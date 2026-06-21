@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Relative mouse capture and normalization for future mouse-aim bindings.
 //!
 //! The production path will feed these normalized host events into profile v2
@@ -330,7 +332,9 @@ fn normalize_button_event(code: KeyCode, value: i32) -> Option<MouseEvent> {
         _ => return None,
     };
 
-    Some(MouseEvent::Button(MouseButtonEvent::new(button, transition)))
+    Some(MouseEvent::Button(MouseButtonEvent::new(
+        button, transition,
+    )))
 }
 
 fn scale_axis(value: i32, sensitivity: f64) -> i32 {
@@ -401,6 +405,9 @@ mod tests {
             .scaled(1.5);
 
         assert_eq!(motion, RelativeMouseMotion::new(23, -15));
-        assert_eq!(RelativeMouseMotion::new(1, 2).scaled(0.0), RelativeMouseMotion::new(1, 2));
+        assert_eq!(
+            RelativeMouseMotion::new(1, 2).scaled(0.0),
+            RelativeMouseMotion::new(1, 2)
+        );
     }
 }

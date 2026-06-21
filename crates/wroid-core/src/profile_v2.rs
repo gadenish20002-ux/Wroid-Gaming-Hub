@@ -84,14 +84,18 @@ pub struct BindingV2 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InputV2 {
-    Key { key: String },
+    Key {
+        key: String,
+    },
     KeyCluster {
         up: String,
         left: String,
         down: String,
         right: String,
     },
-    MouseButton { button: String },
+    MouseButton {
+        button: String,
+    },
     MouseMove,
 }
 

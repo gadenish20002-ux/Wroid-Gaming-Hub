@@ -22,7 +22,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Mouse: {} ({})", mouse.name(), mouse.path().display());
     println!(
         "Relative capture active. Exclusive grab: {}.",
-        if mouse.is_grabbed() { "enabled" } else { "disabled" },
+        if mouse.is_grabbed() {
+            "enabled"
+        } else {
+            "disabled"
+        },
     );
 
     let mut seen = 0_usize;
@@ -98,10 +102,7 @@ impl Options {
         }
 
         let mouse_path = path.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "missing mouse event-device path",
-            )
+            io::Error::new(io::ErrorKind::InvalidInput, "missing mouse event-device path")
         })?;
 
         Ok(Some(Self {
@@ -142,7 +143,5 @@ fn transition_label(transition: MouseButtonTransition) -> &'static str {
 }
 
 fn print_usage() {
-    println!(
-        "Usage: wroid-mouse-capture [--grab|--no-grab] [--max-events N] <mouse-event-device>"
-    );
+    println!("Usage: wroid-mouse-capture [--grab|--no-grab] [--max-events N] <mouse-event-device>");
 }
