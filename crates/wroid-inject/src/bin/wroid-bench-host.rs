@@ -53,7 +53,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     println!(
         "Exclusive grab: {}. This benchmark measures host capture/normalization/runtime overhead; it does not include Android getevent timing.",
-        if keyboard.is_grabbed() { "enabled" } else { "disabled" }
+        if keyboard.is_grabbed() {
+            "enabled"
+        } else {
+            "disabled"
+        }
     );
 
     while stats.pipeline_samples.len() < options.samples && !stats.exit_requested {
@@ -85,10 +89,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let injector = engine.injector();
     println!();
     println!("Wroid host input benchmark summary");
-    println!("  direction-change samples: {}", stats.pipeline_samples.len());
+    println!(
+        "  direction-change samples: {}",
+        stats.pipeline_samples.len()
+    );
     println!("  evdev read calls: {}", stats.read_wait_samples.len());
     println!("  ignored/repeat events: {}", stats.ignored_events);
-    println!("  submitted runtime frames: {}", stats.submitted_runtime_frames);
+    println!(
+        "  submitted runtime frames: {}",
+        stats.submitted_runtime_frames
+    );
     println!("  recorded injector frames: {}", injector.frames);
     println!("  recorded touch events: {}", injector.touch_events);
     print_distribution("host pipeline", &stats.pipeline_samples);
@@ -188,17 +198,17 @@ struct BenchStats {
     exit_requested: bool,
 }
 
-fn parse_next<T>(
-    args: &mut impl Iterator<Item = String>,
-    option: &str,
-) -> Result<T, Box<dyn Error>>
+fn parse_next<T>(args: &mut impl Iterator<Item = String>, option: &str) -> Result<T, Box<dyn Error>>
 where
     T: std::str::FromStr,
     T::Err: Error + Send + Sync + 'static,
 {
-    let value = args
-        .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("missing {option} value")))?;
+    let value = args.next().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("missing {option} value"),
+        )
+    })?;
     value.parse::<T>().map_err(|source| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -244,6 +254,8 @@ fn print_usage() {
     println!(
         "Usage: wroid-bench-host <keyboard-event-node> [--samples N] [--width W] [--height H] [--grab]"
     );
-    println!("Example: sudo ./target/release/wroid-bench-host /dev/input/event7 --samples 200 --grab");
+    println!(
+        "Example: sudo ./target/release/wroid-bench-host /dev/input/event7 --samples 200 --grab"
+    );
     println!("Without --grab, the compositor and terminal can still receive keyboard input during diagnostics.");
 }
