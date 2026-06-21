@@ -62,7 +62,10 @@ impl ProfileV2 {
         serde_json::from_str(&data).map_err(|source| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("failed to parse {} as profile v2 JSON: {source}", path.display()),
+                format!(
+                    "failed to parse {} as profile v2 JSON: {source}",
+                    path.display()
+                ),
             )
             .into()
         })
@@ -105,18 +108,13 @@ impl ProfileV2 {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Orientation {
+    #[default]
     Landscape,
     Portrait,
     Any,
-}
-
-impl Default for Orientation {
-    fn default() -> Self {
-        Self::Landscape
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -129,14 +127,18 @@ struct BindingV2 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum InputV2 {
-    Key { key: String },
+    Key {
+        key: String,
+    },
     KeyCluster {
         up: String,
         left: String,
         down: String,
         right: String,
     },
-    MouseButton { button: String },
+    MouseButton {
+        button: String,
+    },
     MouseMove,
 }
 
@@ -164,17 +166,12 @@ enum ActionV2 {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum JoystickMode {
+    #[default]
     Hold,
     Toggle,
-}
-
-impl Default for JoystickMode {
-    fn default() -> Self {
-        Self::Hold
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -314,7 +311,11 @@ fn validate_action(action: &ActionV2, binding: &str, errors: &mut Vec<String>) {
             region,
             sensitivity,
         } => {
-            validate_rect(*region, &format!("binding {binding} mouse_aim region"), errors);
+            validate_rect(
+                *region,
+                &format!("binding {binding} mouse_aim region"),
+                errors,
+            );
             if !sensitivity.is_finite() || *sensitivity <= 0.0 {
                 errors.push(format!(
                     "binding {binding} mouse_aim sensitivity must be finite and greater than zero"
@@ -323,7 +324,9 @@ fn validate_action(action: &ActionV2, binding: &str, errors: &mut Vec<String>) {
         }
         ActionV2::Macro { steps } => {
             if steps.is_empty() {
-                errors.push(format!("binding {binding} macro must contain at least one step"));
+                errors.push(format!(
+                    "binding {binding} macro must contain at least one step"
+                ));
             }
             for (index, step) in steps.iter().enumerate() {
                 validate_action(step, &format!("{binding}.step[{index}]"), errors);
@@ -425,10 +428,7 @@ fn materialize_radius(value: f64, resolution: Resolution) -> u32 {
     (value.clamp(0.0, 1.0) * base).round().max(1.0) as u32
 }
 
-fn parse_next<T>(
-    args: &mut impl Iterator<Item = String>,
-    label: &str,
-) -> Result<T, Box<dyn Error>>
+fn parse_next<T>(args: &mut impl Iterator<Item = String>, label: &str) -> Result<T, Box<dyn Error>>
 where
     T: std::str::FromStr,
     T::Err: Error + Send + Sync + 'static,
