@@ -11,7 +11,7 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - [x] Add CI quality gates for formatting, Clippy, and workspace tests.
 - [x] Accept architecture decisions for persistent input and privilege separation.
 - [ ] Split package, display, lifecycle, diagnostics, and input interfaces.
-- [ ] Add a benchmark harness for the shell compatibility backend.
+- [x] Add a benchmark harness for the shell compatibility backend.
 
 ## Phase 1: Low-latency Linux input
 
@@ -21,7 +21,7 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - [x] Add evdev keyboard capture, capability validation, and WASD normalization.
 - [x] Exercise live physical keyboard input through a temporary managed Waydroid session.
 - [x] Add periodic hold reaffirmation for Android joystick compatibility.
-- [ ] Add relative-mouse capture.
+- [x] Add evdev relative-mouse capture, button normalization, and a host diagnostic CLI.
 - [ ] Implement focus-loss and crash-safe contact cancellation across the complete session lifecycle.
 - [ ] Validate at least ten simultaneous contacts on a real Waydroid session.
 - [ ] Measure capture-to-inject p50/p95/p99 latency.
@@ -35,7 +35,7 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 
 ## Phase 3: Profile v2 and gaming controls
 
-- [ ] Add normalized coordinates and aspect-aware viewport transforms.
+- [x] Add normalized coordinates and aspect-aware viewport transforms.
 - [ ] Add schema migrations, layers, modifiers, hold/toggle modes, and dead zones.
 - [x] Add a persistent virtual joystick runtime state machine.
 - [x] Wire physical WASD input to the persistent joystick in a host smoke path.
@@ -81,8 +81,8 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - No overlay editor.
 - No production daemon-managed global input capture.
 - The production bridge lifecycle and privilege boundary are not implemented yet.
+- Relative mouse capture exists as a host diagnostic path, but Android mouse aim is not wired yet.
 - No gamepad mapping.
-- No mouse aim behavior.
 - No macro execution.
 - No XAPK/APKM/OBB install flow.
 - No anti-cheat bypasses or protection evasion.
@@ -96,8 +96,8 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
    - Verify ten simultaneous contacts and deterministic cleanup.
 
 2. Integrate safe host input capture with the managed session.
-   - Reuse the completed evdev keyboard reader, WASD normalizer, live Android smoke path, and hold reaffirmation loop.
-   - Add relative mouse capture through an evdev/libinput-compatible path.
+   - Reuse the completed evdev keyboard reader, relative mouse reader, WASD normalizer, live Android smoke path, and hold reaffirmation loop.
+   - Convert normalized mouse motion into profile v2 `mouse_aim` touch frames.
    - Preserve explicit user permissions and focus ownership.
    - Keep behavior transparent and avoid protection evasion.
    - Move temporary root-owned orchestration behind the daemon/helper boundary.
