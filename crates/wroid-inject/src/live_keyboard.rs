@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 use wroid_core::{Point, Resolution};
 use wroid_input::{
-    DirectionalKeyState, EvdevKeyboard, KeyboardAction, KeyboardDeviceError, KeyboardEvent,
+    DirectionalKeyState, EvdevKeyboard, HostKey, HostKeyEvent, KeyTransition, KeyboardAction,
+    KeyboardDeviceError,
 };
 use wroid_runtime::{ContactId, DirectionalInput, TouchEngine, VirtualJoystick};
 
@@ -26,9 +27,17 @@ pub const DEFAULT_REAFFIRM_INTERVAL: Duration = Duration::from_millis(50);
 pub const DEFAULT_HOLD_LOG_INTERVAL: Duration = Duration::from_millis(1_000);
 pub const DEFAULT_READY_DELAY: Duration = Duration::from_millis(1_000);
 
+const JOYSTICK_CONTACT_ID: ContactId = ContactId::new(1);
+const TAP_CONTACT_ID: ContactId = ContactId::new(2);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 type LiveKeyboardResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyTapBinding {
+    pub key: String,
+    pub point: Point,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveKeyboardOptions {
@@ -37,6 +46,7 @@ pub struct LiveKeyboardOptions {
     pub height: u32,
     pub joystick_center: Point,
     pub joystick_radius: u32,
+    pub key_taps: Vec<KeyTapBinding>,
     pub grab: bool,
     pub show_ui: bool,
     pub trace_android: bool,
@@ -57,6 +67,7 @@ impl LiveKeyboardOptions {
             height,
             joystick_center: default_joystick_center(width, height),
             joystick_radius: default_joystick_radius(width, height),
+            key_taps: Vec::new(),
             grab: true,
             show_ui: true,
             trace_android: true,
@@ -155,7 +166,7 @@ pub fn run_live_keyboard_session(options: LiveKeyboardOptions) -> LiveKeyboardRe
         height: options.height,
     };
     let joystick = VirtualJoystick::new(
-        ContactId::new(1),
+        JOYSTICK_CONTACT_ID,
         options.joystick_center,
         options.joystick_radius,
         resolution,
@@ -189,7 +200,7 @@ pub fn run_live_keyboard_session(options: LiveKeyboardOptions) -> LiveKeyboardRe
         }
 
         println!(
-            "Controls are live: W/A/S/D move one persistent Android touch contact; Esc exits. Exclusive grab: {}. Joystick center={},{} radius={}px. Reaffirm: {}. Hold log: {}. Ready delay: {}.",
+            "Controls are live: W/A/S/D move one persistent Android touch contact; profile tap keys execute Android taps; Esc exits. Exclusive grab: {}. Joystick center={},{} radius={}px. Tap bindings: {}. Reaffirm: {}. Hold log: {}. Ready delay: {}.",
             if keyboard.is_grabbed() {
                 "enabled"
             } else {
@@ -198,6 +209,7 @@ pub fn run_live_keyboard_session(options: LiveKeyboardOptions) -> LiveKeyboardRe
             options.joystick_center.x,
             options.joystick_center.y,
             options.joystick_radius,
+            options.key_taps.len(),
             interval_label(options.reaffirm_interval),
             interval_label(options.hold_log_interval),
             duration_label(options.ready_delay),
@@ -236,7 +248,7 @@ pub fn run_live_keyboard_session(options: LiveKeyboardOptions) -> LiveKeyboardRe
 }
 
 struct KeyboardReader {
-    receiver: Receiver<KeyboardEvent>,
+    receiver: Receiver<HostKeyEvent>,
     handle: JoinHandle<Result<(), KeyboardDeviceError>>,
 }
 
@@ -244,8 +256,8 @@ impl KeyboardReader {
     fn spawn(mut keyboard: EvdevKeyboard) -> Self {
         let (sender, receiver) = mpsc::channel();
         let handle = thread::spawn(move || loop {
-            for event in keyboard.next_events()? {
-                let exit = matches!(state_preview(event), KeyboardAction::ExitRequested);
+            for event in keyboard.next_host_key_events()? {
+                let exit = is_exit_press(event);
                 if sender.send(event).is_err() {
                     return Ok(());
                 }
@@ -258,7 +270,7 @@ impl KeyboardReader {
         Self { receiver, handle }
     }
 
-    fn receiver(&self) -> &Receiver<KeyboardEvent> {
+    fn receiver(&self) -> &Receiver<HostKeyEvent> {
         &self.receiver
     }
 
@@ -270,13 +282,12 @@ impl KeyboardReader {
     }
 }
 
-fn state_preview(event: KeyboardEvent) -> KeyboardAction {
-    let mut state = DirectionalKeyState::default();
-    state.apply(event)
+fn is_exit_press(event: HostKeyEvent) -> bool {
+    event.key == HostKey::Esc && event.transition == KeyTransition::Pressed
 }
 
 fn run_keyboard_loop(
-    receiver: &Receiver<KeyboardEvent>,
+    receiver: &Receiver<HostKeyEvent>,
     state: &mut DirectionalKeyState,
     joystick: &VirtualJoystick,
     engine: &mut TouchEngine<UinputTouchInjector>,
@@ -312,26 +323,57 @@ fn run_keyboard_loop(
 }
 
 fn handle_keyboard_event(
-    event: KeyboardEvent,
+    event: HostKeyEvent,
     state: &mut DirectionalKeyState,
     joystick: &VirtualJoystick,
     engine: &mut TouchEngine<UinputTouchInjector>,
     options: &LiveKeyboardOptions,
     timers: &mut HoldTimers,
 ) -> LiveKeyboardResult<bool> {
-    match state.apply(event) {
-        KeyboardAction::DirectionChanged(input) => {
-            joystick.apply(engine, input)?;
-            println!(
-                "direction up={} left={} down={} right={}",
-                input.up, input.left, input.down, input.right
-            );
-            refresh_hold_timers(input, options, timers);
-            Ok(false)
-        }
-        KeyboardAction::ExitRequested => Ok(true),
-        KeyboardAction::Ignored => Ok(false),
+    if is_exit_press(event) {
+        return Ok(true);
     }
+
+    if let Some(movement_event) = event.movement_event() {
+        match state.apply(movement_event) {
+            KeyboardAction::DirectionChanged(input) => {
+                joystick.apply(engine, input)?;
+                println!(
+                    "direction up={} left={} down={} right={}",
+                    input.up, input.left, input.down, input.right
+                );
+                refresh_hold_timers(input, options, timers);
+            }
+            KeyboardAction::ExitRequested => return Ok(true),
+            KeyboardAction::Ignored => {}
+        }
+        return Ok(false);
+    }
+
+    if event.transition == KeyTransition::Pressed {
+        if let Some(binding) = options
+            .key_taps
+            .iter()
+            .find(|binding| key_name_matches(event.key.profile_name(), &binding.key))
+        {
+            inject_tap(engine, binding.point)?;
+            println!(
+                "tap key={} point={},{}",
+                binding.key, binding.point.x, binding.point.y
+            );
+        }
+    }
+
+    Ok(false)
+}
+
+fn inject_tap(
+    engine: &mut TouchEngine<UinputTouchInjector>,
+    point: Point,
+) -> LiveKeyboardResult<()> {
+    engine.begin_contact(TAP_CONTACT_ID, point)?;
+    engine.end_contact(TAP_CONTACT_ID)?;
+    Ok(())
 }
 
 fn refresh_hold_timers(
@@ -494,6 +536,7 @@ pub fn parse_live_keyboard_command(args: &[String]) -> LiveKeyboardResult<LiveKe
         height,
         joystick_center: default_joystick_center(width, height),
         joystick_radius: default_joystick_radius(width, height),
+        key_taps: Vec::new(),
         grab,
         show_ui,
         trace_android,
@@ -555,6 +598,10 @@ fn parse_dimension(value: Option<&str>, default: u32, label: &str) -> LiveKeyboa
     })
 }
 
+fn key_name_matches(left: &str, right: &str) -> bool {
+    left.trim().eq_ignore_ascii_case(right.trim())
+}
+
 fn interval_label(interval: Option<Duration>) -> String {
     interval
         .map(|interval| format!("{}ms", interval.as_millis()))
@@ -605,6 +652,7 @@ mod tests {
             options.joystick_radius,
             default_joystick_radius(DEFAULT_LIVE_WIDTH, DEFAULT_LIVE_HEIGHT)
         );
+        assert!(options.key_taps.is_empty());
         assert!(options.grab);
         assert!(options.show_ui);
         assert!(options.trace_android);
