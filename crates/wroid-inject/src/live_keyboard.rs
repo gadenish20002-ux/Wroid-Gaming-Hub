@@ -34,6 +34,8 @@ pub struct LiveKeyboardOptions {
     pub keyboard_path: PathBuf,
     pub width: u32,
     pub height: u32,
+    pub joystick_center: Point,
+    pub joystick_radius: u32,
     pub grab: bool,
     pub show_ui: bool,
     pub trace_android: bool,
@@ -44,10 +46,16 @@ pub struct LiveKeyboardOptions {
 
 impl LiveKeyboardOptions {
     pub fn new(keyboard_path: impl Into<PathBuf>) -> Self {
+        Self::with_resolution(keyboard_path, DEFAULT_LIVE_WIDTH, DEFAULT_LIVE_HEIGHT)
+    }
+
+    pub fn with_resolution(keyboard_path: impl Into<PathBuf>, width: u32, height: u32) -> Self {
         Self {
             keyboard_path: keyboard_path.into(),
-            width: DEFAULT_LIVE_WIDTH,
-            height: DEFAULT_LIVE_HEIGHT,
+            width,
+            height,
+            joystick_center: default_joystick_center(width, height),
+            joystick_radius: default_joystick_radius(width, height),
             grab: true,
             show_ui: true,
             trace_android: true,
@@ -69,6 +77,17 @@ struct HoldTimers {
     started_at: Option<Instant>,
     next_reaffirm_at: Option<Instant>,
     next_log_at: Option<Instant>,
+}
+
+pub fn default_joystick_center(width: u32, height: u32) -> Point {
+    Point {
+        x: width / 5,
+        y: height.saturating_mul(4) / 5,
+    }
+}
+
+pub fn default_joystick_radius(width: u32, height: u32) -> u32 {
+    width.min(height).max(10) / 10
 }
 
 pub fn run_live_keyboard_cli(args: &[String], binary_name: &str) -> LiveKeyboardResult<()> {
@@ -136,11 +155,8 @@ pub fn run_live_keyboard_session(options: LiveKeyboardOptions) -> LiveKeyboardRe
     };
     let joystick = VirtualJoystick::new(
         ContactId::new(1),
-        Point {
-            x: options.width / 5,
-            y: options.height.saturating_mul(4) / 5,
-        },
-        options.width.min(options.height).max(10) / 10,
+        options.joystick_center,
+        options.joystick_radius,
         resolution,
     )?;
     let mut engine = TouchEngine::new(injector);
@@ -171,12 +187,15 @@ pub fn run_live_keyboard_session(options: LiveKeyboardOptions) -> LiveKeyboardRe
         }
 
         println!(
-            "Controls are live: W/A/S/D move one persistent Android touch contact; Esc exits. Exclusive grab: {}. Reaffirm: {}. Hold log: {}. Ready delay: {}.",
+            "Controls are live: W/A/S/D move one persistent Android touch contact; Esc exits. Exclusive grab: {}. Joystick center={},{} radius={}px. Reaffirm: {}. Hold log: {}. Ready delay: {}.",
             if keyboard.is_grabbed() {
                 "enabled"
             } else {
                 "disabled"
             },
+            options.joystick_center.x,
+            options.joystick_center.y,
+            options.joystick_radius,
             interval_label(options.reaffirm_interval),
             interval_label(options.hold_log_interval),
             duration_label(options.ready_delay),
@@ -456,18 +475,23 @@ pub fn parse_live_keyboard_command(args: &[String]) -> LiveKeyboardResult<LiveKe
         );
     }
 
+    let width = parse_dimension(
+        positional.get(1).map(String::as_str),
+        DEFAULT_LIVE_WIDTH,
+        "width",
+    )?;
+    let height = parse_dimension(
+        positional.get(2).map(String::as_str),
+        DEFAULT_LIVE_HEIGHT,
+        "height",
+    )?;
+
     Ok(LiveKeyboardCommand::Run(LiveKeyboardOptions {
         keyboard_path: PathBuf::from(keyboard_path),
-        width: parse_dimension(
-            positional.get(1).map(String::as_str),
-            DEFAULT_LIVE_WIDTH,
-            "width",
-        )?,
-        height: parse_dimension(
-            positional.get(2).map(String::as_str),
-            DEFAULT_LIVE_HEIGHT,
-            "height",
-        )?,
+        width,
+        height,
+        joystick_center: default_joystick_center(width, height),
+        joystick_radius: default_joystick_radius(width, height),
         grab,
         show_ui,
         trace_android,
@@ -571,6 +595,14 @@ mod tests {
         assert_eq!(options.keyboard_path, PathBuf::from("/dev/input/event7"));
         assert_eq!(options.width, DEFAULT_LIVE_WIDTH);
         assert_eq!(options.height, DEFAULT_LIVE_HEIGHT);
+        assert_eq!(
+            options.joystick_center,
+            default_joystick_center(DEFAULT_LIVE_WIDTH, DEFAULT_LIVE_HEIGHT)
+        );
+        assert_eq!(
+            options.joystick_radius,
+            default_joystick_radius(DEFAULT_LIVE_WIDTH, DEFAULT_LIVE_HEIGHT)
+        );
         assert!(options.grab);
         assert!(options.show_ui);
         assert!(options.trace_android);
@@ -601,6 +633,8 @@ mod tests {
 
         assert_eq!(options.width, 1600);
         assert_eq!(options.height, 900);
+        assert_eq!(options.joystick_center, default_joystick_center(1600, 900));
+        assert_eq!(options.joystick_radius, default_joystick_radius(1600, 900));
         assert!(!options.grab);
         assert!(!options.show_ui);
         assert!(!options.trace_android);
