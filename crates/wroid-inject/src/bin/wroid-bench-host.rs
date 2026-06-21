@@ -2,10 +2,11 @@ use std::env;
 use std::error::Error;
 use std::io;
 use std::path::PathBuf;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use wroid_core::{Point, Resolution};
-use wroid_input::{DirectionalKeyState, EvdevKeyboard, KeyboardAction};
+use wroid_input::{DirectionalKeyState, EvdevKeyboard, KeyboardAction, KeyboardDeviceError};
 use wroid_runtime::{
     ContactId, TouchEngine, TouchFrame, TouchInjectionError, TouchInjector, VirtualJoystick,
 };
@@ -13,6 +14,8 @@ use wroid_runtime::{
 const DEFAULT_WIDTH: u32 = 1920;
 const DEFAULT_HEIGHT: u32 = 1080;
 const DEFAULT_SAMPLES: usize = 200;
+const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
+const POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 fn main() -> Result<(), Box<dyn Error>> {
     let Some(options) = Options::parse(env::args().skip(1))? else {
@@ -24,6 +27,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if options.grab {
         keyboard.grab()?;
     }
+    keyboard.set_nonblocking(true)?;
 
     let resolution = Resolution {
         width: options.width,
@@ -41,6 +45,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut engine = TouchEngine::new(RecordingInjector::default());
     let mut state = DirectionalKeyState::default();
     let mut stats = BenchStats::default();
+    let started = Instant::now();
 
     println!(
         "Keyboard: {} ({})",
@@ -48,8 +53,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         keyboard.path().display()
     );
     println!(
-        "Collecting up to {} direction-change samples. Press/release W/A/S/D; press Esc to stop.",
-        options.samples
+        "Collecting up to {} direction-change samples for up to {}s. Press/release W/A/S/D; press Esc to stop early.",
+        options.samples,
+        options.timeout.as_secs()
     );
     println!(
         "Exclusive grab: {}. This benchmark measures host capture/normalization/runtime overhead; it does not include Android getevent timing.",
@@ -59,11 +65,34 @@ fn main() -> Result<(), Box<dyn Error>> {
             "disabled"
         }
     );
+    if keyboard.is_grabbed() {
+        println!(
+            "Safety: input polling is nonblocking and this command exits automatically on timeout even if Esc is not delivered."
+        );
+    }
 
-    while stats.pipeline_samples.len() < options.samples && !stats.exit_requested {
+    while stats.pipeline_samples.len() < options.samples
+        && !stats.exit_requested
+        && started.elapsed() < options.timeout
+    {
         let read_started = Instant::now();
-        let events = keyboard.next_events()?;
-        stats.read_wait_samples.push(read_started.elapsed());
+        let events = match keyboard.next_events() {
+            Ok(events) => events,
+            Err(error) if is_would_block(&error) => {
+                stats.empty_polls += 1;
+                stats.read_poll_samples.push(read_started.elapsed());
+                thread::sleep(POLL_INTERVAL);
+                continue;
+            }
+            Err(error) => return Err(Box::new(error)),
+        };
+        stats.read_poll_samples.push(read_started.elapsed());
+
+        if events.is_empty() {
+            stats.empty_polls += 1;
+            thread::sleep(POLL_INTERVAL);
+            continue;
+        }
 
         for event in events {
             let pipeline_started = Instant::now();
@@ -89,11 +118,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let injector = engine.injector();
     println!();
     println!("Wroid host input benchmark summary");
+    println!("  stop reason: {}", stop_reason(&stats, &options, started));
     println!(
         "  direction-change samples: {}",
         stats.pipeline_samples.len()
     );
-    println!("  evdev read calls: {}", stats.read_wait_samples.len());
+    println!("  evdev poll calls: {}", stats.read_poll_samples.len());
+    println!("  empty polls: {}", stats.empty_polls);
     println!("  ignored/repeat events: {}", stats.ignored_events);
     println!(
         "  submitted runtime frames: {}",
@@ -102,7 +133,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("  recorded injector frames: {}", injector.frames);
     println!("  recorded touch events: {}", injector.touch_events);
     print_distribution("host pipeline", &stats.pipeline_samples);
-    print_distribution("evdev blocking read", &stats.read_wait_samples);
+    print_distribution("evdev nonblocking poll", &stats.read_poll_samples);
 
     Ok(())
 }
@@ -114,6 +145,7 @@ struct Options {
     width: u32,
     height: u32,
     grab: bool,
+    timeout: Duration,
 }
 
 impl Options {
@@ -123,6 +155,7 @@ impl Options {
         let mut width = DEFAULT_WIDTH;
         let mut height = DEFAULT_HEIGHT;
         let mut grab = false;
+        let mut timeout = Duration::from_secs(DEFAULT_TIMEOUT_SECONDS);
 
         let mut args = args.into_iter();
         while let Some(argument) = args.next() {
@@ -134,6 +167,13 @@ impl Options {
                     if samples == 0 {
                         return Err(invalid_input("--samples must be greater than zero"));
                     }
+                }
+                "--timeout-seconds" => {
+                    let seconds: u64 = parse_next(&mut args, "--timeout-seconds")?;
+                    if seconds == 0 {
+                        return Err(invalid_input("--timeout-seconds must be greater than zero"));
+                    }
+                    timeout = Duration::from_secs(seconds);
                 }
                 "--width" => {
                     width = parse_next(&mut args, "--width")?;
@@ -171,6 +211,7 @@ impl Options {
             width,
             height,
             grab,
+            timeout,
         }))
     }
 }
@@ -192,13 +233,33 @@ impl TouchInjector for RecordingInjector {
 #[derive(Debug, Default)]
 struct BenchStats {
     pipeline_samples: Vec<Duration>,
-    read_wait_samples: Vec<Duration>,
+    read_poll_samples: Vec<Duration>,
+    empty_polls: u64,
     ignored_events: u64,
     submitted_runtime_frames: u64,
     exit_requested: bool,
 }
 
-fn parse_next<T>(args: &mut impl Iterator<Item = String>, option: &str) -> Result<T, Box<dyn Error>>
+fn is_would_block(error: &KeyboardDeviceError) -> bool {
+    matches!(error, KeyboardDeviceError::Read { source, .. } if source.kind() == io::ErrorKind::WouldBlock)
+}
+
+fn stop_reason(stats: &BenchStats, options: &Options, started: Instant) -> &'static str {
+    if stats.exit_requested {
+        "Esc pressed"
+    } else if stats.pipeline_samples.len() >= options.samples {
+        "sample target reached"
+    } else if started.elapsed() >= options.timeout {
+        "timeout reached"
+    } else {
+        "finished"
+    }
+}
+
+fn parse_next<T>(
+    args: &mut impl Iterator<Item = String>,
+    option: &str,
+) -> Result<T, Box<dyn Error>>
 where
     T: std::str::FromStr,
     T::Err: Error + Send + Sync + 'static,
@@ -252,10 +313,10 @@ fn micros(duration: Duration) -> String {
 
 fn print_usage() {
     println!(
-        "Usage: wroid-bench-host <keyboard-event-node> [--samples N] [--width W] [--height H] [--grab]"
+        "Usage: wroid-bench-host <keyboard-event-node> [--samples N] [--timeout-seconds N] [--width W] [--height H] [--grab]"
     );
     println!(
-        "Example: sudo ./target/release/wroid-bench-host /dev/input/event7 --samples 200 --grab"
+        "Example: sudo ./target/release/wroid-bench-host /dev/input/event7 --samples 200 --timeout-seconds 15 --grab"
     );
     println!("Without --grab, the compositor and terminal can still receive keyboard input during diagnostics.");
 }
