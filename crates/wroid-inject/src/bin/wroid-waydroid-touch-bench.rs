@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::io;
 use std::path::Path;
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -18,7 +18,9 @@ const DEFAULT_HEIGHT: u32 = 1080;
 const DEFAULT_SAMPLES: usize = 20;
 const DEFAULT_HOLD_MS: u64 = 20;
 const DEFAULT_INTERVAL_MS: u64 = 50;
-const ANDROID_DRAIN_MS: u64 = 500;
+const ANDROID_CAPTURE_STARTUP_MS: u64 = 250;
+const GETEVENT_EVENTS_PER_TAP: usize = 16;
+const GETEVENT_TIMEOUT_GRACE_SECONDS: u64 = 10;
 
 fn main() -> Result<(), Box<dyn Error>> {
     ensure_root("Waydroid touch benchmark")?;
@@ -71,18 +73,16 @@ fn run_benchmark(options: Options) -> Result<(), Box<dyn Error>> {
         println!("Android detected {WROID_TOUCHSCREEN_NAME}.");
         if options.show_ui {
             session.show_full_ui()?;
-            println!("Opened the Waydroid full UI.");
+            println!("Requested Waydroid full UI. The benchmark does not require the window to appear.");
         }
 
-        let capture = spawn_getevent_capture(&event_node)?;
-        sleep(Duration::from_millis(250));
+        let capture = spawn_getevent_capture(&event_node, &options)?;
+        sleep(Duration::from_millis(ANDROID_CAPTURE_STARTUP_MS));
 
         let mut engine = TouchEngine::new(injector);
         let frame_samples = inject_taps(&options, &mut engine)?;
-        sleep(Duration::from_millis(ANDROID_DRAIN_MS));
 
-        let output = stop_capture(capture)?;
-        let captured = combined_output(&output);
+        let captured = combined_output(&capture.wait_with_output()?);
         Ok(BenchmarkReport::new(frame_samples, captured))
     })();
 
@@ -144,23 +144,37 @@ fn tap_point(options: &Options, index: usize) -> Point {
     }
 }
 
-fn spawn_getevent_capture(event_node: &Path) -> io::Result<Child> {
+fn spawn_getevent_capture(event_node: &Path, options: &Options) -> io::Result<std::process::Child> {
     let event_path = event_node.to_str().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "event node path is not UTF-8")
     })?;
-    Command::new("waydroid")
-        .args(["shell", "--", "getevent", "-lt", event_path])
+    let capture_count = options.samples.saturating_mul(GETEVENT_EVENTS_PER_TAP).max(1);
+    let expected_runtime_ms = options
+        .samples
+        .saturating_mul((options.hold_ms + options.interval_ms) as usize) as u64;
+    let timeout_seconds = (expected_runtime_ms / 1_000 + GETEVENT_TIMEOUT_GRACE_SECONDS).max(1);
+
+    println!(
+        "Capturing up to {capture_count} Android getevent record(s), timeout={}s.",
+        timeout_seconds
+    );
+
+    Command::new("timeout")
+        .args([
+            format!("{timeout_seconds}s"),
+            "waydroid".to_owned(),
+            "shell".to_owned(),
+            "--".to_owned(),
+            "getevent".to_owned(),
+            "-lt".to_owned(),
+            "-c".to_owned(),
+            capture_count.to_string(),
+            event_path.to_owned(),
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-}
-
-fn stop_capture(mut child: Child) -> io::Result<Output> {
-    if child.try_wait()?.is_none() {
-        child.kill()?;
-    }
-    child.wait_with_output()
 }
 
 #[derive(Debug)]
