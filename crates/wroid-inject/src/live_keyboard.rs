@@ -23,6 +23,7 @@ pub const DEFAULT_LIVE_WIDTH: u32 = 1920;
 pub const DEFAULT_LIVE_HEIGHT: u32 = 1080;
 pub const DEFAULT_REAFFIRM_INTERVAL: Duration = Duration::from_millis(50);
 pub const DEFAULT_HOLD_LOG_INTERVAL: Duration = Duration::from_millis(1_000);
+pub const DEFAULT_READY_DELAY: Duration = Duration::from_millis(1_000);
 
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -38,6 +39,7 @@ pub struct LiveKeyboardOptions {
     pub trace_android: bool,
     pub reaffirm_interval: Option<Duration>,
     pub hold_log_interval: Option<Duration>,
+    pub ready_delay: Duration,
 }
 
 impl LiveKeyboardOptions {
@@ -51,6 +53,7 @@ impl LiveKeyboardOptions {
             trace_android: true,
             reaffirm_interval: Some(DEFAULT_REAFFIRM_INTERVAL),
             hold_log_interval: Some(DEFAULT_HOLD_LOG_INTERVAL),
+            ready_delay: DEFAULT_READY_DELAY,
         }
     }
 }
@@ -156,12 +159,19 @@ pub fn run_live_keyboard_session(options: LiveKeyboardOptions) -> LiveKeyboardRe
             trace = Some(spawn_android_getevent_trace(&event_node)?);
             println!("Android getevent tracing is active.");
         }
+        if !options.ready_delay.is_zero() {
+            println!(
+                "Waiting {}ms for Android input stack to become ready before enabling controls.",
+                options.ready_delay.as_millis()
+            );
+            thread::sleep(options.ready_delay);
+        }
         if options.grab {
             keyboard.grab()?;
         }
 
         println!(
-            "Controls are live: W/A/S/D move one persistent Android touch contact; Esc exits. Exclusive grab: {}. Reaffirm: {}. Hold log: {}.",
+            "Controls are live: W/A/S/D move one persistent Android touch contact; Esc exits. Exclusive grab: {}. Reaffirm: {}. Hold log: {}. Ready delay: {}.",
             if keyboard.is_grabbed() {
                 "enabled"
             } else {
@@ -169,6 +179,7 @@ pub fn run_live_keyboard_session(options: LiveKeyboardOptions) -> LiveKeyboardRe
             },
             interval_label(options.reaffirm_interval),
             interval_label(options.hold_log_interval),
+            duration_label(options.ready_delay),
         );
         let reader = KeyboardReader::spawn(keyboard);
         let loop_result = run_keyboard_loop(
@@ -398,6 +409,7 @@ pub fn parse_live_keyboard_command(args: &[String]) -> LiveKeyboardResult<LiveKe
     let mut trace_android = true;
     let mut reaffirm_interval = Some(DEFAULT_REAFFIRM_INTERVAL);
     let mut hold_log_interval = Some(DEFAULT_HOLD_LOG_INTERVAL);
+    let mut ready_delay = DEFAULT_READY_DELAY;
 
     let mut index = 0;
     while index < args.len() {
@@ -415,6 +427,10 @@ pub fn parse_live_keyboard_command(args: &[String]) -> LiveKeyboardResult<LiveKe
             "--hold-log-ms" => {
                 index += 1;
                 hold_log_interval = Some(parse_millis_arg(args.get(index), "--hold-log-ms")?);
+            }
+            "--ready-delay-ms" => {
+                index += 1;
+                ready_delay = parse_ready_delay_arg(args.get(index), "--ready-delay-ms")?;
             }
             argument if argument.starts_with("--") => {
                 return Err(io::Error::new(
@@ -457,6 +473,7 @@ pub fn parse_live_keyboard_command(args: &[String]) -> LiveKeyboardResult<LiveKe
         trace_android,
         reaffirm_interval,
         hold_log_interval,
+        ready_delay,
     }))
 }
 
@@ -483,6 +500,22 @@ fn parse_millis_arg(value: Option<&String>, flag: &str) -> LiveKeyboardResult<Du
     Ok(Duration::from_millis(millis))
 }
 
+fn parse_ready_delay_arg(value: Option<&String>, flag: &str) -> LiveKeyboardResult<Duration> {
+    let value = value.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{flag} requires a millisecond value"),
+        )
+    })?;
+    let millis = value.parse::<u64>().map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid value for {flag}: {error}"),
+        )
+    })?;
+    Ok(Duration::from_millis(millis))
+}
+
 fn parse_dimension(value: Option<&str>, default: u32, label: &str) -> LiveKeyboardResult<u32> {
     let Some(value) = value else {
         return Ok(default);
@@ -502,9 +535,17 @@ fn interval_label(interval: Option<Duration>) -> String {
         .unwrap_or_else(|| "disabled".to_owned())
 }
 
+fn duration_label(duration: Duration) -> String {
+    if duration.is_zero() {
+        "disabled".to_owned()
+    } else {
+        format!("{}ms", duration.as_millis())
+    }
+}
+
 pub fn print_live_keyboard_usage(binary_name: &str) {
     println!(
-        "Usage: {binary_name} <keyboard-event-node> [width] [height] [--no-grab] [--no-ui] [--no-trace] [--reaffirm-ms N|--no-reaffirm] [--hold-log-ms N|--no-hold-log]"
+        "Usage: {binary_name} <keyboard-event-node> [width] [height] [--no-grab] [--no-ui] [--no-trace] [--ready-delay-ms N] [--reaffirm-ms N|--no-reaffirm] [--hold-log-ms N|--no-hold-log]"
     );
     println!("Example: sudo ./target/release/{binary_name} /dev/input/event7 1920 1050");
     println!("Diagnostics without exclusive keyboard grab: add --no-grab");
@@ -535,6 +576,7 @@ mod tests {
         assert!(options.trace_android);
         assert_eq!(options.reaffirm_interval, Some(DEFAULT_REAFFIRM_INTERVAL));
         assert_eq!(options.hold_log_interval, Some(DEFAULT_HOLD_LOG_INTERVAL));
+        assert_eq!(options.ready_delay, DEFAULT_READY_DELAY);
     }
 
     #[test]
@@ -547,6 +589,8 @@ mod tests {
                 "--no-grab".to_owned(),
                 "--no-ui".to_owned(),
                 "--no-trace".to_owned(),
+                "--ready-delay-ms".to_owned(),
+                "1500".to_owned(),
                 "--reaffirm-ms".to_owned(),
                 "75".to_owned(),
                 "--hold-log-ms".to_owned(),
@@ -560,6 +604,7 @@ mod tests {
         assert!(!options.grab);
         assert!(!options.show_ui);
         assert!(!options.trace_android);
+        assert_eq!(options.ready_delay, Duration::from_millis(1500));
         assert_eq!(options.reaffirm_interval, Some(Duration::from_millis(75)));
         assert_eq!(options.hold_log_interval, Some(Duration::from_millis(250)));
     }
@@ -577,6 +622,20 @@ mod tests {
 
         assert_eq!(options.reaffirm_interval, None);
         assert_eq!(options.hold_log_interval, None);
+    }
+
+    #[test]
+    fn allows_zero_ready_delay_for_diagnostics() {
+        let options = run_options(
+            parse_live_keyboard_command(&[
+                "/dev/input/event7".to_owned(),
+                "--ready-delay-ms".to_owned(),
+                "0".to_owned(),
+            ])
+            .unwrap(),
+        );
+
+        assert_eq!(options.ready_delay, Duration::ZERO);
     }
 
     #[test]
