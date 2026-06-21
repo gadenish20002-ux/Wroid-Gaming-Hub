@@ -255,6 +255,26 @@ pub fn ensure_container_stopped() -> io::Result<()> {
     Ok(())
 }
 
+pub fn wait_for_android_boot_completed() -> io::Result<()> {
+    let mut last_output = String::new();
+    for _ in 0..STATUS_ATTEMPTS {
+        let output = Command::new("waydroid")
+            .args(["shell", "--", "getprop", "sys.boot_completed"])
+            .output()?;
+        last_output = combined_output(&output);
+        if output.status.success() && last_output.trim() == "1" {
+            println!("Android boot_completed=1.");
+            return Ok(());
+        }
+        sleep(STATUS_INTERVAL);
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!("Android did not report sys.boot_completed=1\n{last_output}"),
+    ))
+}
+
 pub fn wait_for_android_input_device(device_name: &str) -> io::Result<()> {
     let mut last_output = String::new();
     for _ in 0..STATUS_ATTEMPTS {
