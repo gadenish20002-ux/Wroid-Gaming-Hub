@@ -18,7 +18,7 @@ const DEFAULT_HEIGHT: u32 = 1080;
 const DEFAULT_SAMPLES: usize = 20;
 const DEFAULT_HOLD_MS: u64 = 20;
 const DEFAULT_INTERVAL_MS: u64 = 50;
-const ANDROID_CAPTURE_STARTUP_MS: u64 = 250;
+const DEFAULT_CAPTURE_STARTUP_MS: u64 = 1_000;
 const GETEVENT_EVENTS_PER_TAP: usize = 16;
 const GETEVENT_TIMEOUT_GRACE_SECONDS: u64 = 10;
 
@@ -77,7 +77,11 @@ fn run_benchmark(options: Options) -> Result<(), Box<dyn Error>> {
         }
 
         let capture = spawn_getevent_capture(&event_node, &options)?;
-        sleep(Duration::from_millis(ANDROID_CAPTURE_STARTUP_MS));
+        println!(
+            "Waiting {}ms for Android getevent capture to warm up.",
+            options.capture_startup_ms
+        );
+        sleep(Duration::from_millis(options.capture_startup_ms));
 
         let mut engine = TouchEngine::new(injector);
         let frame_samples = inject_taps(&options, &mut engine)?;
@@ -237,6 +241,7 @@ struct Options {
     samples: usize,
     hold_ms: u64,
     interval_ms: u64,
+    capture_startup_ms: u64,
     show_ui: bool,
     print_events: bool,
     cleanup: bool,
@@ -250,6 +255,7 @@ impl Options {
             samples: DEFAULT_SAMPLES,
             hold_ms: DEFAULT_HOLD_MS,
             interval_ms: DEFAULT_INTERVAL_MS,
+            capture_startup_ms: DEFAULT_CAPTURE_STARTUP_MS,
             show_ui: true,
             print_events: false,
             cleanup: false,
@@ -282,6 +288,9 @@ impl Options {
                 }
                 "--hold-ms" => options.hold_ms = parse_next(&mut args, "--hold-ms")?,
                 "--interval-ms" => options.interval_ms = parse_next(&mut args, "--interval-ms")?,
+                "--capture-startup-ms" => {
+                    options.capture_startup_ms = parse_next(&mut args, "--capture-startup-ms")?
+                }
                 value if value.starts_with("--") => {
                     return Err(invalid_input(format!("unknown option: {value}")));
                 }
@@ -364,10 +373,10 @@ fn combined_output(output: &Output) -> String {
 
 fn print_usage() {
     println!(
-        "Usage: wroid-waydroid-touch-bench [--samples N] [--width W] [--height H] [--hold-ms N] [--interval-ms N] [--no-ui] [--print-events] [--cleanup]"
+        "Usage: wroid-waydroid-touch-bench [--samples N] [--width W] [--height H] [--hold-ms N] [--interval-ms N] [--capture-startup-ms N] [--no-ui] [--print-events] [--cleanup]"
     );
     println!(
-        "Example: sudo ./target/release/wroid-waydroid-touch-bench --samples 20 --width 1920 --height 1080 --no-ui"
+        "Example: sudo ./target/release/wroid-waydroid-touch-bench --samples 20 --width 1920 --height 1080 --capture-startup-ms 1000 --no-ui"
     );
     println!("Recovery: sudo ./target/release/wroid-waydroid-touch-bench --cleanup");
 }
