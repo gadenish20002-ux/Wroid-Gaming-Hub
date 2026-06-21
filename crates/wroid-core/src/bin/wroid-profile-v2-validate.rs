@@ -21,10 +21,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     match profile.validate() {
         Ok(()) => {
             println!(
-                "Profile v{} OK: {} ({}) with {} binding(s)",
+                "Profile v{} OK: {} ({}) orientation={:?} with {} binding(s)",
                 profile.schema_version,
                 profile.name,
                 profile.package_name,
+                profile.orientation,
                 profile.bindings.len()
             );
             if let Some(resolution) = options.materialize {
@@ -284,7 +285,9 @@ fn validate_input(input: &InputV2, binding: &str, errors: &mut Vec<String>) {
 
 fn validate_action(action: &ActionV2, binding: &str, errors: &mut Vec<String>) {
     match action {
-        ActionV2::Tap { point } => validate_point(*point, &format!("binding {binding} tap point"), errors),
+        ActionV2::Tap { point } => {
+            validate_point(*point, &format!("binding {binding} tap point"), errors);
+        }
         ActionV2::VirtualJoystick {
             center,
             radius,
@@ -331,7 +334,9 @@ fn validate_action(action: &ActionV2, binding: &str, errors: &mut Vec<String>) {
 
 fn validate_point(point: NormalizedPoint, label: &str, errors: &mut Vec<String>) {
     if !normalized(point.x) || !normalized(point.y) {
-        errors.push(format!("{label} must use normalized x/y coordinates within 0.0..=1.0"));
+        errors.push(format!(
+            "{label} must use normalized x/y coordinates within 0.0..=1.0"
+        ));
     }
 }
 
@@ -368,12 +373,22 @@ fn print_materialized_action(label: &str, action: &ActionV2, resolution: Resolut
         ActionV2::Tap { point } => {
             println!("{indent}{label}: tap {}", point.materialize(resolution));
         }
-        ActionV2::VirtualJoystick { center, radius, .. } => {
+        ActionV2::VirtualJoystick {
+            center,
+            radius,
+            mode,
+            reaffirm_ms,
+        } => {
             let center = center.materialize(resolution);
             let radius_px = materialize_radius(*radius, resolution);
-            println!("{indent}{label}: virtual_joystick center={center} radius={radius_px}px");
+            println!(
+                "{indent}{label}: virtual_joystick center={center} radius={radius_px}px mode={mode:?} reaffirm_ms={reaffirm_ms:?}"
+            );
         }
-        ActionV2::MouseAim { region, sensitivity } => {
+        ActionV2::MouseAim {
+            region,
+            sensitivity,
+        } => {
             let origin = NormalizedPoint {
                 x: region.x,
                 y: region.y,
