@@ -368,10 +368,7 @@ fn stop_reason(stats: &BenchStats, options: &Options, started: Instant) -> &'sta
     }
 }
 
-fn parse_next<T>(
-    args: &mut impl Iterator<Item = String>,
-    option: &str,
-) -> Result<T, Box<dyn Error>>
+fn parse_next<T>(args: &mut impl Iterator<Item = String>, option: &str) -> Result<T, Box<dyn Error>>
 where
     T: std::str::FromStr,
     T::Err: Error + Send + Sync + 'static,
