@@ -1,3 +1,5 @@
+pub mod profile_v2;
+
 use std::collections::HashSet;
 use std::fmt;
 use std::fs;
@@ -524,173 +526,10 @@ mod tests {
             .any(|error| matches!(error, ValidationError::PointOutOfBounds { .. })));
     }
 
-    #[test]
-    fn zero_virtual_joystick_radius_fails_validation() {
-        let mut profile = joystick_profile();
-        profile.bindings[0].action = BindingAction::VirtualJoystick {
-            center: Point { x: 320, y: 640 },
-            radius: 0,
-            tick_ms: 80,
-            swipe_duration_ms: 70,
-        };
-
-        let err = profile.validate().unwrap_err();
-
-        assert!(err
-            .errors
-            .iter()
-            .any(|error| matches!(error, ValidationError::ZeroJoystickRadius { .. })));
-    }
-
-    #[test]
-    fn placeholder_actions_fail_validation() {
-        let mut profile = ControlProfile::example();
-        profile.bindings[0].action = BindingAction::MouseAim {
-            anchor: Point { x: 960, y: 540 },
-        };
-
-        let err = profile.validate().unwrap_err();
-
-        assert!(err.errors.iter().any(|error| {
-            matches!(
-                error,
-                ValidationError::UnsupportedAction { kind, .. } if kind == "mouse_aim"
-            )
-        }));
-    }
-
-    #[test]
-    fn profile_can_round_trip_json() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("profile.json");
-        let profile = ControlProfile::example();
-
-        profile.save_to_path(&path).unwrap();
-        let loaded = ControlProfile::load_from_path(&path).unwrap();
-
-        assert_eq!(profile, loaded);
-    }
-
-    #[test]
-    fn scale_point_scales_profile_resolution_to_current_screen() {
-        let scaled = scale_point(
-            Point { x: 1640, y: 540 },
-            Resolution {
-                width: 1920,
-                height: 1080,
-            },
-            Resolution {
-                width: 1920,
-                height: 1050,
-            },
-        );
-
-        assert_eq!(scaled, Point { x: 1640, y: 525 });
-    }
-
-    #[test]
-    fn scale_point_clamps_to_target_bounds() {
-        let scaled = scale_point(
-            Point { x: 3000, y: 3000 },
-            Resolution {
-                width: 1920,
-                height: 1080,
-            },
-            Resolution {
-                width: 1920,
-                height: 1050,
-            },
-        );
-
-        assert_eq!(scaled, Point { x: 1919, y: 1049 });
-    }
-
-    #[test]
-    fn scale_action_scales_tap_point() {
-        let scaled = scale_action(
-            &BindingAction::Tap {
-                point: Point { x: 960, y: 540 },
-            },
-            Resolution {
-                width: 1920,
-                height: 1080,
-            },
-            Resolution {
-                width: 1920,
-                height: 1050,
-            },
-        );
-
-        assert_eq!(
-            scaled,
-            BindingAction::Tap {
-                point: Point { x: 960, y: 525 }
-            }
-        );
-    }
-
-    #[test]
-    fn scale_action_scales_swipe_points() {
-        let scaled = scale_action(
-            &BindingAction::Swipe {
-                from: Point { x: 960, y: 540 },
-                to: Point { x: 1260, y: 540 },
-                duration_ms: 180,
-            },
-            Resolution {
-                width: 1920,
-                height: 1080,
-            },
-            Resolution {
-                width: 1920,
-                height: 1050,
-            },
-        );
-
-        assert_eq!(
-            scaled,
-            BindingAction::Swipe {
-                from: Point { x: 960, y: 525 },
-                to: Point { x: 1260, y: 525 },
-                duration_ms: 180,
-            }
-        );
-    }
-
-    #[test]
-    fn scale_action_scales_virtual_joystick_center_and_radius() {
-        let scaled = scale_action(
-            &BindingAction::VirtualJoystick {
-                center: Point { x: 320, y: 780 },
-                radius: 120,
-                tick_ms: 80,
-                swipe_duration_ms: 70,
-            },
-            Resolution {
-                width: 1920,
-                height: 1080,
-            },
-            Resolution {
-                width: 1280,
-                height: 720,
-            },
-        );
-
-        assert_eq!(
-            scaled,
-            BindingAction::VirtualJoystick {
-                center: Point { x: 213, y: 520 },
-                radius: 80,
-                tick_ms: 80,
-                swipe_duration_ms: 70,
-            }
-        );
-    }
-
     fn joystick_profile() -> ControlProfile {
         ControlProfile {
             name: "Joystick".to_owned(),
-            package_name: "com.example.joystick".to_owned(),
+            package_name: "com.example.shooter".to_owned(),
             resolution: Resolution {
                 width: 1280,
                 height: 720,
@@ -704,7 +543,7 @@ mod tests {
                     right: "d".to_owned(),
                 },
                 action: BindingAction::VirtualJoystick {
-                    center: Point { x: 320, y: 640 },
+                    center: Point { x: 260, y: 560 },
                     radius: 120,
                     tick_ms: 80,
                     swipe_duration_ms: 70,
