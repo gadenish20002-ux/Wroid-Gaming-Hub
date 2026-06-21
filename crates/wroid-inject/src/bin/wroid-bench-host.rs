@@ -24,6 +24,7 @@ const DEFAULT_HEIGHT: u32 = 1080;
 const DEFAULT_SAMPLES: usize = 200;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
 const DEFAULT_GRAB_DELAY_MS: u64 = 750;
+const DEFAULT_PROGRESS_EVERY: usize = 10;
 const HARD_WATCHDOG_GRACE_SECONDS: u64 = 2;
 const WATCHDOG_EXIT_CODE: i32 = 124;
 const POLL_INTERVAL: Duration = Duration::from_millis(1);
@@ -85,6 +86,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     if options.trace_events {
         println!("Trace: enabled. Each normalized W/A/S/D/Esc event will be printed.");
+    } else {
+        println!(
+            "Progress: enabled. Direction-change progress prints every {DEFAULT_PROGRESS_EVERY} accepted sample(s)."
+        );
     }
     if keyboard.is_grabbed() {
         println!(
@@ -134,6 +139,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         Some(input),
                         submitted,
                     );
+                    print_progress(&options, &stats, started);
                 }
                 KeyboardAction::ExitRequested => {
                     trace_event(&options, started, event, "exit_requested", None, false);
@@ -338,6 +344,23 @@ fn trace_event(
         ),
         None => println!("{elapsed_ms:>10.3}ms event={event:?} action={action}"),
     }
+}
+
+fn print_progress(options: &Options, stats: &BenchStats, started: Instant) {
+    if options.trace_events {
+        return;
+    }
+
+    let samples = stats.pipeline_samples.len();
+    if samples != 1 && samples % DEFAULT_PROGRESS_EVERY != 0 && samples < options.samples {
+        return;
+    }
+
+    let elapsed = started.elapsed().as_secs_f32();
+    println!(
+        "progress: {samples}/{} samples, frames={}, ignored/repeats={}, elapsed={elapsed:.1}s",
+        options.samples, stats.submitted_runtime_frames, stats.ignored_events
+    );
 }
 
 fn stop_reason(stats: &BenchStats, options: &Options, started: Instant) -> &'static str {
