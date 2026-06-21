@@ -74,14 +74,14 @@ fn run_benchmark(options: Options) -> Result<(), Box<dyn Error>> {
             println!("Opened the Waydroid full UI.");
         }
 
-        let mut capture = spawn_getevent_capture(&event_node)?;
+        let capture = spawn_getevent_capture(&event_node)?;
         sleep(Duration::from_millis(250));
 
         let mut engine = TouchEngine::new(injector);
         let frame_samples = inject_taps(&options, &mut engine)?;
         sleep(Duration::from_millis(ANDROID_DRAIN_MS));
 
-        let output = stop_capture(&mut capture)?;
+        let output = stop_capture(capture)?;
         let captured = combined_output(&output);
         Ok(BenchmarkReport::new(frame_samples, captured))
     })();
@@ -156,13 +156,11 @@ fn spawn_getevent_capture(event_node: &Path) -> io::Result<Child> {
         .spawn()
 }
 
-fn stop_capture(child: &mut Child) -> io::Result<Output> {
+fn stop_capture(mut child: Child) -> io::Result<Output> {
     if child.try_wait()?.is_none() {
         child.kill()?;
     }
-    let mut owned = Command::new("true").spawn()?;
-    std::mem::swap(child, &mut owned);
-    owned.wait_with_output()
+    child.wait_with_output()
 }
 
 #[derive(Debug)]
