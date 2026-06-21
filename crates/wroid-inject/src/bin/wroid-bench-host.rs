@@ -2,6 +2,11 @@ use std::env;
 use std::error::Error;
 use std::io;
 use std::path::PathBuf;
+use std::process;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,6 +20,8 @@ const DEFAULT_WIDTH: u32 = 1920;
 const DEFAULT_HEIGHT: u32 = 1080;
 const DEFAULT_SAMPLES: usize = 200;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
+const HARD_WATCHDOG_GRACE_SECONDS: u64 = 2;
+const WATCHDOG_EXIT_CODE: i32 = 124;
 const POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -22,6 +29,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_usage();
         return Ok(());
     };
+    let _watchdog = Watchdog::start(options.timeout);
 
     let mut keyboard = EvdevKeyboard::open(&options.keyboard_path)?;
     if options.grab {
@@ -67,7 +75,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     if keyboard.is_grabbed() {
         println!(
-            "Safety: input polling is nonblocking and this command exits automatically on timeout even if Esc is not delivered."
+            "Safety: input polling is nonblocking and a hard watchdog will terminate this process after timeout + {HARD_WATCHDOG_GRACE_SECONDS}s."
         );
     }
 
@@ -213,6 +221,36 @@ impl Options {
             grab,
             timeout,
         }))
+    }
+}
+
+#[derive(Debug)]
+struct Watchdog {
+    done: Arc<AtomicBool>,
+}
+
+impl Watchdog {
+    fn start(timeout: Duration) -> Self {
+        let done = Arc::new(AtomicBool::new(false));
+        let watchdog_done = Arc::clone(&done);
+        let hard_timeout = timeout + Duration::from_secs(HARD_WATCHDOG_GRACE_SECONDS);
+        thread::spawn(move || {
+            thread::sleep(hard_timeout);
+            if !watchdog_done.load(Ordering::Relaxed) {
+                eprintln!(
+                    "wroid-bench-host hard watchdog reached after {}s; forcing process exit",
+                    hard_timeout.as_secs()
+                );
+                process::exit(WATCHDOG_EXIT_CODE);
+            }
+        });
+        Self { done }
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Relaxed);
     }
 }
 
