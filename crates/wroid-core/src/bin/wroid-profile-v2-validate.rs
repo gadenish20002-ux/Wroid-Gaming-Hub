@@ -3,7 +3,7 @@ use std::env;
 use std::error::Error;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use wroid_core::{Point, Resolution};
@@ -55,9 +55,9 @@ struct ProfileV2 {
 }
 
 impl ProfileV2 {
-    fn load_from_path(path: impl Into<PathBuf>) -> Result<Self, Box<dyn Error>> {
-        let path = path.into();
-        let data = fs::read_to_string(&path)?;
+    fn load_from_path(path: impl AsRef<Path>) -> Result<Self, Box<dyn Error>> {
+        let path = path.as_ref();
+        let data = fs::read_to_string(path)?;
         serde_json::from_str(&data).map_err(|source| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
