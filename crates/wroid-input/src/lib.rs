@@ -141,6 +141,12 @@ pub enum KeyboardDeviceError {
         #[source]
         source: io::Error,
     },
+    #[error("failed to configure keyboard device {path}: {source}")]
+    Configure {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error("failed to read keyboard device {path}: {source}")]
     Read {
         path: PathBuf,
@@ -205,6 +211,15 @@ impl EvdevKeyboard {
         self.grabbed
     }
 
+    pub fn set_nonblocking(&mut self, nonblocking: bool) -> Result<(), KeyboardDeviceError> {
+        self.device
+            .set_nonblocking(nonblocking)
+            .map_err(|source| KeyboardDeviceError::Configure {
+                path: self.path.clone(),
+                source,
+            })
+    }
+
     pub fn grab(&mut self) -> Result<(), KeyboardDeviceError> {
         if self.grabbed {
             return Ok(());
@@ -236,7 +251,8 @@ impl EvdevKeyboard {
     }
 
     /// Blocks until at least one kernel event is available and returns only the
-    /// movement events relevant to the current runtime slice.
+    /// movement events relevant to the current runtime slice unless the device
+    /// was configured as nonblocking by the caller.
     pub fn next_events(&mut self) -> Result<Vec<KeyboardEvent>, KeyboardDeviceError> {
         let events = self
             .device
