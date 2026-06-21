@@ -54,7 +54,8 @@ fn main() -> Result<()> {
     };
     let key_taps = find_key_taps(&profile, resolution);
 
-    let mut live = LiveKeyboardOptions::with_resolution(keyboard_path, options.width, options.height);
+    let mut live =
+        LiveKeyboardOptions::with_resolution(keyboard_path, options.width, options.height);
     live.joystick_center = movement.center.materialize(resolution);
     live.joystick_radius = materialize_radius(movement.radius, resolution);
     live.key_taps = key_taps;
@@ -90,10 +91,7 @@ fn main() -> Result<()> {
             live.key_taps.len(),
             live.key_taps
                 .iter()
-                .map(|binding| format!(
-                    "{}->{},{}",
-                    binding.key, binding.point.x, binding.point.y
-                ))
+                .map(|binding| format!("{}->{},{}", binding.key, binding.point.x, binding.point.y))
                 .collect::<Vec<_>>()
                 .join(", ")
         );
@@ -225,16 +223,12 @@ impl Options {
                 "--no-reaffirm" => options.reaffirm_override = Some(None),
                 "--no-hold-log" => options.hold_log_interval = None,
                 "--reaffirm-ms" => {
-                    options.reaffirm_override = Some(Some(parse_positive_millis(
-                        &mut args,
-                        "--reaffirm-ms",
-                    )?));
+                    options.reaffirm_override =
+                        Some(Some(parse_positive_millis(&mut args, "--reaffirm-ms")?));
                 }
                 "--hold-log-ms" => {
-                    options.hold_log_interval = Some(parse_positive_millis(
-                        &mut args,
-                        "--hold-log-ms",
-                    )?);
+                    options.hold_log_interval =
+                        Some(parse_positive_millis(&mut args, "--hold-log-ms")?);
                 }
                 "--ready-delay-ms" => {
                     options.ready_delay = parse_millis(&mut args, "--ready-delay-ms")?;
