@@ -15,7 +15,8 @@ use wroid_runtime::{ContactId, DirectionalInput, TouchEngine, VirtualJoystick};
 use crate::waydroid_bridge::{remove_default_bridge, InputDeviceNode, InstalledWaydroidBridge};
 use crate::waydroid_session::{
     ensure_container_stopped, ensure_root, spawn_android_getevent_trace, stop_child,
-    wait_for_android_input_device, DesktopUser, DesktopWaydroidSession, WROID_TOUCHSCREEN_NAME,
+    wait_for_android_boot_completed, wait_for_android_input_device, DesktopUser,
+    DesktopWaydroidSession, WROID_TOUCHSCREEN_NAME,
 };
 use crate::{DeviceConfig, UinputTouchInjector};
 
@@ -164,6 +165,7 @@ pub fn run_live_keyboard_session(options: LiveKeyboardOptions) -> LiveKeyboardRe
     let mut trace: Option<Child> = None;
 
     let capture_result = (|| -> LiveKeyboardResult<()> {
+        wait_for_android_boot_completed()?;
         wait_for_android_input_device(WROID_TOUCHSCREEN_NAME)?;
         println!("Android detected {WROID_TOUCHSCREEN_NAME}.");
 
@@ -177,7 +179,7 @@ pub fn run_live_keyboard_session(options: LiveKeyboardOptions) -> LiveKeyboardRe
         }
         if !options.ready_delay.is_zero() {
             println!(
-                "Waiting {}ms for Android input stack to become ready before enabling controls.",
+                "Waiting {}ms for Android input stack to settle before enabling controls.",
                 options.ready_delay.as_millis()
             );
             thread::sleep(options.ready_delay);
