@@ -20,6 +20,7 @@ const DEFAULT_WIDTH: u32 = 1920;
 const DEFAULT_HEIGHT: u32 = 1080;
 const DEFAULT_SAMPLES: usize = 200;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 30;
+const DEFAULT_GRAB_DELAY_MS: u64 = 750;
 const HARD_WATCHDOG_GRACE_SECONDS: u64 = 2;
 const WATCHDOG_EXIT_CODE: i32 = 124;
 const POLL_INTERVAL: Duration = Duration::from_millis(1);
@@ -29,13 +30,29 @@ fn main() -> Result<(), Box<dyn Error>> {
         print_usage();
         return Ok(());
     };
-    let _watchdog = Watchdog::start(options.timeout);
 
     let mut keyboard = EvdevKeyboard::open(&options.keyboard_path)?;
+    println!(
+        "Keyboard: {} ({})",
+        keyboard.name(),
+        keyboard.path().display()
+    );
+    println!(
+        "Collecting up to {} direction-change samples for up to {}s. Press/release W/A/S/D; press Esc to stop early.",
+        options.samples,
+        options.timeout.as_secs()
+    );
+
     if options.grab {
+        println!(
+            "Exclusive grab requested; arming in {}ms. Release Enter now.",
+            options.grab_delay.as_millis()
+        );
+        thread::sleep(options.grab_delay);
         keyboard.grab()?;
     }
     keyboard.set_nonblocking(true)?;
+    let _watchdog = Watchdog::start(options.timeout);
 
     let resolution = Resolution {
         width: options.width,
@@ -55,16 +72,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut stats = BenchStats::default();
     let started = Instant::now();
 
-    println!(
-        "Keyboard: {} ({})",
-        keyboard.name(),
-        keyboard.path().display()
-    );
-    println!(
-        "Collecting up to {} direction-change samples for up to {}s. Press/release W/A/S/D; press Esc to stop early.",
-        options.samples,
-        options.timeout.as_secs()
-    );
     println!(
         "Exclusive grab: {}. This benchmark measures host capture/normalization/runtime overhead; it does not include Android getevent timing.",
         if keyboard.is_grabbed() {
@@ -153,6 +160,7 @@ struct Options {
     width: u32,
     height: u32,
     grab: bool,
+    grab_delay: Duration,
     timeout: Duration,
 }
 
@@ -163,6 +171,7 @@ impl Options {
         let mut width = DEFAULT_WIDTH;
         let mut height = DEFAULT_HEIGHT;
         let mut grab = false;
+        let mut grab_delay = Duration::from_millis(DEFAULT_GRAB_DELAY_MS);
         let mut timeout = Duration::from_secs(DEFAULT_TIMEOUT_SECONDS);
 
         let mut args = args.into_iter();
@@ -170,6 +179,10 @@ impl Options {
             match argument.as_str() {
                 "--help" | "-h" => return Ok(None),
                 "--grab" => grab = true,
+                "--grab-delay-ms" => {
+                    let milliseconds: u64 = parse_next(&mut args, "--grab-delay-ms")?;
+                    grab_delay = Duration::from_millis(milliseconds);
+                }
                 "--samples" => {
                     samples = parse_next(&mut args, "--samples")?;
                     if samples == 0 {
@@ -219,6 +232,7 @@ impl Options {
             width,
             height,
             grab,
+            grab_delay,
             timeout,
         }))
     }
@@ -351,10 +365,10 @@ fn micros(duration: Duration) -> String {
 
 fn print_usage() {
     println!(
-        "Usage: wroid-bench-host <keyboard-event-node> [--samples N] [--timeout-seconds N] [--width W] [--height H] [--grab]"
+        "Usage: wroid-bench-host <keyboard-event-node> [--samples N] [--timeout-seconds N] [--grab-delay-ms N] [--width W] [--height H] [--grab]"
     );
     println!(
-        "Example: sudo ./target/release/wroid-bench-host /dev/input/event7 --samples 200 --timeout-seconds 15 --grab"
+        "Example: sudo ./target/release/wroid-bench-host /dev/input/event7 --samples 200 --timeout-seconds 15 --grab-delay-ms 1000 --grab"
     );
     println!("Without --grab, the compositor and terminal can still receive keyboard input during diagnostics.");
 }
