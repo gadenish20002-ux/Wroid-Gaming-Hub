@@ -24,8 +24,9 @@ pub use injector::UinputTouchInjector;
 pub use live_keyboard::{
     cleanup_live_keyboard_bridge, default_joystick_center, default_joystick_radius,
     parse_live_keyboard_command, print_live_keyboard_usage, run_live_keyboard_cli,
-    run_live_keyboard_session, LiveKeyboardCommand, LiveKeyboardOptions, DEFAULT_HOLD_LOG_INTERVAL,
-    DEFAULT_LIVE_HEIGHT, DEFAULT_LIVE_WIDTH, DEFAULT_READY_DELAY, DEFAULT_REAFFIRM_INTERVAL,
+    run_live_keyboard_session, KeyTapBinding, LiveKeyboardCommand, LiveKeyboardOptions,
+    DEFAULT_HOLD_LOG_INTERVAL, DEFAULT_LIVE_HEIGHT, DEFAULT_LIVE_WIDTH, DEFAULT_READY_DELAY,
+    DEFAULT_REAFFIRM_INTERVAL,
 };
 pub use sink::EvdevEventSink;
 pub use waydroid_bridge::{
