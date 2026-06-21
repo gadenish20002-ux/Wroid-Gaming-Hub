@@ -189,10 +189,10 @@ struct BenchmarkReport {
 
 impl BenchmarkReport {
     fn new(frame_samples: Vec<Duration>, captured: String) -> Self {
-        let android_downs = captured.matches("0001 014a 00000001").count();
-        let android_ups = captured.matches("0001 014a 00000000").count();
-        let android_tracking_updates = captured.matches("0003 0039").count();
-        let android_syncs = captured.matches("0000 0000 00000000").count();
+        let android_downs = count_any(&captured, &["0001 014a 00000001", "BTN_TOUCH            DOWN"]);
+        let android_ups = count_any(&captured, &["0001 014a 00000000", "BTN_TOUCH            UP"]);
+        let android_tracking_updates = count_any(&captured, &["0003 0039", "ABS_MT_TRACKING_ID"]);
+        let android_syncs = count_any(&captured, &["0000 0000 00000000", "SYN_REPORT"]);
         Self {
             frame_samples,
             captured,
@@ -291,6 +291,14 @@ impl Options {
 
         Ok(Some(options))
     }
+}
+
+fn count_any(haystack: &str, patterns: &[&str]) -> usize {
+    patterns
+        .iter()
+        .map(|pattern| haystack.matches(pattern).count())
+        .max()
+        .unwrap_or(0)
 }
 
 fn parse_next<T>(
