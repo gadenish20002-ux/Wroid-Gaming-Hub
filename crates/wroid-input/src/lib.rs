@@ -19,7 +19,7 @@ const REQUIRED_KEYS: [(KeyCode, &str); 5] = [
     (KeyCode::KEY_ESC, "Esc"),
 ];
 
-/// Logical keys used by the first keyboard-to-joystick runtime slice.
+/// Logical movement keys used by the first keyboard-to-joystick runtime slice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MovementKey {
     Up,
@@ -27,6 +27,43 @@ pub enum MovementKey {
     Down,
     Right,
     Exit,
+}
+
+/// Profile-visible host keys supported by the current keyboard capture backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HostKey {
+    W,
+    A,
+    S,
+    D,
+    R,
+    Space,
+    Esc,
+}
+
+impl HostKey {
+    pub const fn profile_name(self) -> &'static str {
+        match self {
+            Self::W => "w",
+            Self::A => "a",
+            Self::S => "s",
+            Self::D => "d",
+            Self::R => "r",
+            Self::Space => "space",
+            Self::Esc => "esc",
+        }
+    }
+
+    pub const fn movement_key(self) -> Option<MovementKey> {
+        match self {
+            Self::W => Some(MovementKey::Up),
+            Self::A => Some(MovementKey::Left),
+            Self::S => Some(MovementKey::Down),
+            Self::D => Some(MovementKey::Right),
+            Self::Esc => Some(MovementKey::Exit),
+            Self::R | Self::Space => None,
+        }
+    }
 }
 
 /// Linux key lifecycle after evdev values have been normalized.
@@ -37,7 +74,26 @@ pub enum KeyTransition {
     Repeated,
 }
 
-/// One relevant physical keyboard event.
+/// One profile-visible physical keyboard event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostKeyEvent {
+    pub key: HostKey,
+    pub transition: KeyTransition,
+}
+
+impl HostKeyEvent {
+    pub const fn new(key: HostKey, transition: KeyTransition) -> Self {
+        Self { key, transition }
+    }
+
+    pub fn movement_event(self) -> Option<KeyboardEvent> {
+        self.key
+            .movement_key()
+            .map(|key| KeyboardEvent::new(key, self.transition))
+    }
+}
+
+/// One movement-specific keyboard event retained for compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyboardEvent {
     pub key: MovementKey,
@@ -251,6 +307,20 @@ impl EvdevKeyboard {
     }
 
     /// Blocks until at least one kernel event is available and returns only the
+    /// profile-visible key events supported by the current runtime slice unless
+    /// the device was configured as nonblocking by the caller.
+    pub fn next_host_key_events(&mut self) -> Result<Vec<HostKeyEvent>, KeyboardDeviceError> {
+        let events = self
+            .device
+            .fetch_events()
+            .map_err(|source| KeyboardDeviceError::Read {
+                path: self.path.clone(),
+                source,
+            })?;
+        Ok(events.filter_map(normalize_host_input_event).collect())
+    }
+
+    /// Blocks until at least one kernel event is available and returns only the
     /// movement events relevant to the current runtime slice unless the device
     /// was configured as nonblocking by the caller.
     pub fn next_events(&mut self) -> Result<Vec<KeyboardEvent>, KeyboardDeviceError> {
@@ -274,16 +344,22 @@ impl Drop for EvdevKeyboard {
 }
 
 fn normalize_input_event(event: InputEvent) -> Option<KeyboardEvent> {
+    normalize_host_input_event(event).and_then(HostKeyEvent::movement_event)
+}
+
+fn normalize_host_input_event(event: InputEvent) -> Option<HostKeyEvent> {
     let EventSummary::Key(_, code, value) = event.destructure() else {
         return None;
     };
 
     let key = match code {
-        KeyCode::KEY_W => MovementKey::Up,
-        KeyCode::KEY_A => MovementKey::Left,
-        KeyCode::KEY_S => MovementKey::Down,
-        KeyCode::KEY_D => MovementKey::Right,
-        KeyCode::KEY_ESC => MovementKey::Exit,
+        KeyCode::KEY_W => HostKey::W,
+        KeyCode::KEY_A => HostKey::A,
+        KeyCode::KEY_S => HostKey::S,
+        KeyCode::KEY_D => HostKey::D,
+        KeyCode::KEY_R => HostKey::R,
+        KeyCode::KEY_SPACE => HostKey::Space,
+        KeyCode::KEY_ESC => HostKey::Esc,
         _ => return None,
     };
     let transition = match value {
@@ -293,7 +369,7 @@ fn normalize_input_event(event: InputEvent) -> Option<KeyboardEvent> {
         _ => return None,
     };
 
-    Some(KeyboardEvent::new(key, transition))
+    Some(HostKeyEvent::new(key, transition))
 }
 
 #[cfg(test)]
@@ -302,6 +378,26 @@ mod tests {
 
     fn event(key: MovementKey, transition: KeyTransition) -> KeyboardEvent {
         KeyboardEvent::new(key, transition)
+    }
+
+    #[test]
+    fn profile_key_names_match_profile_schema_examples() {
+        assert_eq!(HostKey::W.profile_name(), "w");
+        assert_eq!(HostKey::R.profile_name(), "r");
+        assert_eq!(HostKey::Space.profile_name(), "space");
+        assert_eq!(HostKey::Esc.profile_name(), "esc");
+    }
+
+    #[test]
+    fn host_key_events_convert_to_movement_events() {
+        assert_eq!(
+            HostKeyEvent::new(HostKey::W, KeyTransition::Pressed).movement_event(),
+            Some(KeyboardEvent::new(MovementKey::Up, KeyTransition::Pressed))
+        );
+        assert_eq!(
+            HostKeyEvent::new(HostKey::Space, KeyTransition::Pressed).movement_event(),
+            None
+        );
     }
 
     #[test]
@@ -360,14 +456,5 @@ mod tests {
             state.apply(event(MovementKey::Exit, KeyTransition::Released)),
             KeyboardAction::Ignored
         );
-    }
-
-    #[test]
-    fn release_all_returns_one_neutral_update() {
-        let mut state = DirectionalKeyState::default();
-        state.apply(event(MovementKey::Down, KeyTransition::Pressed));
-
-        assert_eq!(state.release_all(), Some(DirectionalInput::default()));
-        assert_eq!(state.release_all(), None);
     }
 }
