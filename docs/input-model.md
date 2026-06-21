@@ -15,27 +15,38 @@ Binding names must be non-empty and unique within a profile.
 
 ## Inputs
 
-Supported inputs:
+Legacy profile inputs:
 
-- `key`: one terminal key, for example `{ "kind": "key", "key": "f" }`.
-- `key_cluster`: four directional terminal keys, for example `w/a/s/d`.
+- `key`: one keyboard key, for example `{ "kind": "key", "key": "f" }`.
+- `key_cluster`: four directional keys, for example `w/a/s/d`.
+- `mouse_button`: stored by the schema but not executed by the legacy terminal runner.
 
-`mouse_button` remains a schema variant but is not executed by the current terminal runner.
+Profile v2 prototype inputs add:
+
+- `mouse_move`: relative host pointer motion for future `mouse_aim` bindings.
+
+Host input capture is split from profile execution:
+
+- `EvdevKeyboard` normalizes physical keyboard events into profile-visible key events.
+- `EvdevMouse` normalizes relative x/y motion, wheel deltas, and mouse buttons.
+- The production daemon should own focus, leases, and grabs before forwarding host events into the runtime.
 
 ## Actions
 
-Supported actions:
+Supported legacy actions:
 
 - `tap`: emits Android input tap at one point.
 - `swipe`: emits Android input swipe from one point to another with a duration.
 - `virtual_joystick`: tracks a directional key cluster and repeatedly emits a swipe from the joystick center to a computed target point.
 
-Placeholder actions:
+Profile v2 prototype actions:
 
+- `tap`
+- `virtual_joystick`
 - `mouse_aim`
 - `macro`
 
-These placeholders intentionally fail normal profile validation until behavior is implemented.
+`mouse_aim` and `macro` remain prototype-only until runtime behavior is wired into the daemon-managed session.
 
 ## Virtual Joystick
 
@@ -77,6 +88,22 @@ Example:
 }
 ```
 
+## Relative Mouse Capture
+
+The current relative mouse slice is host-side capture and normalization only. It is validated with:
+
+```sh
+cargo run -p wroid-input --bin wroid-mouse-capture -- /dev/input/event7 --max-events 20
+```
+
+Normalized events include:
+
+- relative motion: `dx`, `dy`;
+- wheel deltas: vertical and horizontal;
+- mouse buttons: left, right, middle, side, extra.
+
+The future runtime path should map `mouse_move` to `mouse_aim` by applying profile v2 sensitivity and aim-region constraints, then emitting stateful touch frames through `TouchEngine` and the persistent Type-B injector. The shell compatibility backend should not be used for gaming mouse aim.
+
 ## Coordinate Scaling
 
 Profiles can be scaled to another Android surface resolution.
@@ -90,8 +117,8 @@ Use `--scale-to-current` on `play`, `run`, `run-profile`, or `binding run` when 
 
 ## Current Limitations
 
-- The terminal window must stay focused.
-- Key tracking is not global desktop input capture.
-- Release tracking depends on terminal support for enhanced keyboard events.
-- There is no evdev/uinput backend yet.
-- Mouse aim and macros are not implemented.
+- The legacy terminal runner still requires terminal focus.
+- Production global input capture is not daemon-managed yet.
+- Relative mouse events are captured and normalized, but Android mouse aim is not wired yet.
+- Profile v2 is validated by a prototype binary and is not the default runtime profile format yet.
+- Macros are not implemented in the runtime.
