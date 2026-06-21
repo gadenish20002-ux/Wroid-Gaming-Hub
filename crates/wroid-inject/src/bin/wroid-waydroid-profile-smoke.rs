@@ -8,7 +8,7 @@ use wroid_core::profile_v2::{
 };
 use wroid_core::Resolution;
 use wroid_inject::{
-    cleanup_live_keyboard_bridge, run_live_keyboard_session, LiveKeyboardOptions,
+    cleanup_live_keyboard_bridge, run_live_keyboard_session, KeyTapBinding, LiveKeyboardOptions,
     DEFAULT_HOLD_LOG_INTERVAL, DEFAULT_LIVE_HEIGHT, DEFAULT_LIVE_WIDTH, DEFAULT_READY_DELAY,
     DEFAULT_REAFFIRM_INTERVAL,
 };
@@ -52,10 +52,12 @@ fn main() -> Result<()> {
         width: options.width,
         height: options.height,
     };
+    let key_taps = find_key_taps(&profile, resolution);
 
     let mut live = LiveKeyboardOptions::with_resolution(keyboard_path, options.width, options.height);
     live.joystick_center = movement.center.materialize(resolution);
     live.joystick_radius = materialize_radius(movement.radius, resolution);
+    live.key_taps = key_taps;
     live.grab = options.grab;
     live.show_ui = options.show_ui;
     live.trace_android = options.trace_android;
@@ -80,6 +82,22 @@ fn main() -> Result<()> {
         live.joystick_radius,
         live.reaffirm_interval.map(|duration| duration.as_millis())
     );
+    if live.key_taps.is_empty() {
+        println!("No key tap bindings found in profile v2.");
+    } else {
+        println!(
+            "Loaded {} key tap binding(s): {}",
+            live.key_taps.len(),
+            live.key_taps
+                .iter()
+                .map(|binding| format!(
+                    "{}->{},{}",
+                    binding.key, binding.point.x, binding.point.y
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
 
     run_live_keyboard_session(live)
 }
@@ -140,6 +158,23 @@ fn find_wasd_joystick(profile: &ProfileV2) -> Result<MovementBinding> {
         "profile does not contain a WASD key_cluster binding with a hold-mode virtual_joystick action",
     )
     .into())
+}
+
+fn find_key_taps(profile: &ProfileV2, resolution: Resolution) -> Vec<KeyTapBinding> {
+    profile
+        .bindings
+        .iter()
+        .filter_map(|binding| {
+            let (InputV2::Key { key }, ActionV2::Tap { point }) = (&binding.input, &binding.action)
+            else {
+                return None;
+            };
+            Some(KeyTapBinding {
+                key: key.trim().to_ascii_lowercase(),
+                point: point.materialize(resolution),
+            })
+        })
+        .collect()
 }
 
 fn key_eq(value: &str, expected: &str) -> bool {
