@@ -11,9 +11,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use wroid_core::{Point, Resolution};
-use wroid_input::{DirectionalKeyState, EvdevKeyboard, KeyboardAction, KeyboardDeviceError};
+use wroid_input::{
+    DirectionalKeyState, EvdevKeyboard, KeyboardAction, KeyboardDeviceError, KeyboardEvent,
+};
 use wroid_runtime::{
-    ContactId, TouchEngine, TouchFrame, TouchInjectionError, TouchInjector, VirtualJoystick,
+    ContactId, DirectionalInput, TouchEngine, TouchFrame, TouchInjectionError, TouchInjector,
+    VirtualJoystick,
 };
 
 const DEFAULT_WIDTH: u32 = 1920;
@@ -80,6 +83,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             "disabled"
         }
     );
+    if options.trace_events {
+        println!("Trace: enabled. Each normalized W/A/S/D/Esc event will be printed.");
+    }
     if keyboard.is_grabbed() {
         println!(
             "Safety: input polling is nonblocking and a hard watchdog will terminate this process after timeout + {HARD_WATCHDOG_GRACE_SECONDS}s."
@@ -110,20 +116,32 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
 
         for event in events {
+            stats.normalized_events += 1;
             let pipeline_started = Instant::now();
-            match state.apply(event) {
+            let action = state.apply(event);
+            match action {
                 KeyboardAction::DirectionChanged(input) => {
                     let submitted = joystick.apply(&mut engine, input)?;
                     stats.pipeline_samples.push(pipeline_started.elapsed());
                     if submitted {
                         stats.submitted_runtime_frames += 1;
                     }
+                    trace_event(
+                        &options,
+                        started,
+                        event,
+                        "direction_changed",
+                        Some(input),
+                        submitted,
+                    );
                 }
                 KeyboardAction::ExitRequested => {
+                    trace_event(&options, started, event, "exit_requested", None, false);
                     stats.exit_requested = true;
                     break;
                 }
                 KeyboardAction::Ignored => {
+                    trace_event(&options, started, event, "ignored", None, false);
                     stats.ignored_events += 1;
                 }
             }
@@ -138,6 +156,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         "  direction-change samples: {}",
         stats.pipeline_samples.len()
     );
+    println!("  normalized keyboard events: {}", stats.normalized_events);
     println!("  evdev poll calls: {}", stats.read_poll_samples.len());
     println!("  empty polls: {}", stats.empty_polls);
     println!("  ignored/repeat events: {}", stats.ignored_events);
@@ -162,6 +181,7 @@ struct Options {
     grab: bool,
     grab_delay: Duration,
     timeout: Duration,
+    trace_events: bool,
 }
 
 impl Options {
@@ -173,12 +193,14 @@ impl Options {
         let mut grab = false;
         let mut grab_delay = Duration::from_millis(DEFAULT_GRAB_DELAY_MS);
         let mut timeout = Duration::from_secs(DEFAULT_TIMEOUT_SECONDS);
+        let mut trace_events = false;
 
         let mut args = args.into_iter();
         while let Some(argument) = args.next() {
             match argument.as_str() {
                 "--help" | "-h" => return Ok(None),
                 "--grab" => grab = true,
+                "--trace-events" => trace_events = true,
                 "--grab-delay-ms" => {
                     let milliseconds: u64 = parse_next(&mut args, "--grab-delay-ms")?;
                     grab_delay = Duration::from_millis(milliseconds);
@@ -234,6 +256,7 @@ impl Options {
             grab,
             grab_delay,
             timeout,
+            trace_events,
         }))
     }
 }
@@ -286,6 +309,7 @@ impl TouchInjector for RecordingInjector {
 struct BenchStats {
     pipeline_samples: Vec<Duration>,
     read_poll_samples: Vec<Duration>,
+    normalized_events: u64,
     empty_polls: u64,
     ignored_events: u64,
     submitted_runtime_frames: u64,
@@ -294,6 +318,26 @@ struct BenchStats {
 
 fn is_would_block(error: &KeyboardDeviceError) -> bool {
     matches!(error, KeyboardDeviceError::Read { source, .. } if source.kind() == io::ErrorKind::WouldBlock)
+}
+
+fn trace_event(
+    options: &Options,
+    started: Instant,
+    event: KeyboardEvent,
+    action: &str,
+    input: Option<DirectionalInput>,
+    submitted: bool,
+) {
+    if !options.trace_events {
+        return;
+    }
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+    match input {
+        Some(input) => println!(
+            "{elapsed_ms:>10.3}ms event={event:?} action={action} input={input:?} submitted={submitted}"
+        ),
+        None => println!("{elapsed_ms:>10.3}ms event={event:?} action={action}"),
+    }
 }
 
 fn stop_reason(stats: &BenchStats, options: &Options, started: Instant) -> &'static str {
@@ -365,10 +409,10 @@ fn micros(duration: Duration) -> String {
 
 fn print_usage() {
     println!(
-        "Usage: wroid-bench-host <keyboard-event-node> [--samples N] [--timeout-seconds N] [--grab-delay-ms N] [--width W] [--height H] [--grab]"
+        "Usage: wroid-bench-host <keyboard-event-node> [--samples N] [--timeout-seconds N] [--grab-delay-ms N] [--width W] [--height H] [--grab] [--trace-events]"
     );
     println!(
-        "Example: sudo ./target/release/wroid-bench-host /dev/input/event7 --samples 200 --timeout-seconds 15 --grab-delay-ms 1000 --grab"
+        "Example: sudo ./target/release/wroid-bench-host /dev/input/event7 --samples 200 --timeout-seconds 15 --grab-delay-ms 1000 --grab --trace-events"
     );
     println!("Without --grab, the compositor and terminal can still receive keyboard input during diagnostics.");
 }
