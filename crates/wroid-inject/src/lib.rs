@@ -35,7 +35,8 @@ pub use waydroid_bridge::{
 };
 pub use waydroid_session::{
     ensure_container_stopped, ensure_root, spawn_android_getevent_trace, stop_child,
-    wait_for_android_input_device, DesktopUser, DesktopWaydroidSession, WROID_TOUCHSCREEN_NAME,
+    wait_for_android_boot_completed, wait_for_android_input_device, DesktopUser,
+    DesktopWaydroidSession, WROID_TOUCHSCREEN_NAME,
 };
 
 #[cfg(test)]
