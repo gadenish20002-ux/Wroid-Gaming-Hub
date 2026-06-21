@@ -1,0 +1,49 @@
+{
+  "schema_version": 2,
+  "name": "Shooter v2 Example",
+  "package_name": "com.example.shooter",
+  "orientation": "landscape",
+  "bindings": [
+    {
+      "name": "movement",
+      "input": {
+        "kind": "key_cluster",
+        "up": "w",
+        "left": "a",
+        "down": "s",
+        "right": "d"
+      },
+      "action": {
+        "kind": "virtual_joystick",
+        "center": { "x": 0.18, "y": 0.78 },
+        "radius": 0.09,
+        "mode": "hold",
+        "reaffirm_ms": 50
+      }
+    },
+    {
+      "name": "aim",
+      "input": { "kind": "mouse_move" },
+      "action": {
+        "kind": "mouse_aim",
+        "region": { "x": 0.35, "y": 0.06, "w": 0.60, "h": 0.78 },
+        "sensitivity": 1.2
+      }
+    },
+    {
+      "name": "fire",
+      "input": { "kind": "mouse_button", "button": "left" },
+      "action": { "kind": "tap", "point": { "x": 0.87, "y": 0.52 } }
+    },
+    {
+      "name": "reload",
+      "input": { "kind": "key", "key": "r" },
+      "action": { "kind": "tap", "point": { "x": 0.91, "y": 0.83 } }
+    },
+    {
+      "name": "jump",
+      "input": { "kind": "key", "key": "space" },
+      "action": { "kind": "tap", "point": { "x": 0.77, "y": 0.78 } }
+    }
+  ]
+}
