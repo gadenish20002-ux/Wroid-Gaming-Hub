@@ -34,6 +34,27 @@ The command creates a temporary uinput touchscreen, installs a reversible
 Waydroid LXC input bridge, starts Waydroid as the desktop user, and maps WASD to
 one persistent Android touch contact. Press `Esc` to exit and trigger cleanup.
 
+## Tap bindings
+
+Add repeatable tap bindings with `--tap KEY:X,Y`. The point is validated against
+the selected Android surface resolution.
+
+Example:
+
+```bash
+sudo target/debug/wroid-native-keyboard \
+  /dev/input/by-id/usb-Homertech_Hexgears_Gaming_Keyboard-event-kbd \
+  1920 1050 \
+  --no-grab \
+  --no-trace \
+  --ready-delay-ms 0 \
+  --tap F:1600,820 \
+  --tap R:1700,220
+```
+
+When live, pressing `F` injects a short Android tap at `1600,820`; pressing `R`
+injects a short Android tap at `1700,220`.
+
 ## Safer diagnostic run
 
 Use this first when validating a keyboard device, because it avoids exclusive
