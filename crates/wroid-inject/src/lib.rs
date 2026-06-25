@@ -10,6 +10,7 @@ mod event;
 mod injector;
 #[allow(private_interfaces)]
 mod live_keyboard;
+mod live_mouse_aim;
 mod sink;
 mod state;
 mod transition;
@@ -28,6 +29,7 @@ pub use live_keyboard::{
     DEFAULT_HOLD_LOG_INTERVAL, DEFAULT_LIVE_HEIGHT, DEFAULT_LIVE_WIDTH, DEFAULT_READY_DELAY,
     DEFAULT_REAFFIRM_INTERVAL,
 };
+pub use live_mouse_aim::{MouseAimAction, MouseAimBinding, MouseAimController};
 pub use sink::EvdevEventSink;
 pub use waydroid_bridge::{
     remove_bridge, remove_default_bridge, render_bridge_config, CgroupMode, InputDeviceNode,
