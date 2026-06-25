@@ -45,11 +45,12 @@ sudo target/debug/wroid-native-keyboard /dev/input/eventN 1920 1050 --no-grab --
 
 ## Exit and cleanup
 
-Use `Esc` for normal shutdown. That path releases the active touch contact,
+Use `Esc` for normal shutdown. During the live control loop, `Ctrl+C` also
+requests graceful shutdown; the loop exits, releases the active touch contact,
 stops Waydroid, and removes the temporary input bridge.
 
-`Ctrl+C` currently terminates the smoke-test process abruptly. If that happens,
-run the cleanup command and stop the Waydroid session manually:
+If the process is interrupted during early startup, before the live loop is
+active, still run the cleanup command and stop the Waydroid session manually:
 
 ```bash
 sudo target/debug/wroid-native-keyboard --cleanup
@@ -77,7 +78,8 @@ sudo target/debug/wroid-native-keyboard --cleanup
 - This command must run as root because it creates a uinput device and edits the
   temporary Waydroid input bridge.
 - Keep a second terminal open while testing exclusive grab.
-- Prefer `Esc` over `Ctrl+C` until native signal handling is implemented.
+- `Ctrl+C` is handled gracefully only after the live control loop is active; use
+  manual cleanup if startup is interrupted earlier.
 - This is the path that should evolve toward daemon/helper ownership; the legacy
   `wroid input ... --backend waydroid-shell` commands remain compatibility and
   diagnostics only.
