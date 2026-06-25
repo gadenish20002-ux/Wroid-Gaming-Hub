@@ -105,7 +105,11 @@ fn doctor_output_from_parts(
         output.push_str("density: unavailable (no runnable backend detected)\n");
     }
 
-    output.push_str(&backend_recommendation(has_adb_device, waydroid_running));
+    output.push_str(&backend_recommendation(
+        backend,
+        has_adb_device,
+        waydroid_running,
+    ));
     output.push('\n');
     output
 }
@@ -144,15 +148,39 @@ fn doctor_probe_backend(
     }
 }
 
-fn backend_recommendation(has_adb_device: bool, waydroid_running: bool) -> String {
-    if has_adb_device {
-        "backend recommendation: adb (ADB has a connected device)".to_owned()
-    } else if waydroid_running {
-        "backend recommendation: waydroid-shell (Waydroid is running and ADB has no connected device)"
-            .to_owned()
-    } else {
-        "backend recommendation: start Waydroid or connect an ADB device before running input commands"
-            .to_owned()
+fn backend_recommendation(
+    requested_backend: InputBackend,
+    has_adb_device: bool,
+    waydroid_running: bool,
+) -> String {
+    match requested_backend {
+        InputBackend::Adb if has_adb_device => {
+            "backend recommendation: adb (explicitly selected; ADB has a connected device)"
+                .to_owned()
+        }
+        InputBackend::Adb => {
+            "backend recommendation: adb explicitly selected; no connected ADB device was detected"
+                .to_owned()
+        }
+        InputBackend::WaydroidShell if waydroid_running => {
+            "backend recommendation: waydroid-shell (explicitly selected; Waydroid is running)"
+                .to_owned()
+        }
+        InputBackend::WaydroidShell => {
+            "backend recommendation: waydroid-shell explicitly selected; automatic Waydroid readiness checks did not pass, but probe results above are authoritative"
+                .to_owned()
+        }
+        InputBackend::Auto if has_adb_device => {
+            "backend recommendation: adb (ADB has a connected device)".to_owned()
+        }
+        InputBackend::Auto if waydroid_running => {
+            "backend recommendation: waydroid-shell (Waydroid is running and ADB has no connected device)"
+                .to_owned()
+        }
+        InputBackend::Auto => {
+            "backend recommendation: start Waydroid or connect an ADB device before running input commands"
+                .to_owned()
+        }
     }
 }
 
@@ -242,7 +270,7 @@ mod tests {
     #[test]
     fn recommendation_prefers_adb_when_device_connected() {
         assert_eq!(
-            backend_recommendation(true, true),
+            backend_recommendation(InputBackend::Auto, true, true),
             "backend recommendation: adb (ADB has a connected device)"
         );
     }
@@ -250,14 +278,22 @@ mod tests {
     #[test]
     fn recommendation_uses_waydroid_shell_when_waydroid_runs_without_adb() {
         assert_eq!(
-            backend_recommendation(false, true),
+            backend_recommendation(InputBackend::Auto, false, true),
             "backend recommendation: waydroid-shell (Waydroid is running and ADB has no connected device)"
         );
     }
 
     #[test]
     fn recommendation_explains_when_no_backend_is_ready() {
-        assert!(backend_recommendation(false, false).contains("start Waydroid"));
+        assert!(backend_recommendation(InputBackend::Auto, false, false).contains("start Waydroid"));
+    }
+
+    #[test]
+    fn explicit_waydroid_shell_recommendation_does_not_claim_no_backend_is_ready() {
+        let recommendation = backend_recommendation(InputBackend::WaydroidShell, false, false);
+
+        assert!(recommendation.contains("waydroid-shell explicitly selected"));
+        assert!(!recommendation.contains("start Waydroid"));
     }
 
     #[test]
@@ -279,6 +315,26 @@ mod tests {
 
         assert!(warning.contains("ADB may not connect"));
         assert!(warning.contains("waydroid-shell"));
+    }
+
+    #[test]
+    fn explicit_waydroid_shell_doctor_output_uses_explicit_backend_recommendation() {
+        let executor = FakeInputExecutor::with_waydroid_screen_and_density(1920, 1050, 180);
+        let output = doctor_output_from_parts(
+            &executor,
+            InputBackend::WaydroidShell,
+            true,
+            &DeviceQuery::Available(Vec::new()),
+            true,
+            &StatusQuery::Available(
+                "Session: RUNNING\nContainer: FROZEN\nIP address: UNKNOWN\n".to_owned(),
+            ),
+        );
+
+        assert!(output.contains("screen (waydroid-shell): 1920x1050\n"));
+        assert!(output.contains("density (waydroid-shell): 180\n"));
+        assert!(output.contains("backend recommendation: waydroid-shell explicitly selected"));
+        assert!(!output.contains("start Waydroid or connect an ADB device"));
     }
 
     #[test]
