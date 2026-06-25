@@ -669,7 +669,11 @@ fn parse_coordinate(value: &str, axis: &str, binding: &str) -> LiveKeyboardResul
     })
 }
 
-fn validate_key_taps(bindings: &[KeyTapBinding], width: u32, height: u32) -> LiveKeyboardResult<()> {
+fn validate_key_taps(
+    bindings: &[KeyTapBinding],
+    width: u32,
+    height: u32,
+) -> LiveKeyboardResult<()> {
     for binding in bindings {
         if binding.point.x >= width || binding.point.y >= height {
             return Err(io::Error::new(
