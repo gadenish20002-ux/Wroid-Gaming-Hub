@@ -166,18 +166,11 @@ impl SessionLifecycle for DaemonSessionManager {
     }
 }
 
-fn stop_report_for_reason(reason: StopReason) -> StopReport {
+fn stop_report_for_reason(_reason: StopReason) -> StopReport {
     StopReport {
         contacts_cancelled: 0,
         leases_released: 0,
-        settings_restored: matches!(
-            reason,
-            StopReason::UserRequested
-                | StopReason::FocusLost
-                | StopReason::BackendFailed
-                | StopReason::ClientDisconnected
-                | StopReason::RuntimeShutdown
-        ),
+        settings_restored: true,
     }
 }
 
