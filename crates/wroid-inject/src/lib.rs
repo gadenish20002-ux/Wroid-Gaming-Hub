@@ -29,7 +29,12 @@ pub use live_keyboard::{
     DEFAULT_HOLD_LOG_INTERVAL, DEFAULT_LIVE_HEIGHT, DEFAULT_LIVE_WIDTH, DEFAULT_READY_DELAY,
     DEFAULT_REAFFIRM_INTERVAL,
 };
-pub use live_mouse_aim::{MouseAimAction, MouseAimBinding, MouseAimController};
+pub use live_mouse_aim::{
+    cleanup_live_mouse_aim_bridge, default_mouse_aim_origin, parse_live_mouse_aim_command,
+    print_live_mouse_aim_usage, run_live_mouse_aim_cli, run_live_mouse_aim_session,
+    LiveMouseAimCommand, LiveMouseAimOptions, MouseAimAction, MouseAimBinding, MouseAimController,
+    DEFAULT_MOUSE_AIM_HEIGHT, DEFAULT_MOUSE_AIM_READY_DELAY, DEFAULT_MOUSE_AIM_WIDTH,
+};
 pub use sink::EvdevEventSink;
 pub use waydroid_bridge::{
     remove_bridge, remove_default_bridge, render_bridge_config, CgroupMode, InputDeviceNode,
