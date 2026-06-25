@@ -490,6 +490,7 @@ pub fn parse_live_keyboard_command(args: &[String]) -> LiveKeyboardResult<LiveKe
     let mut reaffirm_interval = Some(DEFAULT_REAFFIRM_INTERVAL);
     let mut hold_log_interval = Some(DEFAULT_HOLD_LOG_INTERVAL);
     let mut ready_delay = DEFAULT_READY_DELAY;
+    let mut key_taps = Vec::new();
 
     let mut index = 0;
     while index < args.len() {
@@ -511,6 +512,10 @@ pub fn parse_live_keyboard_command(args: &[String]) -> LiveKeyboardResult<LiveKe
             "--ready-delay-ms" => {
                 index += 1;
                 ready_delay = parse_ready_delay_arg(args.get(index), "--ready-delay-ms")?;
+            }
+            "--tap" => {
+                index += 1;
+                key_taps.push(parse_key_tap_binding(args.get(index), "--tap")?);
             }
             argument if argument.starts_with("--") => {
                 return Err(io::Error::new(
@@ -546,6 +551,7 @@ pub fn parse_live_keyboard_command(args: &[String]) -> LiveKeyboardResult<LiveKe
         DEFAULT_LIVE_HEIGHT,
         "height",
     )?;
+    validate_key_taps(&key_taps, width, height)?;
 
     Ok(LiveKeyboardCommand::Run(LiveKeyboardOptions {
         keyboard_path: PathBuf::from(keyboard_path),
@@ -553,7 +559,7 @@ pub fn parse_live_keyboard_command(args: &[String]) -> LiveKeyboardResult<LiveKe
         height,
         joystick_center: default_joystick_center(width, height),
         joystick_radius: default_joystick_radius(width, height),
-        key_taps: Vec::new(),
+        key_taps,
         grab,
         show_ui,
         trace_android,
@@ -615,6 +621,70 @@ fn parse_dimension(value: Option<&str>, default: u32, label: &str) -> LiveKeyboa
     })
 }
 
+fn parse_key_tap_binding(value: Option<&String>, flag: &str) -> LiveKeyboardResult<KeyTapBinding> {
+    let value = value.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{flag} requires KEY:X,Y"),
+        )
+    })?;
+    let (key, point) = value.split_once(':').ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid {flag} binding '{value}': expected KEY:X,Y"),
+        )
+    })?;
+    let key = key.trim();
+    if key.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid {flag} binding '{value}': key must not be empty"),
+        )
+        .into());
+    }
+
+    let (x, y) = point.split_once(',').ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid {flag} binding '{value}': expected KEY:X,Y"),
+        )
+    })?;
+
+    Ok(KeyTapBinding {
+        key: key.to_owned(),
+        point: Point {
+            x: parse_coordinate(x, "x", value)?,
+            y: parse_coordinate(y, "y", value)?,
+        },
+    })
+}
+
+fn parse_coordinate(value: &str, axis: &str, binding: &str) -> LiveKeyboardResult<u32> {
+    value.trim().parse::<u32>().map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid tap binding '{binding}' {axis} coordinate: {error}"),
+        )
+        .into()
+    })
+}
+
+fn validate_key_taps(bindings: &[KeyTapBinding], width: u32, height: u32) -> LiveKeyboardResult<()> {
+    for binding in bindings {
+        if binding.point.x >= width || binding.point.y >= height {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "tap binding {}:{},{} is outside {}x{} surface",
+                    binding.key, binding.point.x, binding.point.y, width, height
+                ),
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 fn key_name_matches(left: &str, right: &str) -> bool {
     left.trim().eq_ignore_ascii_case(right.trim())
 }
@@ -659,9 +729,10 @@ fn reset_interrupt_request() {
 
 pub fn print_live_keyboard_usage(binary_name: &str) {
     println!(
-        "Usage: {binary_name} <keyboard-event-node> [width] [height] [--no-grab] [--no-ui] [--no-trace] [--ready-delay-ms N] [--reaffirm-ms N|--no-reaffirm] [--hold-log-ms N|--no-hold-log]"
+        "Usage: {binary_name} <keyboard-event-node> [width] [height] [--tap KEY:X,Y]... [--no-grab] [--no-ui] [--no-trace] [--ready-delay-ms N] [--reaffirm-ms N|--no-reaffirm] [--hold-log-ms N|--no-hold-log]"
     );
     println!("Example: sudo ./target/release/{binary_name} /dev/input/event7 1920 1050");
+    println!("Tap binding example: --tap F:1600,820 --tap R:1700,220");
     println!("Diagnostics without exclusive keyboard grab: add --no-grab");
     println!("Exit: press Esc, or Ctrl+C during the live control loop");
     println!("Recovery: sudo ./target/release/{binary_name} --cleanup");
@@ -701,6 +772,62 @@ mod tests {
         assert_eq!(options.reaffirm_interval, Some(DEFAULT_REAFFIRM_INTERVAL));
         assert_eq!(options.hold_log_interval, Some(DEFAULT_HOLD_LOG_INTERVAL));
         assert_eq!(options.ready_delay, DEFAULT_READY_DELAY);
+    }
+
+    #[test]
+    fn parses_repeated_tap_bindings() {
+        let options = run_options(
+            parse_live_keyboard_command(&[
+                "/dev/input/event7".to_owned(),
+                "1920".to_owned(),
+                "1050".to_owned(),
+                "--tap".to_owned(),
+                "F:1600,820".to_owned(),
+                "--tap".to_owned(),
+                "R:1700,220".to_owned(),
+            ])
+            .unwrap(),
+        );
+
+        assert_eq!(
+            options.key_taps,
+            vec![
+                KeyTapBinding {
+                    key: "F".to_owned(),
+                    point: Point { x: 1600, y: 820 },
+                },
+                KeyTapBinding {
+                    key: "R".to_owned(),
+                    point: Point { x: 1700, y: 220 },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_tap_format() {
+        let error = parse_live_keyboard_command(&[
+            "/dev/input/event7".to_owned(),
+            "--tap".to_owned(),
+            "F=1600,820".to_owned(),
+        ])
+        .unwrap_err();
+
+        assert!(error.to_string().contains("expected KEY:X,Y"));
+    }
+
+    #[test]
+    fn rejects_out_of_bounds_tap_binding() {
+        let error = parse_live_keyboard_command(&[
+            "/dev/input/event7".to_owned(),
+            "1920".to_owned(),
+            "1050".to_owned(),
+            "--tap".to_owned(),
+            "F:1920,820".to_owned(),
+        ])
+        .unwrap_err();
+
+        assert!(error.to_string().contains("outside 1920x1050 surface"));
     }
 
     #[test]
