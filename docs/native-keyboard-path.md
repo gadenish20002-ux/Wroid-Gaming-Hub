@@ -43,7 +43,28 @@ keyboard grab and disables Android event tracing:
 sudo target/debug/wroid-native-keyboard /dev/input/eventN 1920 1050 --no-grab --no-trace --ready-delay-ms 0
 ```
 
-## Cleanup
+## Exit and cleanup
+
+Use `Esc` for normal shutdown. That path releases the active touch contact,
+stops Waydroid, and removes the temporary input bridge.
+
+`Ctrl+C` currently terminates the smoke-test process abruptly. If that happens,
+run the cleanup command and stop the Waydroid session manually:
+
+```bash
+sudo target/debug/wroid-native-keyboard --cleanup
+waydroid session stop
+waydroid status
+```
+
+If the status remains stuck or reports `Container: FROZEN`, restart the container
+service before the next native input run:
+
+```bash
+sudo systemctl restart waydroid-container
+```
+
+## Cleanup only
 
 If a previous run exits unexpectedly, remove the temporary bridge with:
 
@@ -56,6 +77,7 @@ sudo target/debug/wroid-native-keyboard --cleanup
 - This command must run as root because it creates a uinput device and edits the
   temporary Waydroid input bridge.
 - Keep a second terminal open while testing exclusive grab.
+- Prefer `Esc` over `Ctrl+C` until native signal handling is implemented.
 - This is the path that should evolve toward daemon/helper ownership; the legacy
   `wroid input ... --backend waydroid-shell` commands remain compatibility and
   diagnostics only.
