@@ -170,7 +170,7 @@ These require a real Linux host with Waydroid; they are not run in CI. See also
 `docs/host-mouse-input.md`, `docs/live-keyboard-cli.md`,
 `docs/runtime-benchmarks.md`.
 
-- **Doctor first**: `cargo run -p wroid-cli -- doctor` and
+- **Doctor first**: `cargo run -p wroid-cli --bin wroid -- doctor` and
   `... doctor --backend waydroid-shell`. Expect the `IP UNKNOWN` warning when
   Waydroid runs but ADB cannot connect.
 - **uinput smoke**: `sudo .../wroid-uinput-smoke` then verify the virtual device
