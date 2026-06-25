@@ -28,7 +28,8 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 
 ## Phase 2: Runtime daemon and security boundary
 
-- [ ] Add the per-user `wroidd` daemon and versioned typed IPC.
+- [x] Add the first `wroid-daemon` crate with daemon-owned session bookkeeping.
+- [ ] Add the per-user `wroidd` daemon process and versioned typed IPC.
 - [ ] Add the minimal privileged helper with leased device access.
 - [ ] Move CLI execution onto the daemon API.
 - [ ] Add production session lifecycle, focus ownership, and configuration rollback.
