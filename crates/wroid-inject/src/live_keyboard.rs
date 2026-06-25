@@ -2,6 +2,7 @@ use std::error::Error;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Child;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -30,6 +31,16 @@ pub const DEFAULT_READY_DELAY: Duration = Duration::from_millis(1_000);
 const JOYSTICK_CONTACT_ID: ContactId = ContactId::new(1);
 const TAP_CONTACT_ID: ContactId = ContactId::new(2);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const SIGINT: i32 = 2;
+const SIGNAL_ERROR: usize = usize::MAX;
+
+static INTERRUPT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+type SignalHandler = extern "C" fn(i32);
+
+unsafe extern "C" {
+    fn signal(signum: i32, handler: SignalHandler) -> usize;
+}
 
 type LiveKeyboardResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -129,6 +140,7 @@ pub fn run_live_keyboard_session(options: LiveKeyboardOptions) -> LiveKeyboardRe
     ensure_root("Waydroid live keyboard")?;
     ensure_container_stopped()?;
     remove_default_bridge()?;
+    install_interrupt_handler()?;
 
     let desktop_user = DesktopUser::from_sudo_environment()?;
     let mut keyboard = EvdevKeyboard::open(&options.keyboard_path)?;
@@ -222,7 +234,7 @@ pub fn run_live_keyboard_session(options: LiveKeyboardOptions) -> LiveKeyboardRe
             &mut engine,
             &options,
         );
-        if loop_result.is_ok() {
+        if loop_result.is_ok() && !interrupt_requested() {
             reader.join()?;
         }
         loop_result
@@ -296,6 +308,11 @@ fn run_keyboard_loop(
     let mut timers = HoldTimers::default();
 
     loop {
+        if interrupt_requested() {
+            println!("Interrupt requested; shutting down native keyboard session.");
+            return Ok(());
+        }
+
         match receiver.recv_timeout(next_timeout(&timers)) {
             Ok(event) => {
                 if handle_keyboard_event(event, state, joystick, engine, options, &mut timers)? {
@@ -616,12 +633,37 @@ fn duration_label(duration: Duration) -> String {
     }
 }
 
+fn install_interrupt_handler() -> io::Result<()> {
+    reset_interrupt_request();
+    // SAFETY: `request_interrupt` only performs an atomic store and does not
+    // allocate, lock, or call into non-signal-safe Rust code.
+    let previous = unsafe { signal(SIGINT, request_interrupt) };
+    if previous == SIGNAL_ERROR {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+extern "C" fn request_interrupt(_signal: i32) {
+    INTERRUPT_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+fn interrupt_requested() -> bool {
+    INTERRUPT_REQUESTED.load(Ordering::SeqCst)
+}
+
+fn reset_interrupt_request() {
+    INTERRUPT_REQUESTED.store(false, Ordering::SeqCst);
+}
+
 pub fn print_live_keyboard_usage(binary_name: &str) {
     println!(
         "Usage: {binary_name} <keyboard-event-node> [width] [height] [--no-grab] [--no-ui] [--no-trace] [--ready-delay-ms N] [--reaffirm-ms N|--no-reaffirm] [--hold-log-ms N|--no-hold-log]"
     );
     println!("Example: sudo ./target/release/{binary_name} /dev/input/event7 1920 1050");
     println!("Diagnostics without exclusive keyboard grab: add --no-grab");
+    println!("Exit: press Esc, or Ctrl+C during the live control loop");
     println!("Recovery: sudo ./target/release/{binary_name} --cleanup");
 }
 
@@ -768,5 +810,17 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("greater than zero"));
+    }
+
+    #[test]
+    fn interrupt_request_flag_can_be_set_and_reset() {
+        reset_interrupt_request();
+        assert!(!interrupt_requested());
+
+        request_interrupt(SIGINT);
+        assert!(interrupt_requested());
+
+        reset_interrupt_request();
+        assert!(!interrupt_requested());
     }
 }
