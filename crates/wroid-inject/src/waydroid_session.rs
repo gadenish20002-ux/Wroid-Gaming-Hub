@@ -373,13 +373,66 @@ fn combined_output(output: &Output) -> String {
     text
 }
 
+fn home_directory(user: &str) -> io::Result<PathBuf> {
+    let passwd = fs::read_to_string("/etc/passwd")?;
+    passwd
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split(':');
+            let name = fields.next()?;
+            let _password = fields.next()?;
+            let _uid = fields.next()?;
+            let _gid = fields.next()?;
+            let _gecos = fields.next()?;
+            let home = fields.next()?;
+            (name == user).then(|| PathBuf::from(home))
+        })
+        .next()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("desktop user {user} is missing from /etc/passwd"),
+            )
+        })
+}
+
+fn detect_wayland_display(runtime_dir: &Path) -> io::Result<OsString> {
+    if let Some(display) = std::env::var_os("WAYLAND_DISPLAY") {
+        if runtime_dir.join(&display).exists() {
+            return Ok(display);
+        }
+    }
+
+    let mut candidates = fs::read_dir(runtime_dir)?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let is_wayland = name.to_string_lossy().starts_with("wayland-");
+            let is_socket = entry
+                .file_type()
+                .map(|file_type| file_type.is_socket())
+                .unwrap_or(false);
+            (is_wayland && is_socket).then_some(name)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.into_iter().next().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no Wayland socket found in {}", runtime_dir.display()),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn detects_explicitly_stopped_container() {
-        assert!(waydroid_is_stopped("Session:\tSTOPPED\nContainer:\tSTOPPED\n"));
+        assert!(waydroid_is_stopped(
+            "Session:\tSTOPPED\nContainer:\tSTOPPED\n"
+        ));
     }
 
     #[test]
@@ -405,13 +458,17 @@ mod tests {
 
     #[test]
     fn rejects_frozen_container_before_native_setup() {
-        let error = ensure_container_stopped_status("Session:\tRUNNING\nContainer:\tFROZEN\n")
-            .unwrap_err();
+        let error =
+            ensure_container_stopped_status("Session:\tRUNNING\nContainer:\tFROZEN\n").unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
         assert!(error.to_string().contains("container is FROZEN"));
-        assert!(error.to_string().contains("wroid-native-keyboard --cleanup"));
-        assert!(error.to_string().contains("systemctl restart waydroid-container"));
+        assert!(error
+            .to_string()
+            .contains("wroid-native-keyboard --cleanup"));
+        assert!(error
+            .to_string()
+            .contains("systemctl restart waydroid-container"));
     }
 
     #[test]
