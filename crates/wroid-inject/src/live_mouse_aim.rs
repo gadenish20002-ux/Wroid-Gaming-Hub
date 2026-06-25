@@ -115,8 +115,7 @@ mod tests {
     use super::*;
     use wroid_core::{Point, Resolution};
     use wroid_runtime::{
-        ContactId, MouseAimRegion, MouseAimSensitivity, TouchFrame, TouchInjectionError,
-        TouchPhase,
+        ContactId, MouseAimRegion, MouseAimSensitivity, TouchFrame, TouchInjectionError, TouchPhase,
     };
 
     #[derive(Debug, Default)]
