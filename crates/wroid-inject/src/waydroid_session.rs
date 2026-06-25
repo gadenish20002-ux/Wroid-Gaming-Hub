@@ -2,6 +2,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::os::unix::fs::FileTypeExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::thread::sleep;
@@ -94,6 +95,7 @@ impl DesktopUser {
             .arg(wayland)
             .arg("waydroid")
             .args(arguments);
+        isolate_from_terminal_interrupts(&mut command);
         command
     }
 
@@ -268,9 +270,7 @@ fn ensure_container_stopped_status(status: &str) -> io::Result<()> {
 pub fn wait_for_android_boot_completed() -> io::Result<()> {
     let mut last_output = String::new();
     for _ in 0..STATUS_ATTEMPTS {
-        let output = Command::new("waydroid")
-            .args(["shell", "--", "getprop", "sys.boot_completed"])
-            .output()?;
+        let output = waydroid_command(&["shell", "--", "getprop", "sys.boot_completed"]).output()?;
         last_output = combined_output(&output);
         if output.status.success() && last_output.trim() == "1" {
             println!("Android boot_completed=1.");
@@ -288,9 +288,7 @@ pub fn wait_for_android_boot_completed() -> io::Result<()> {
 pub fn wait_for_android_input_device(device_name: &str) -> io::Result<()> {
     let mut last_output = String::new();
     for _ in 0..STATUS_ATTEMPTS {
-        let output = Command::new("waydroid")
-            .args(["shell", "--", "getevent", "-pl"])
-            .output()?;
+        let output = waydroid_command(&["shell", "--", "getevent", "-pl"]).output()?;
         last_output = combined_output(&output);
         if output.status.success() && last_output.contains(device_name) {
             return Ok(());
@@ -310,8 +308,8 @@ pub fn spawn_android_getevent_trace(event_node: &Path) -> io::Result<Child> {
     let event_path = event_node.to_str().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "event node path is not UTF-8")
     })?;
-    Command::new("waydroid")
-        .args(["shell", "--", "getevent", "-lt", event_path])
+    let mut command = waydroid_command(&["shell", "--", "getevent", "-lt", event_path]);
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -327,7 +325,7 @@ pub fn stop_child(child: &mut Child) -> io::Result<()> {
 }
 
 fn waydroid_status() -> io::Result<String> {
-    let output = Command::new("waydroid").arg("status").output()?;
+    let output = waydroid_command(&["status"]).output()?;
     Ok(combined_output(&output))
 }
 
@@ -355,7 +353,7 @@ fn waydroid_is_stopped(status: &str) -> bool {
 }
 
 fn run_waydroid(arguments: &[&str]) -> io::Result<()> {
-    let output = Command::new("waydroid").args(arguments).output()?;
+    let output = waydroid_command(arguments).output()?;
     if output.status.success() {
         return Ok(());
     }
@@ -365,6 +363,17 @@ fn run_waydroid(arguments: &[&str]) -> io::Result<()> {
         arguments.join(" "),
         combined_output(&output)
     )))
+}
+
+fn waydroid_command(arguments: &[&str]) -> Command {
+    let mut command = Command::new("waydroid");
+    command.args(arguments);
+    isolate_from_terminal_interrupts(&mut command);
+    command
+}
+
+fn isolate_from_terminal_interrupts(command: &mut Command) {
+    command.process_group(0);
 }
 
 fn combined_output(output: &Output) -> String {
