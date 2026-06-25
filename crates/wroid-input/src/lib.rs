@@ -11,6 +11,8 @@ use evdev::{Device, EventSummary, InputEvent, KeyCode};
 use thiserror::Error;
 use wroid_runtime::DirectionalInput;
 
+pub mod mouse;
+
 const REQUIRED_KEYS: [(KeyCode, &str); 5] = [
     (KeyCode::KEY_W, "W"),
     (KeyCode::KEY_A, "A"),

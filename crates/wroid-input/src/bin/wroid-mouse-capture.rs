@@ -3,10 +3,7 @@ use std::error::Error;
 use std::io;
 use std::path::PathBuf;
 
-#[path = "../mouse.rs"]
-mod mouse;
-
-use mouse::{EvdevMouse, MouseButtonTransition, MouseEvent};
+use wroid_input::mouse::{EvdevMouse, MouseButtonTransition, MouseEvent};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let Some(options) = Options::parse(env::args().skip(1))? else {
