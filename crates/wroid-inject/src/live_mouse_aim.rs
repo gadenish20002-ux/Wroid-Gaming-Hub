@@ -9,12 +9,12 @@ use std::time::Duration;
 
 use wroid_core::{Point, Resolution};
 use wroid_input::mouse::{
-    EvdevMouse, MouseButton, MouseButtonEvent, MouseButtonTransition, MouseDeviceError,
-    MouseEvent, RelativeMouseMotion,
+    EvdevMouse, MouseButton, MouseButtonEvent, MouseButtonTransition, MouseDeviceError, MouseEvent,
+    RelativeMouseMotion,
 };
 use wroid_runtime::{
-    ContactId, MouseAim, MouseAimConfigError, MouseAimDelta, MouseAimRegion,
-    MouseAimSensitivity, TouchEngine, TouchEngineError, TouchInjector,
+    ContactId, MouseAim, MouseAimConfigError, MouseAimDelta, MouseAimRegion, MouseAimSensitivity,
+    TouchEngine, TouchEngineError, TouchInjector,
 };
 
 use crate::waydroid_bridge::{remove_default_bridge, InputDeviceNode, InstalledWaydroidBridge};
@@ -551,7 +551,9 @@ pub fn print_live_mouse_aim_usage(binary_name: &str) {
     );
     println!("Example: sudo ./target/release/{binary_name} /dev/input/event4 1920 1050");
     println!("Diagnostics without exclusive mouse grab: add --no-grab");
-    println!("Controls: hold right mouse button to activate aim; move mouse to aim; release to lift");
+    println!(
+        "Controls: hold right mouse button to activate aim; move mouse to aim; release to lift"
+    );
     println!("Exit: Ctrl+C during the live control loop");
     println!("Recovery: sudo ./target/release/{binary_name} --cleanup");
 }
