@@ -10,7 +10,7 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - [x] Guarantee atomic runtime state commit after successful injection.
 - [x] Add CI quality gates for formatting, Clippy, and workspace tests.
 - [x] Accept architecture decisions for persistent input and privilege separation.
-- [ ] Split package, display, lifecycle, diagnostics, and input interfaces.
+- [x] Split package, display, lifecycle, diagnostics, and input interfaces.
 - [x] Add a benchmark harness for the shell compatibility backend.
 
 ## Phase 1: Low-latency Linux input
