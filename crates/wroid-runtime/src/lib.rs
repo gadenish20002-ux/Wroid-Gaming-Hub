@@ -11,9 +11,13 @@ use thiserror::Error;
 use wroid_core::Point;
 
 mod joystick;
+mod mouse_aim;
 mod services;
 
 pub use joystick::{DirectionalInput, VirtualJoystick, VirtualJoystickConfigError};
+pub use mouse_aim::{
+    MouseAim, MouseAimConfigError, MouseAimDelta, MouseAimRegion, MouseAimSensitivity,
+};
 pub use services::*;
 
 /// Stable identifier for one logical finger on the Android touch surface.
