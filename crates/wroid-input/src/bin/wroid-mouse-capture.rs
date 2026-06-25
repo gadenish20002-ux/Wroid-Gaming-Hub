@@ -102,7 +102,10 @@ impl Options {
         }
 
         let mouse_path = path.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "missing mouse event-device path")
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "missing mouse event-device path",
+            )
         })?;
 
         Ok(Some(Self {

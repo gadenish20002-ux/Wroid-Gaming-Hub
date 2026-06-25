@@ -225,7 +225,11 @@ pub trait SessionLifecycle {
 
     fn prepare(&mut self, request: SessionRequest) -> Result<PreparedSession, Self::Error>;
     fn start(&mut self, session_id: &SessionId) -> Result<(), Self::Error>;
-    fn stop(&mut self, session_id: &SessionId, reason: StopReason) -> Result<StopReport, Self::Error>;
+    fn stop(
+        &mut self,
+        session_id: &SessionId,
+        reason: StopReason,
+    ) -> Result<StopReport, Self::Error>;
     fn state(&self, session_id: &SessionId) -> Result<SessionState, Self::Error>;
 }
 
@@ -304,7 +308,10 @@ pub trait InputLeaseService {
     type Error: ServiceError;
 
     fn list_input_devices(&mut self) -> Result<Vec<InputDeviceDescriptor>, Self::Error>;
-    fn acquire_input_lease(&mut self, request: InputLeaseRequest) -> Result<InputLease, Self::Error>;
+    fn acquire_input_lease(
+        &mut self,
+        request: InputLeaseRequest,
+    ) -> Result<InputLease, Self::Error>;
     fn release_input_lease(&mut self, lease_id: &InputLeaseId) -> Result<(), Self::Error>;
 }
 
@@ -421,10 +428,7 @@ mod tests {
 
     #[test]
     fn input_lease_ids_reject_empty_values() {
-        assert_eq!(
-            InputLeaseId::new("").unwrap_err(),
-            InputLeaseIdError::Empty
-        );
+        assert_eq!(InputLeaseId::new("").unwrap_err(), InputLeaseIdError::Empty);
         assert_eq!(InputLeaseId::new("lease-1").unwrap().as_str(), "lease-1");
     }
 
