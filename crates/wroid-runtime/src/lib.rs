@@ -11,8 +11,10 @@ use thiserror::Error;
 use wroid_core::Point;
 
 mod joystick;
+mod services;
 
 pub use joystick::{DirectionalInput, VirtualJoystick, VirtualJoystickConfigError};
+pub use services::*;
 
 /// Stable identifier for one logical finger on the Android touch surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
