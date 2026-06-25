@@ -332,7 +332,10 @@ mod tests {
             .move_by(&mut engine, MouseAimDelta::new(25, -10))
             .unwrap());
 
-        assert_eq!(engine.state().position(aim.contact_id()), Some(Point { x: 985, y: 530 }));
+        assert_eq!(
+            engine.state().position(aim.contact_id()),
+            Some(Point { x: 985, y: 530 })
+        );
         let frames = &engine.injector().frames;
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].events()[0].phase, TouchPhase::Down);
@@ -348,9 +351,7 @@ mod tests {
             .move_by(&mut engine, MouseAimDelta::new(30, 30))
             .unwrap());
         assert!(aim.begin(&mut engine).unwrap());
-        assert!(!aim
-            .move_by(&mut engine, MouseAimDelta::new(0, 0))
-            .unwrap());
+        assert!(!aim.move_by(&mut engine, MouseAimDelta::new(0, 0)).unwrap());
 
         assert_eq!(engine.injector().frames.len(), 1);
     }
@@ -380,7 +381,10 @@ mod tests {
             .move_by(&mut engine, MouseAimDelta::new(100, -100))
             .unwrap());
 
-        assert_eq!(engine.state().position(aim.contact_id()), Some(Point { x: 150, y: 50 }));
+        assert_eq!(
+            engine.state().position(aim.contact_id()),
+            Some(Point { x: 150, y: 50 })
+        );
     }
 
     #[test]
