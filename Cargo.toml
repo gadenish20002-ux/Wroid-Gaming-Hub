@@ -6,6 +6,7 @@ members = [
     "crates/wroid-runtime",
     "crates/wroid-input",
     "crates/wroid-inject",
+    "crates/wroid-daemon",
     "crates/wroid-cli",
 ]
 resolver = "2"
