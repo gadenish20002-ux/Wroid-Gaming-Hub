@@ -190,6 +190,15 @@ pub fn materialize_radius(value: f64, resolution: Resolution) -> u32 {
     (value.clamp(0.0, 1.0) * base).round().max(1.0) as u32
 }
 
+pub fn materialize_dead_zone(value: f64, radius: u32, resolution: Resolution) -> u32 {
+    if radius <= 1 {
+        return 0;
+    }
+
+    let dead_zone = materialize_radius(value, resolution).saturating_sub(1);
+    dead_zone.min(radius - 1)
+}
+
 fn validate_input(input: &InputV2, binding: &str, errors: &mut Vec<String>) {
     match input {
         InputV2::Key { key } if key.trim().is_empty() => {
@@ -364,6 +373,20 @@ mod tests {
             Point { x: 345, y: 842 }
         );
         assert_eq!(materialize_radius(0.09, resolution), 97);
+        assert_eq!(materialize_dead_zone(0.02, 97, resolution), 21);
+    }
+
+    #[test]
+    fn materialized_dead_zone_stays_smaller_than_runtime_radius() {
+        let resolution = Resolution {
+            width: 1920,
+            height: 1080,
+        };
+
+        assert_eq!(materialize_dead_zone(0.0, 97, resolution), 0);
+        assert_eq!(materialize_dead_zone(0.02, 1, resolution), 0);
+        assert_eq!(materialize_dead_zone(0.09, 97, resolution), 96);
+        assert_eq!(materialize_dead_zone(1.0, 97, resolution), 96);
     }
 
     #[test]
