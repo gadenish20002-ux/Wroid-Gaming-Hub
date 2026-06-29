@@ -12,11 +12,15 @@ use wroid_core::Point;
 
 mod joystick;
 mod mouse_aim;
+mod profile_controls;
 mod services;
 
 pub use joystick::{AnalogInput, DirectionalInput, VirtualJoystick, VirtualJoystickConfigError};
 pub use mouse_aim::{
     MouseAim, MouseAimConfigError, MouseAimDelta, MouseAimRegion, MouseAimSensitivity,
+};
+pub use profile_controls::{
+    RuntimeControlAction, RuntimeControlBinding, RuntimeControlPlan, RuntimeControlPlanError,
 };
 pub use services::*;
 
