@@ -151,7 +151,13 @@ impl VirtualJoystick {
     ) -> Result<Self, VirtualJoystickConfigError> {
         let radius = materialize_radius(radius, resolution);
         let dead_zone = materialize_dead_zone(dead_zone, radius, resolution);
-        Self::new_with_dead_zone(contact_id, center.materialize(resolution), radius, dead_zone, resolution)
+        Self::new_with_dead_zone(
+            contact_id,
+            center.materialize(resolution),
+            radius,
+            dead_zone,
+            resolution,
+        )
     }
 
     pub const fn contact_id(&self) -> ContactId {
