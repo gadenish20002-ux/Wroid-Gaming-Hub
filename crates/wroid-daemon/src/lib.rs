@@ -9,19 +9,21 @@
 use std::collections::BTreeMap;
 
 use thiserror::Error;
+use wroid_core::profile_v2::ProfileV2;
 use wroid_core::ProfileValidationError;
 use wroid_runtime::{
-    PreparedSession, SessionId, SessionLifecycle, SessionRequest, SessionState, StopReason,
-    StopReport,
+    DisplayInfo, PreparedSession, RuntimeControlPlan, RuntimeControlPlanError, SessionId,
+    SessionLifecycle, SessionRequest, SessionState, StopReason, StopReport,
 };
 
 /// Session metadata owned by the daemon.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeSession {
     session_id: SessionId,
     state: SessionState,
     active_package: String,
     launch_package: bool,
+    control_plan: Option<RuntimeControlPlan>,
 }
 
 impl RuntimeSession {
@@ -39,6 +41,10 @@ impl RuntimeSession {
 
     pub const fn launch_package(&self) -> bool {
         self.launch_package
+    }
+
+    pub fn control_plan(&self) -> Option<&RuntimeControlPlan> {
+        self.control_plan.as_ref()
     }
 
     fn prepared(&self) -> PreparedSession {
@@ -72,12 +78,40 @@ impl DaemonSessionManager {
     pub fn has_session(&self, session_id: &SessionId) -> bool {
         self.sessions.contains_key(session_id)
     }
+
+    pub fn prepare_profile_v2(
+        &mut self,
+        session_id: SessionId,
+        profile: ProfileV2,
+        display: DisplayInfo,
+        launch_package: bool,
+    ) -> Result<PreparedSession, DaemonError> {
+        if self.sessions.contains_key(&session_id) {
+            return Err(DaemonError::SessionAlreadyExists(
+                session_id.as_str().to_owned(),
+            ));
+        }
+
+        let control_plan = RuntimeControlPlan::from_profile_v2(&profile, display.resolution)?;
+        let session = RuntimeSession {
+            session_id: session_id.clone(),
+            state: SessionState::Preparing,
+            active_package: control_plan.package_name.clone(),
+            launch_package,
+            control_plan: Some(control_plan),
+        };
+        let prepared = session.prepared();
+        self.sessions.insert(session_id, session);
+        Ok(prepared)
+    }
 }
 
 #[derive(Debug, Error)]
 pub enum DaemonError {
     #[error(transparent)]
     InvalidProfile(#[from] ProfileValidationError),
+    #[error(transparent)]
+    InvalidRuntimeControls(#[from] RuntimeControlPlanError),
     #[error("session {0} already exists")]
     SessionAlreadyExists(String),
     #[error("session {0} was not found")]
@@ -107,6 +141,7 @@ impl SessionLifecycle for DaemonSessionManager {
             state: SessionState::Preparing,
             active_package: request.profile.package_name.clone(),
             launch_package: request.launch_package,
+            control_plan: None,
         };
         let prepared = session.prepared();
         self.sessions.insert(request.session_id, session);
@@ -177,8 +212,9 @@ fn stop_report_for_reason(_reason: StopReason) -> StopReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wroid_core::{ControlProfile, Resolution};
-    use wroid_runtime::{DisplayInfo, SessionId};
+    use wroid_core::profile_v2::{ActionV2, BindingV2, InputV2, JoystickMode, NormalizedPoint};
+    use wroid_core::{ControlProfile, Point, Resolution};
+    use wroid_runtime::{RuntimeControlAction, SessionId};
 
     fn valid_request(session_id: &str) -> SessionRequest {
         let profile = ControlProfile {
@@ -200,6 +236,42 @@ mod tests {
         }
     }
 
+    fn profile_v2() -> ProfileV2 {
+        ProfileV2 {
+            schema_version: 2,
+            name: "Shooter v2".to_owned(),
+            package_name: "com.example.shooter".to_owned(),
+            orientation: Default::default(),
+            bindings: vec![
+                BindingV2 {
+                    name: "movement".to_owned(),
+                    input: InputV2::KeyCluster {
+                        up: "w".to_owned(),
+                        left: "a".to_owned(),
+                        down: "s".to_owned(),
+                        right: "d".to_owned(),
+                    },
+                    action: ActionV2::VirtualJoystick {
+                        center: NormalizedPoint { x: 0.18, y: 0.78 },
+                        radius: 0.09,
+                        dead_zone: 0.02,
+                        mode: JoystickMode::Hold,
+                        reaffirm_ms: Some(50),
+                    },
+                },
+                BindingV2 {
+                    name: "fire".to_owned(),
+                    input: InputV2::MouseButton {
+                        button: "left".to_owned(),
+                    },
+                    action: ActionV2::Tap {
+                        point: NormalizedPoint { x: 0.86, y: 0.50 },
+                    },
+                },
+            ],
+        }
+    }
+
     #[test]
     fn prepares_valid_session() {
         let mut manager = DaemonSessionManager::new();
@@ -213,6 +285,47 @@ mod tests {
         assert_eq!(prepared.active_package, "com.example.game");
         assert_eq!(manager.session_count(), 1);
         assert!(manager.has_session(&session_id));
+        assert!(manager.session(&session_id).unwrap().control_plan().is_none());
+    }
+
+    #[test]
+    fn prepares_profile_v2_session_with_runtime_controls() {
+        let mut manager = DaemonSessionManager::new();
+        let session_id = SessionId::new("v2-session").unwrap();
+        let resolution = Resolution {
+            width: 1920,
+            height: 1080,
+        };
+
+        let prepared = manager
+            .prepare_profile_v2(
+                session_id.clone(),
+                profile_v2(),
+                DisplayInfo::new(resolution),
+                true,
+            )
+            .unwrap();
+
+        assert_eq!(prepared.session_id, session_id);
+        assert_eq!(prepared.state, SessionState::Preparing);
+        assert_eq!(prepared.active_package, "com.example.shooter");
+
+        let session = manager.session(&session_id).unwrap();
+        assert_eq!(session.active_package(), "com.example.shooter");
+        assert!(session.launch_package());
+        let controls = session.control_plan().unwrap();
+        assert_eq!(controls.controls.len(), 2);
+        assert_eq!(controls.resolution, resolution);
+        assert!(matches!(
+            controls.control("movement").unwrap().action,
+            RuntimeControlAction::VirtualJoystick { .. }
+        ));
+        assert_eq!(
+            controls.control("fire").unwrap().action,
+            RuntimeControlAction::Tap {
+                point: Point { x: 1650, y: 540 }
+            }
+        );
     }
 
     #[test]
@@ -224,6 +337,28 @@ mod tests {
         let error = manager.prepare(request).unwrap_err();
 
         assert!(matches!(error, DaemonError::InvalidProfile(_)));
+        assert_eq!(manager.session_count(), 0);
+    }
+
+    #[test]
+    fn rejects_profile_v2_with_unsupported_controls() {
+        let mut profile = profile_v2();
+        profile.bindings[0].action = ActionV2::Macro { steps: Vec::new() };
+        let mut manager = DaemonSessionManager::new();
+
+        let error = manager
+            .prepare_profile_v2(
+                SessionId::new("bad-v2").unwrap(),
+                profile,
+                DisplayInfo::new(Resolution {
+                    width: 1920,
+                    height: 1080,
+                }),
+                true,
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, DaemonError::InvalidRuntimeControls(_)));
         assert_eq!(manager.session_count(), 0);
     }
 
