@@ -109,6 +109,8 @@ pub enum ActionV2 {
         center: NormalizedPoint,
         radius: f64,
         #[serde(default)]
+        dead_zone: f64,
+        #[serde(default)]
         mode: JoystickMode,
         #[serde(default)]
         reaffirm_ms: Option<u64>,
@@ -222,6 +224,7 @@ fn validate_action(action: &ActionV2, binding: &str, errors: &mut Vec<String>) {
         ActionV2::VirtualJoystick {
             center,
             radius,
+            dead_zone,
             reaffirm_ms,
             ..
         } => {
@@ -233,6 +236,15 @@ fn validate_action(action: &ActionV2, binding: &str, errors: &mut Vec<String>) {
             if !radius.is_finite() || *radius <= 0.0 || *radius > 1.0 {
                 errors.push(format!(
                     "binding {binding} virtual_joystick radius must be finite and within 0.0..=1.0"
+                ));
+            }
+            if !dead_zone.is_finite() || *dead_zone < 0.0 || *dead_zone >= 1.0 {
+                errors.push(format!(
+                    "binding {binding} virtual_joystick dead_zone must be finite and within 0.0..1.0"
+                ));
+            } else if radius.is_finite() && *dead_zone >= *radius {
+                errors.push(format!(
+                    "binding {binding} virtual_joystick dead_zone must be smaller than radius"
                 ));
             }
             if matches!(reaffirm_ms, Some(0)) {
@@ -321,7 +333,7 @@ mod tests {
                 {
                   "name": "movement",
                   "input": { "kind": "key_cluster", "up": "w", "left": "a", "down": "s", "right": "d" },
-                  "action": { "kind": "virtual_joystick", "center": { "x": 0.18, "y": 0.78 }, "radius": 0.09, "mode": "hold", "reaffirm_ms": 50 }
+                  "action": { "kind": "virtual_joystick", "center": { "x": 0.18, "y": 0.78 }, "radius": 0.09, "dead_zone": 0.02, "mode": "hold", "reaffirm_ms": 50 }
                 },
                 {
                   "name": "fire",
@@ -365,5 +377,51 @@ mod tests {
             .errors
             .iter()
             .any(|item| item.contains("duplicate binding name")));
+    }
+
+    #[test]
+    fn legacy_virtual_joystick_without_dead_zone_still_passes() {
+        let profile: ProfileV2 = serde_json::from_str(
+            r#"
+            {
+              "schema_version": 2,
+              "name": "Legacy joystick",
+              "package_name": "com.example.shooter",
+              "bindings": [
+                {
+                  "name": "movement",
+                  "input": { "kind": "key_cluster", "up": "w", "left": "a", "down": "s", "right": "d" },
+                  "action": { "kind": "virtual_joystick", "center": { "x": 0.18, "y": 0.78 }, "radius": 0.09 }
+                }
+              ]
+            }
+            "#,
+        )
+        .unwrap();
+
+        profile.validate().unwrap();
+        assert!(matches!(
+            profile.bindings[0].action,
+            ActionV2::VirtualJoystick { dead_zone: 0.0, .. }
+        ));
+    }
+
+    #[test]
+    fn dead_zone_must_be_smaller_than_radius() {
+        let mut profile = valid_profile();
+        profile.bindings[0].action = ActionV2::VirtualJoystick {
+            center: NormalizedPoint { x: 0.18, y: 0.78 },
+            radius: 0.09,
+            dead_zone: 0.09,
+            mode: JoystickMode::Hold,
+            reaffirm_ms: Some(50),
+        };
+
+        let error = profile.validate().unwrap_err();
+
+        assert!(error
+            .errors
+            .iter()
+            .any(|item| item.contains("dead_zone must be smaller than radius")));
     }
 }
