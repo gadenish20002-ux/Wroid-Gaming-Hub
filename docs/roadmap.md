@@ -29,6 +29,7 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 ## Phase 2: Runtime daemon and security boundary
 
 - [x] Add the first `wroid-daemon` crate with daemon-owned session bookkeeping.
+- [x] Add in-memory daemon preparation for profile v2 control plans.
 - [ ] Add the per-user `wroidd` daemon process and versioned typed IPC.
 - [ ] Add the minimal privileged helper with leased device access.
 - [ ] Move CLI execution onto the daemon API.
@@ -40,7 +41,8 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - [x] Add profile v2 joystick dead-zone metadata and validation.
 - [x] Add runtime joystick dead-zone application for analog input.
 - [x] Add profile-to-runtime joystick geometry materialization.
-- [ ] Add schema migrations, layers, modifiers, and daemon-managed profile wiring.
+- [x] Add profile v2 runtime control plan materialization for taps and joysticks.
+- [ ] Add schema migrations, layers, modifiers, and production daemon profile wiring.
 - [x] Add a persistent virtual joystick runtime state machine.
 - [x] Wire physical WASD input to the persistent joystick in a host smoke path.
 - [x] Wire physical WASD through the temporary Waydroid bridge into Android.
@@ -86,7 +88,7 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - No production daemon-managed global input capture.
 - The production bridge lifecycle and privilege boundary are not implemented yet.
 - Relative mouse capture exists as a host diagnostic path, but Android mouse aim is not wired yet.
-- Profile v2 controls are not wired into daemon-managed sessions yet.
+- Profile v2 controls are prepared in memory but not wired into production daemon sessions yet.
 - No gamepad mapping.
 - No macro execution.
 - No XAPK/APKM/OBB install flow.
