@@ -191,11 +191,12 @@ pub fn materialize_radius(value: f64, resolution: Resolution) -> u32 {
 }
 
 pub fn materialize_dead_zone(value: f64, radius: u32, resolution: Resolution) -> u32 {
-    if radius <= 1 {
+    if value <= 0.0 || radius <= 1 {
         return 0;
     }
 
-    let dead_zone = materialize_radius(value, resolution).saturating_sub(1);
+    let base = f64::from(resolution.width.min(resolution.height));
+    let dead_zone = (value.clamp(0.0, 1.0) * base).round() as u32;
     dead_zone.min(radius - 1)
 }
 
@@ -373,7 +374,7 @@ mod tests {
             Point { x: 345, y: 842 }
         );
         assert_eq!(materialize_radius(0.09, resolution), 97);
-        assert_eq!(materialize_dead_zone(0.02, 97, resolution), 21);
+        assert_eq!(materialize_dead_zone(0.02, 97, resolution), 22);
     }
 
     #[test]
