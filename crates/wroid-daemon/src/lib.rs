@@ -285,7 +285,11 @@ mod tests {
         assert_eq!(prepared.active_package, "com.example.game");
         assert_eq!(manager.session_count(), 1);
         assert!(manager.has_session(&session_id));
-        assert!(manager.session(&session_id).unwrap().control_plan().is_none());
+        assert!(manager
+            .session(&session_id)
+            .unwrap()
+            .control_plan()
+            .is_none());
     }
 
     #[test]

@@ -17,6 +17,7 @@ Wroid Gaming Hub is a Linux gaming frontend for Waydroid. It is currently a CLI-
 - List, launch, install APKs, and inspect current Android apps.
 - Detect device screen size and density for profile creation and scaling.
 - Diagnose ADB/Waydroid state with backend recommendations.
+- Prepare a daemon-managed profile v2 runtime control plan with `session prepare-v2` (in-memory; no injection yet).
 
 ## Tested Environment
 
@@ -177,6 +178,47 @@ On some systems, launching apps through sudo user/session restoration may hang. 
 ```sh
 target/debug/wroid app launch com.android.settings --backend waydroid-shell
 sudo target/debug/wroid run-profile com.android.settings --backend waydroid-shell --no-launch
+```
+
+## Daemon Sessions (preview)
+
+Wroid is migrating session preparation onto the typed runtime daemon contracts in
+`wroid-daemon` and `wroid-runtime`. The `session prepare-v2` command loads a
+profile v2 document, materializes a runtime control plan against a target Android
+surface resolution through the in-memory daemon session manager, and prints the
+prepared session. This is the same control-plan path the future per-user `wroidd`
+daemon and desktop UI will use. It does not start input capture, injection, or app
+launch yet, and unsupported actions fail with an explicit error instead of being
+silently skipped.
+
+```sh
+cargo run --bin wroid -- session prepare-v2 profiles/examples/movement-v2.json --width 1920 --height 1080
+cargo run --bin wroid -- session prepare-v2 profiles/examples/movement-v2.json --width 1920 --height 1080 --session-id shooter --no-launch
+```
+
+A supported tap/joystick profile prepares into a control plan:
+
+```text
+Prepared session: shooter
+State: Preparing
+Profile: Movement v2 Example
+Package: com.example.movement
+Launch package: true
+Resolution: 1920x1080
+Controls (3):
+  movement [key_cluster:wasd] -> virtual_joystick center=(345,842) radius=97 dead_zone=22 contact=1
+  fire [mouse_button:left] -> tap (1650,540)
+  reload [key:r] -> tap (1746,896)
+```
+
+Profiles that use not-yet-wired actions such as `mouse_aim` fail clearly, naming
+the offending binding:
+
+```sh
+cargo run --bin wroid -- session prepare-v2 profiles/examples/shooter-v2.json --width 1920 --height 1080
+# Error: failed to prepare session 'cli-session'
+# Caused by:
+#     binding aim uses unsupported runtime action kind: mouse_aim
 ```
 
 ## Profile Format

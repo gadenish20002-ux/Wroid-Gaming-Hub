@@ -30,6 +30,7 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 
 - [x] Add the first `wroid-daemon` crate with daemon-owned session bookkeeping.
 - [x] Add in-memory daemon preparation for profile v2 control plans.
+- [x] Expose daemon profile v2 preparation through the CLI (`wroid session prepare-v2`).
 - [ ] Add the per-user `wroidd` daemon process and versioned typed IPC.
 - [ ] Add the minimal privileged helper with leased device access.
 - [ ] Move CLI execution onto the daemon API.
@@ -88,7 +89,7 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - No production daemon-managed global input capture.
 - The production bridge lifecycle and privilege boundary are not implemented yet.
 - Relative mouse capture exists as a host diagnostic path, but Android mouse aim is not wired yet.
-- Profile v2 controls are prepared in memory but not wired into production daemon sessions yet.
+- Profile v2 controls can be prepared in memory through `wroid session prepare-v2`, but are not wired into production daemon sessions or input injection yet.
 - No gamepad mapping.
 - No macro execution.
 - No XAPK/APKM/OBB install flow.

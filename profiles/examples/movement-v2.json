@@ -1,0 +1,36 @@
+{
+  "schema_version": 2,
+  "name": "Movement v2 Example",
+  "package_name": "com.example.movement",
+  "orientation": "landscape",
+  "bindings": [
+    {
+      "name": "movement",
+      "input": {
+        "kind": "key_cluster",
+        "up": "w",
+        "left": "a",
+        "down": "s",
+        "right": "d"
+      },
+      "action": {
+        "kind": "virtual_joystick",
+        "center": { "x": 0.18, "y": 0.78 },
+        "radius": 0.09,
+        "dead_zone": 0.02,
+        "mode": "hold",
+        "reaffirm_ms": 50
+      }
+    },
+    {
+      "name": "fire",
+      "input": { "kind": "mouse_button", "button": "left" },
+      "action": { "kind": "tap", "point": { "x": 0.86, "y": 0.50 } }
+    },
+    {
+      "name": "reload",
+      "input": { "kind": "key", "key": "r" },
+      "action": { "kind": "tap", "point": { "x": 0.91, "y": 0.83 } }
+    }
+  ]
+}

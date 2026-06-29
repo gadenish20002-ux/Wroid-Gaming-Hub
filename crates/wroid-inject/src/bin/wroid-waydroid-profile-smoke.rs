@@ -128,6 +128,7 @@ fn find_wasd_joystick(profile: &ProfileV2) -> Result<MovementBinding> {
             radius,
             mode,
             reaffirm_ms,
+            dead_zone: _,
         } = &binding.action
         else {
             continue;

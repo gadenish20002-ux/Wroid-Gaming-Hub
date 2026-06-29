@@ -4,6 +4,7 @@ pub(crate) mod doctor;
 pub(crate) mod input;
 pub(crate) mod profile;
 pub(crate) mod run;
+pub(crate) mod session;
 
 use anyhow::Result;
 use wroid_core::Resolution;
@@ -11,6 +12,7 @@ use wroid_core::Resolution;
 use crate::backend::InputExecutor;
 use crate::cli::{
     AppCommand, BindingCommand, Cli, Commands, DeviceCommand, InputCommand, ProfileCommand,
+    SessionCommand,
 };
 
 pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
@@ -181,6 +183,20 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
                 &binding_name,
                 backend,
                 scale_to_current,
+            ),
+        },
+        Commands::Session { command } => match command {
+            SessionCommand::PrepareV2 {
+                profile_path,
+                width,
+                height,
+                session_id,
+                no_launch,
+            } => session::prepare_v2(
+                profile_path,
+                Resolution { width, height },
+                session_id,
+                no_launch,
             ),
         },
         Commands::Play {

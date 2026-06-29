@@ -38,6 +38,10 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: BindingCommand,
     },
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
     Play {
         profile_path: PathBuf,
         #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
@@ -292,6 +296,27 @@ pub(crate) enum BindingCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub(crate) enum SessionCommand {
+    /// Prepare a daemon-managed runtime control plan from a profile v2 document.
+    ///
+    /// This loads the profile, materializes a runtime control plan against the
+    /// given Android surface resolution, and prints the prepared session. It is
+    /// the in-memory daemon path: no input capture or injection is started, and
+    /// unsupported actions fail with an explicit error instead of being skipped.
+    PrepareV2 {
+        profile_path: PathBuf,
+        #[arg(long)]
+        width: u32,
+        #[arg(long)]
+        height: u32,
+        #[arg(long, default_value = "cli-session")]
+        session_id: String,
+        #[arg(long)]
+        no_launch: bool,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum InputBackend {
     Adb,
@@ -542,6 +567,71 @@ mod tests {
         assert_eq!(path, PathBuf::from("downloads/game.bin"));
         assert_eq!(backend, InputBackend::WaydroidShell);
         assert!(allow_any_extension);
+    }
+
+    #[test]
+    fn session_prepare_v2_parses_resolution_and_defaults() {
+        let cli = Cli::try_parse_from([
+            "wroid",
+            "session",
+            "prepare-v2",
+            "profiles/examples/movement-v2.json",
+            "--width",
+            "1920",
+            "--height",
+            "1080",
+        ])
+        .unwrap();
+
+        let Commands::Session { command } = cli.command else {
+            panic!("expected session command");
+        };
+        let SessionCommand::PrepareV2 {
+            profile_path,
+            width,
+            height,
+            session_id,
+            no_launch,
+        } = command;
+
+        assert_eq!(
+            profile_path,
+            PathBuf::from("profiles/examples/movement-v2.json")
+        );
+        assert_eq!(width, 1920);
+        assert_eq!(height, 1080);
+        assert_eq!(session_id, "cli-session");
+        assert!(!no_launch);
+    }
+
+    #[test]
+    fn session_prepare_v2_accepts_session_id_and_no_launch() {
+        let cli = Cli::try_parse_from([
+            "wroid",
+            "session",
+            "prepare-v2",
+            "profiles/examples/movement-v2.json",
+            "--width",
+            "1280",
+            "--height",
+            "720",
+            "--session-id",
+            "shooter",
+            "--no-launch",
+        ])
+        .unwrap();
+
+        let Commands::Session { command } = cli.command else {
+            panic!("expected session command");
+        };
+        let SessionCommand::PrepareV2 {
+            session_id,
+            no_launch,
+            ..
+        } = command;
+
+        assert_eq!(session_id, "shooter");
+        assert!(no_launch);
     }
 
     #[test]

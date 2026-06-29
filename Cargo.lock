@@ -646,7 +646,9 @@ dependencies = [
  "tempfile",
  "wroid-adb",
  "wroid-core",
+ "wroid-daemon",
  "wroid-inject",
+ "wroid-runtime",
  "wroid-waydroid",
 ]
 
