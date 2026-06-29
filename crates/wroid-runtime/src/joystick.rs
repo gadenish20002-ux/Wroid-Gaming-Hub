@@ -36,10 +36,38 @@ impl DirectionalInput {
     }
 }
 
+/// Normalized analog joystick vector.
+///
+/// `x` uses the Android surface convention where positive moves right. `y` is
+/// positive downward, so negative values move toward the top of the screen.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct AnalogInput {
+    pub x: f64,
+    pub y: f64,
+}
+
+impl AnalogInput {
+    pub const fn new(x: f64, y: f64) -> Self {
+        Self { x, y }
+    }
+
+    fn from_directional(input: DirectionalInput) -> Option<Self> {
+        let x = f64::from(input.horizontal());
+        let y = f64::from(input.vertical());
+        if x == 0.0 && y == 0.0 {
+            None
+        } else {
+            Some(Self { x, y })
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum VirtualJoystickConfigError {
     #[error("virtual joystick radius must be greater than zero")]
     ZeroRadius,
+    #[error("virtual joystick dead zone must be smaller than radius, got {dead_zone} >= {radius}")]
+    DeadZoneTooLarge { dead_zone: u32, radius: u32 },
     #[error("virtual joystick resolution must be non-zero, got {width}x{height}")]
     InvalidResolution { width: u32, height: u32 },
     #[error("virtual joystick center {x},{y} is outside resolution {width}x{height}")]
@@ -51,7 +79,7 @@ pub enum VirtualJoystickConfigError {
     },
 }
 
-/// Converts digital direction state into one persistent Android touch contact.
+/// Converts direction state into one persistent Android touch contact.
 ///
 /// The first non-neutral input emits `Down`, direction changes emit `Move`, and
 /// returning to neutral emits `Up`. Repeating the same direction emits no frame.
@@ -62,6 +90,7 @@ pub struct VirtualJoystick {
     contact_id: ContactId,
     center: Point,
     radius: u32,
+    dead_zone: u32,
     resolution: Resolution,
 }
 
@@ -72,8 +101,21 @@ impl VirtualJoystick {
         radius: u32,
         resolution: Resolution,
     ) -> Result<Self, VirtualJoystickConfigError> {
+        Self::new_with_dead_zone(contact_id, center, radius, 0, resolution)
+    }
+
+    pub fn new_with_dead_zone(
+        contact_id: ContactId,
+        center: Point,
+        radius: u32,
+        dead_zone: u32,
+        resolution: Resolution,
+    ) -> Result<Self, VirtualJoystickConfigError> {
         if radius == 0 {
             return Err(VirtualJoystickConfigError::ZeroRadius);
+        }
+        if dead_zone >= radius {
+            return Err(VirtualJoystickConfigError::DeadZoneTooLarge { dead_zone, radius });
         }
         if resolution.width == 0 || resolution.height == 0 {
             return Err(VirtualJoystickConfigError::InvalidResolution {
@@ -94,6 +136,7 @@ impl VirtualJoystick {
             contact_id,
             center,
             radius,
+            dead_zone,
             resolution,
         })
     }
@@ -110,34 +153,53 @@ impl VirtualJoystick {
         self.radius
     }
 
+    pub const fn dead_zone(&self) -> u32 {
+        self.dead_zone
+    }
+
     pub const fn resolution(&self) -> Resolution {
         self.resolution
     }
 
-    /// Computes the clamped Android surface point for the supplied direction.
+    /// Computes the clamped Android surface point for the supplied digital direction.
     pub fn target(&self, input: DirectionalInput) -> Option<Point> {
-        let horizontal = input.horizontal();
-        let vertical = input.vertical();
-        if horizontal == 0 && vertical == 0 {
+        self.target_analog(AnalogInput::from_directional(input)?)
+    }
+
+    /// Computes the clamped Android surface point for a normalized analog vector.
+    ///
+    /// Vectors inside `dead_zone` return `None`. Values outside it are remapped
+    /// so the dead-zone edge starts at zero displacement while full deflection
+    /// still reaches the configured radius.
+    pub fn target_analog(&self, input: AnalogInput) -> Option<Point> {
+        let magnitude = input.x.hypot(input.y);
+        if !magnitude.is_finite() || magnitude == 0.0 {
             return None;
         }
 
-        let component = if horizontal != 0 && vertical != 0 {
-            // 181 / 256 approximates 1 / sqrt(2), keeping diagonals within radius.
-            ((u64::from(self.radius) * 181 + 128) / 256) as i64
+        let dead_zone = f64::from(self.dead_zone) / f64::from(self.radius);
+        if magnitude <= dead_zone {
+            return None;
+        }
+
+        let clamped_magnitude = magnitude.min(1.0);
+        let effective_magnitude = if dead_zone == 0.0 {
+            clamped_magnitude
         } else {
-            i64::from(self.radius)
+            ((clamped_magnitude - dead_zone) / (1.0 - dead_zone)).clamp(0.0, 1.0)
         };
+        let x = input.x / magnitude;
+        let y = input.y / magnitude;
 
         Some(Point {
             x: offset_axis(
                 self.center.x,
-                i64::from(horizontal) * component,
+                (x * effective_magnitude * f64::from(self.radius)).round() as i64,
                 self.resolution.width,
             ),
             y: offset_axis(
                 self.center.y,
-                i64::from(vertical) * component,
+                (y * effective_magnitude * f64::from(self.radius)).round() as i64,
                 self.resolution.height,
             ),
         })
@@ -152,25 +214,19 @@ impl VirtualJoystick {
         engine: &mut TouchEngine<I>,
         input: DirectionalInput,
     ) -> Result<bool, TouchEngineError> {
-        let current = engine.state().position(self.contact_id);
-        let target = self.target(input);
+        self.apply_target(engine, self.target(input))
+    }
 
-        match (current, target) {
-            (None, None) => Ok(false),
-            (None, Some(position)) => {
-                engine.begin_contact(self.contact_id, position)?;
-                Ok(true)
-            }
-            (Some(_), None) => {
-                engine.end_contact(self.contact_id)?;
-                Ok(true)
-            }
-            (Some(position), Some(target)) if position == target => Ok(false),
-            (Some(_), Some(target)) => {
-                engine.move_contact(self.contact_id, target)?;
-                Ok(true)
-            }
-        }
+    /// Applies one analog state to a persistent touch engine.
+    ///
+    /// This is the path future gamepad support should use after normalizing the
+    /// physical stick values into `-1.0..=1.0` coordinates.
+    pub fn apply_analog<I: TouchInjector>(
+        &self,
+        engine: &mut TouchEngine<I>,
+        input: AnalogInput,
+    ) -> Result<bool, TouchEngineError> {
+        self.apply_target(engine, self.target_analog(input))
     }
 
     /// Cancels the joystick contact after focus loss or abnormal session stop.
@@ -188,6 +244,31 @@ impl VirtualJoystick {
             position,
         )))?;
         Ok(true)
+    }
+
+    fn apply_target<I: TouchInjector>(
+        &self,
+        engine: &mut TouchEngine<I>,
+        target: Option<Point>,
+    ) -> Result<bool, TouchEngineError> {
+        let current = engine.state().position(self.contact_id);
+
+        match (current, target) {
+            (None, None) => Ok(false),
+            (None, Some(position)) => {
+                engine.begin_contact(self.contact_id, position)?;
+                Ok(true)
+            }
+            (Some(_), None) => {
+                engine.end_contact(self.contact_id)?;
+                Ok(true)
+            }
+            (Some(position), Some(target)) if position == target => Ok(false),
+            (Some(_), Some(target)) => {
+                engine.move_contact(self.contact_id, target)?;
+                Ok(true)
+            }
+        }
     }
 }
 
@@ -301,6 +382,78 @@ mod tests {
     }
 
     #[test]
+    fn analog_input_inside_dead_zone_is_neutral() {
+        let joystick = VirtualJoystick::new_with_dead_zone(
+            ContactId::new(2),
+            Point { x: 500, y: 500 },
+            100,
+            25,
+            Resolution {
+                width: 1000,
+                height: 1000,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(joystick.dead_zone(), 25);
+        assert_eq!(joystick.target_analog(AnalogInput::new(0.20, 0.0)), None);
+        assert_eq!(
+            joystick.target_analog(AnalogInput::new(0.50, 0.0)),
+            Some(Point { x: 533, y: 500 })
+        );
+    }
+
+    #[test]
+    fn digital_input_still_reaches_full_radius_with_dead_zone() {
+        let joystick = VirtualJoystick::new_with_dead_zone(
+            ContactId::new(2),
+            Point { x: 500, y: 500 },
+            100,
+            25,
+            Resolution {
+                width: 1000,
+                height: 1000,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            joystick.target(DirectionalInput::new(false, false, false, true)),
+            Some(Point { x: 600, y: 500 })
+        );
+    }
+
+    #[test]
+    fn analog_apply_releases_contact_when_vector_enters_dead_zone() {
+        let joystick = VirtualJoystick::new_with_dead_zone(
+            ContactId::new(3),
+            Point { x: 500, y: 500 },
+            100,
+            25,
+            Resolution {
+                width: 1000,
+                height: 1000,
+            },
+        )
+        .unwrap();
+        let mut engine = TouchEngine::new(RecordingInjector::default());
+
+        assert!(joystick
+            .apply_analog(&mut engine, AnalogInput::new(1.0, 0.0))
+            .unwrap());
+        assert!(engine.state().is_active(joystick.contact_id()));
+        assert!(joystick
+            .apply_analog(&mut engine, AnalogInput::new(0.10, 0.0))
+            .unwrap());
+        assert!(!engine.state().is_active(joystick.contact_id()));
+
+        let frames = &engine.injector().frames;
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].events()[0].phase, TouchPhase::Down);
+        assert_eq!(frames[1].events()[0].phase, TouchPhase::Up);
+    }
+
+    #[test]
     fn failed_down_does_not_activate_the_contact() {
         let joystick = joystick();
         let injector = RecordingInjector {
@@ -354,6 +507,19 @@ mod tests {
                 },
             ),
             Err(VirtualJoystickConfigError::ZeroRadius)
+        ));
+        assert!(matches!(
+            VirtualJoystick::new_with_dead_zone(
+                ContactId::new(1),
+                Point { x: 0, y: 0 },
+                10,
+                10,
+                Resolution {
+                    width: 100,
+                    height: 100,
+                },
+            ),
+            Err(VirtualJoystickConfigError::DeadZoneTooLarge { .. })
         ));
         assert!(matches!(
             VirtualJoystick::new(
