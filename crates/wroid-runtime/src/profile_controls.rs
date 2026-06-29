@@ -87,7 +87,7 @@ fn materialize_action(
             ..
         } => {
             let contact_id = ContactId::new(*next_contact_id);
-            *next_contact_id = next_contact_id.saturating_add(1);
+            *next_contact_id = (*next_contact_id).saturating_add(1);
             let joystick = VirtualJoystick::from_profile_v2_geometry(
                 contact_id,
                 *center,
