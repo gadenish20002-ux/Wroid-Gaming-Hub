@@ -14,7 +14,7 @@ mod joystick;
 mod mouse_aim;
 mod services;
 
-pub use joystick::{DirectionalInput, VirtualJoystick, VirtualJoystickConfigError};
+pub use joystick::{AnalogInput, DirectionalInput, VirtualJoystick, VirtualJoystickConfigError};
 pub use mouse_aim::{
     MouseAim, MouseAimConfigError, MouseAimDelta, MouseAimRegion, MouseAimSensitivity,
 };
