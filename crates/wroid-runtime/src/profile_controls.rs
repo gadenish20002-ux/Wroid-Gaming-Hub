@@ -178,8 +178,8 @@ mod tests {
 
         let fire = plan.control("fire").unwrap();
         assert_eq!(
-            fire.action,
-            RuntimeControlAction::Tap {
+            &fire.action,
+            &RuntimeControlAction::Tap {
                 point: Point { x: 1650, y: 540 }
             }
         );
