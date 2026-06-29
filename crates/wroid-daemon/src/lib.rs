@@ -317,12 +317,12 @@ mod tests {
         assert_eq!(controls.controls.len(), 2);
         assert_eq!(controls.resolution, resolution);
         assert!(matches!(
-            controls.control("movement").unwrap().action,
+            &controls.control("movement").unwrap().action,
             RuntimeControlAction::VirtualJoystick { .. }
         ));
         assert_eq!(
-            controls.control("fire").unwrap().action,
-            RuntimeControlAction::Tap {
+            &controls.control("fire").unwrap().action,
+            &RuntimeControlAction::Tap {
                 point: Point { x: 1650, y: 540 }
             }
         );
