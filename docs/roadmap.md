@@ -39,7 +39,8 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - [x] Add normalized coordinates and aspect-aware viewport transforms.
 - [x] Add profile v2 joystick dead-zone metadata and validation.
 - [x] Add runtime joystick dead-zone application for analog input.
-- [ ] Add schema migrations, layers, modifiers, and profile-to-runtime joystick wiring.
+- [x] Add profile-to-runtime joystick geometry materialization.
+- [ ] Add schema migrations, layers, modifiers, and daemon-managed profile wiring.
 - [x] Add a persistent virtual joystick runtime state machine.
 - [x] Wire physical WASD input to the persistent joystick in a host smoke path.
 - [x] Wire physical WASD through the temporary Waydroid bridge into Android.
@@ -85,7 +86,7 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - No production daemon-managed global input capture.
 - The production bridge lifecycle and privilege boundary are not implemented yet.
 - Relative mouse capture exists as a host diagnostic path, but Android mouse aim is not wired yet.
-- Profile v2 joystick dead-zone data is not wired into daemon-managed sessions yet.
+- Profile v2 controls are not wired into daemon-managed sessions yet.
 - No gamepad mapping.
 - No macro execution.
 - No XAPK/APKM/OBB install flow.
@@ -102,7 +103,7 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 2. Integrate safe host input capture with the managed session.
    - Reuse the completed evdev keyboard reader, relative mouse reader, WASD normalizer, live Android smoke path, hold reaffirmation loop, and runtime joystick dead zones.
    - Convert normalized mouse motion into profile v2 `mouse_aim` touch frames.
-   - Map profile v2 joystick `dead_zone` into runtime joystick construction.
+   - Use profile-to-runtime joystick materialization when building session controls.
    - Preserve explicit user permissions and focus ownership.
    - Keep behavior transparent and avoid protection evasion.
    - Move temporary root-owned orchestration behind the daemon/helper boundary.
