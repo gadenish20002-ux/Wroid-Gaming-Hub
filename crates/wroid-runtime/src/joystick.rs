@@ -1,4 +1,5 @@
 use thiserror::Error;
+use wroid_core::profile_v2::{materialize_dead_zone, materialize_radius, NormalizedPoint};
 use wroid_core::{Point, Resolution};
 
 use crate::{
@@ -139,6 +140,18 @@ impl VirtualJoystick {
             dead_zone,
             resolution,
         })
+    }
+
+    pub fn from_profile_v2_geometry(
+        contact_id: ContactId,
+        center: NormalizedPoint,
+        radius: f64,
+        dead_zone: f64,
+        resolution: Resolution,
+    ) -> Result<Self, VirtualJoystickConfigError> {
+        let radius = materialize_radius(radius, resolution);
+        let dead_zone = materialize_dead_zone(dead_zone, radius, resolution);
+        Self::new_with_dead_zone(contact_id, center.materialize(resolution), radius, dead_zone, resolution)
     }
 
     pub const fn contact_id(&self) -> ContactId {
@@ -352,6 +365,27 @@ mod tests {
         assert_eq!(frames[1].events()[0].position, Point { x: 571, y: 429 });
         assert_eq!(frames[2].events()[0].phase, TouchPhase::Up);
         assert!(!engine.state().is_active(joystick.contact_id()));
+    }
+
+    #[test]
+    fn materializes_profile_v2_geometry() {
+        let resolution = Resolution {
+            width: 1920,
+            height: 1080,
+        };
+        let joystick = VirtualJoystick::from_profile_v2_geometry(
+            ContactId::new(9),
+            NormalizedPoint { x: 0.18, y: 0.78 },
+            0.09,
+            0.02,
+            resolution,
+        )
+        .unwrap();
+
+        assert_eq!(joystick.center(), Point { x: 345, y: 842 });
+        assert_eq!(joystick.radius(), 97);
+        assert_eq!(joystick.dead_zone(), 22);
+        assert_eq!(joystick.resolution(), resolution);
     }
 
     #[test]
