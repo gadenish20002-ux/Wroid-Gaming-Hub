@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use wroid_core::profile_v2::{InputV2, ProfileV2};
 use wroid_core::{Point, Resolution};
-use wroid_daemon::DaemonSessionManager;
 use wroid_input::mouse::{EvdevMouse, MouseButtonTransition, MouseEvent, RelativeMouseMotion};
 use wroid_input::{EvdevKeyboard, HostKeyEvent, KeyTransition};
 use wroid_inject::{
@@ -17,8 +16,8 @@ use wroid_inject::{
     InputDeviceNode, InstalledWaydroidBridge, UinputTouchInjector, WROID_TOUCHSCREEN_NAME,
 };
 use wroid_runtime::{
-    ContactId, DirectionalInput, DisplayInfo, MouseAimDelta, RuntimeControlAction,
-    RuntimeControlPlan, SessionId, TouchEngine, TouchEvent, TouchFrame, TouchPhase,
+    ContactId, DirectionalInput, MouseAimDelta, RuntimeControlAction, RuntimeControlPlan,
+    TouchEngine, TouchEvent, TouchFrame, TouchPhase,
 };
 
 const DEFAULT_WIDTH: u32 = 1920;
@@ -48,9 +47,9 @@ fn run(options: Options) -> Result<()> {
     ensure_container_stopped()?;
     remove_default_bridge()?;
 
-    let profile_path = options.profile_path.as_ref().ok_or_else(|| invalid_input("missing profile"))?;
-    let keyboard_path = options.keyboard_path.as_ref().ok_or_else(|| invalid_input("missing keyboard"))?;
-    let mouse_path = options.mouse_path.as_ref().ok_or_else(|| invalid_input("missing mouse"))?;
+    let profile_path = required_path(&options.profile_path, "profile")?;
+    let keyboard_path = required_path(&options.keyboard_path, "keyboard")?;
+    let mouse_path = required_path(&options.mouse_path, "mouse")?;
     let resolution = Resolution {
         width: options.width,
         height: options.height,
@@ -58,26 +57,12 @@ fn run(options: Options) -> Result<()> {
 
     let profile = ProfileV2::load_from_path(profile_path)?;
     if let Err(error) = profile.validate() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("invalid profile v2: {}", error.errors.join("; ")),
-        )
-        .into());
+        return Err(invalid_input(format!(
+            "invalid profile v2: {}",
+            error.errors.join("; ")
+        )));
     }
-
-    let mut daemon = DaemonSessionManager::new();
-    let session_id = SessionId::new("game-session")?;
-    let prepared = daemon.prepare_profile_v2(
-        session_id.clone(),
-        profile,
-        DisplayInfo::new(resolution),
-        !options.no_launch,
-    )?;
-    let plan = daemon
-        .session(&session_id)
-        .and_then(|session| session.control_plan())
-        .cloned()
-        .ok_or_else(|| io::Error::other("daemon prepared no runtime control plan"))?;
+    let plan = RuntimeControlPlan::from_profile_v2(&profile, resolution)?;
 
     let mut keyboard = EvdevKeyboard::open(keyboard_path)?;
     let mut mouse = EvdevMouse::open(mouse_path)?;
@@ -106,15 +91,6 @@ fn run(options: Options) -> Result<()> {
         if options.show_ui {
             waydroid.show_full_ui()?;
         }
-        if prepared.state != wroid_runtime::SessionState::Preparing {
-            return Err(io::Error::other("unexpected prepared session state").into());
-        }
-        if !options.no_launch {
-            println!(
-                "Profile package '{}' is prepared for launch; package launch remains owned by the future daemon lifecycle.",
-                plan.package_name
-            );
-        }
         if options.grab {
             keyboard.grab()?;
             mouse.grab()?;
@@ -126,7 +102,7 @@ fn run(options: Options) -> Result<()> {
         println!("Mouse: {} ({})", mouse.name(), mouse.path().display());
         println!("Android touchscreen: {}", event_node.display());
         println!("Controls: {}", plan.controls.len());
-        println!("Press Esc to stop. All active contacts are cancelled on shutdown.");
+        println!("Press Esc to stop. Active contacts are cancelled on shutdown.");
 
         let (sender, receiver) = mpsc::channel();
         spawn_keyboard_reader(keyboard, sender.clone());
@@ -142,12 +118,16 @@ fn run(options: Options) -> Result<()> {
 
     let stop_result = waydroid.stop();
     let bridge_result = bridge.cleanup();
-
     session_result?;
     stop_result?;
     bridge_result?;
     println!("Unified game session stopped cleanly.");
     Ok(())
+}
+
+fn required_path<'a>(path: &'a Option<PathBuf>, label: &str) -> Result<&'a Path> {
+    path.as_deref()
+        .ok_or_else(|| invalid_input(format!("missing {label} path")))
 }
 
 #[derive(Debug)]
@@ -225,7 +205,9 @@ impl UnifiedRuntime {
             .controls
             .iter()
             .filter_map(|control| match &control.action {
-                RuntimeControlAction::VirtualJoystick { joystick } => Some(joystick.contact_id().get()),
+                RuntimeControlAction::VirtualJoystick { joystick } => {
+                    Some(joystick.contact_id().get())
+                }
                 RuntimeControlAction::MouseAim { aim } => Some(aim.contact_id().get()),
                 RuntimeControlAction::Tap { .. } => None,
             })
@@ -254,8 +236,8 @@ impl UnifiedRuntime {
             KeyTransition::Released => false,
             KeyTransition::Repeated => return Ok(()),
         };
-        let controls = self.plan.controls.clone();
-        for control in controls {
+
+        for control in self.plan.controls.clone() {
             match (&control.input, &control.action) {
                 (InputV2::Key { key: binding_key }, RuntimeControlAction::Tap { point })
                     if pressed && key_eq(binding_key, key) =>
@@ -273,22 +255,10 @@ impl UnifiedRuntime {
                 ) => {
                     let direction = self.directions.entry(control.name.clone()).or_default();
                     let mut changed = false;
-                    if key_eq(up, key) {
-                        changed |= direction.up != pressed;
-                        direction.up = pressed;
-                    }
-                    if key_eq(left, key) {
-                        changed |= direction.left != pressed;
-                        direction.left = pressed;
-                    }
-                    if key_eq(down, key) {
-                        changed |= direction.down != pressed;
-                        direction.down = pressed;
-                    }
-                    if key_eq(right, key) {
-                        changed |= direction.right != pressed;
-                        direction.right = pressed;
-                    }
+                    changed |= update_direction(&mut direction.up, up, key, pressed);
+                    changed |= update_direction(&mut direction.left, left, key, pressed);
+                    changed |= update_direction(&mut direction.down, down, key, pressed);
+                    changed |= update_direction(&mut direction.right, right, key, pressed);
                     if changed {
                         joystick.apply(&mut self.engine, *direction)?;
                     }
@@ -300,13 +270,9 @@ impl UnifiedRuntime {
     }
 
     fn handle_mouse(&mut self, event: MouseEvent) -> Result<()> {
-        let controls = self.plan.controls.clone();
         match event {
-            MouseEvent::Motion(RelativeMouseMotion { dx, dy }) => {
-                if dx == 0 && dy == 0 {
-                    return Ok(());
-                }
-                for control in controls {
+            MouseEvent::Motion(RelativeMouseMotion { dx, dy }) if dx != 0 || dy != 0 => {
+                for control in self.plan.controls.clone() {
                     if let (InputV2::MouseMove, RuntimeControlAction::MouseAim { aim }) =
                         (&control.input, &control.action)
                     {
@@ -315,12 +281,11 @@ impl UnifiedRuntime {
                     }
                 }
             }
-            MouseEvent::Button(button_event) => {
-                if button_event.transition != MouseButtonTransition::Pressed {
-                    return Ok(());
-                }
+            MouseEvent::Button(button_event)
+                if button_event.transition == MouseButtonTransition::Pressed =>
+            {
                 let button = button_event.button.profile_name();
-                for control in controls {
+                for control in self.plan.controls.clone() {
                     if let (
                         InputV2::MouseButton { button: binding_button },
                         RuntimeControlAction::Tap { point },
@@ -332,7 +297,7 @@ impl UnifiedRuntime {
                     }
                 }
             }
-            MouseEvent::Wheel(_) => {}
+            MouseEvent::Motion(_) | MouseEvent::Button(_) | MouseEvent::Wheel(_) => {}
         }
         Ok(())
     }
@@ -362,6 +327,14 @@ impl UnifiedRuntime {
     }
 }
 
+fn update_direction(state: &mut bool, binding_key: &str, event_key: &str, pressed: bool) -> bool {
+    if !key_eq(binding_key, event_key) || *state == pressed {
+        return false;
+    }
+    *state = pressed;
+    true
+}
+
 fn key_eq(left: &str, right: &str) -> bool {
     left.trim().eq_ignore_ascii_case(right.trim())
 }
@@ -375,7 +348,6 @@ struct Options {
     height: u32,
     grab: bool,
     show_ui: bool,
-    no_launch: bool,
     cleanup: bool,
 }
 
@@ -390,7 +362,6 @@ impl Options {
             height: DEFAULT_HEIGHT,
             grab: true,
             show_ui: true,
-            no_launch: false,
             cleanup: false,
         };
         let mut args = args.into_iter();
@@ -400,7 +371,6 @@ impl Options {
                 "--cleanup" => options.cleanup = true,
                 "--no-grab" => options.grab = false,
                 "--no-ui" => options.show_ui = false,
-                "--no-launch" => options.no_launch = true,
                 "--width" => options.width = parse_next(&mut args, "--width")?,
                 "--height" => options.height = parse_next(&mut args, "--height")?,
                 value if value.starts_with("--") => {
@@ -446,7 +416,7 @@ fn invalid_input(message: impl Into<String>) -> Box<dyn Error + Send + Sync> {
 
 fn print_usage() {
     println!(
-        "Usage: wroid-waydroid-game-session <profile-v2.json> <keyboard-event-node> <mouse-event-node> [--width W] [--height H] [--no-grab] [--no-ui] [--no-launch]"
+        "Usage: wroid-waydroid-game-session <profile-v2.json> <keyboard-event-node> <mouse-event-node> [--width W] [--height H] [--no-grab] [--no-ui]"
     );
     println!(
         "Example: sudo ./target/release/wroid-waydroid-game-session profiles/examples/shooter-v2.json /dev/input/event7 /dev/input/event9 --width 1920 --height 1080"
