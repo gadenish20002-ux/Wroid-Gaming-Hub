@@ -43,13 +43,14 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - [x] Add runtime joystick dead-zone application for analog input.
 - [x] Add profile-to-runtime joystick geometry materialization.
 - [x] Add profile v2 runtime control plan materialization for taps and joysticks.
+- [x] Add profile v2 runtime control plan materialization for relative mouse aim.
 - [ ] Add schema migrations, layers, modifiers, and production daemon profile wiring.
 - [x] Add a persistent virtual joystick runtime state machine.
 - [x] Wire physical WASD input to the persistent joystick in a host smoke path.
 - [x] Wire physical WASD through the temporary Waydroid bridge into Android.
 - [x] Keep held WASD directions alive with periodic reaffirmation and hold diagnostics.
 - [ ] Connect profile-defined controls to the daemon-managed Waydroid session.
-- [ ] Implement relative mouse aim.
+- [ ] Wire profile-defined relative mouse aim through the daemon-managed session.
 - [ ] Add physical and virtual gamepad support.
 
 ## Phase 4: Desktop gaming hub
@@ -88,7 +89,7 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - No overlay editor.
 - No production daemon-managed global input capture.
 - The production bridge lifecycle and privilege boundary are not implemented yet.
-- Relative mouse capture exists as a host diagnostic path, but Android mouse aim is not wired yet.
+- Relative mouse capture and persistent Android mouse-aim primitives exist, and profile v2 mouse aim now materializes into daemon control plans, but the production daemon session does not execute it yet.
 - Profile v2 controls can be prepared in memory through `wroid session prepare-v2`, but are not wired into production daemon sessions or input injection yet.
 - No gamepad mapping.
 - No macro execution.
@@ -104,8 +105,8 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
    - Verify ten simultaneous contacts and deterministic cleanup.
 
 2. Integrate safe host input capture with the managed session.
-   - Reuse the completed evdev keyboard reader, relative mouse reader, WASD normalizer, live Android smoke path, hold reaffirmation loop, and runtime joystick dead zones.
-   - Convert normalized mouse motion into profile v2 `mouse_aim` touch frames.
+   - Reuse the completed evdev keyboard reader, relative mouse reader, WASD normalizer, live Android smoke path, hold reaffirmation loop, runtime joystick dead zones, and persistent mouse-aim primitive.
+   - Execute profile-materialized `mouse_aim` controls from normalized relative mouse motion.
    - Use profile-to-runtime joystick materialization when building session controls.
    - Preserve explicit user permissions and focus ownership.
    - Keep behavior transparent and avoid protection evasion.

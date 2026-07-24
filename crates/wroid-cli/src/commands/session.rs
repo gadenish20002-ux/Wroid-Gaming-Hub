@@ -38,15 +38,13 @@ pub(crate) fn prepare_v2(
 /// Prepare the session in an in-memory daemon and render a human-readable report.
 ///
 /// Kept separate from [`prepare_v2`] so tests can assert the rendered control
-/// plan and the unsupported-action failure path without touching the filesystem.
+/// plan and unsupported-action failure paths without touching the filesystem.
 fn prepare_v2_summary(
     profile: ProfileV2,
     resolution: Resolution,
     session_id: &str,
     launch_package: bool,
 ) -> Result<String> {
-    // Surface detailed validation messages before the daemon collapses them into
-    // a generic "N validation error(s)" summary.
     if let Err(error) = profile.validate() {
         anyhow::bail!("invalid profile v2:\n  - {}", error.errors.join("\n  - "));
     }
@@ -123,6 +121,16 @@ fn describe_action(action: &RuntimeControlAction) -> String {
             joystick.dead_zone(),
             joystick.contact_id().get(),
         ),
+        RuntimeControlAction::MouseAim { aim } => format!(
+            "mouse_aim origin=({},{}) region=({},{})-({},{}) contact={}",
+            aim.origin().x,
+            aim.origin().y,
+            aim.region().left,
+            aim.region().top,
+            aim.region().right,
+            aim.region().bottom,
+            aim.contact_id().get(),
+        ),
     }
 }
 
@@ -155,6 +163,19 @@ mod tests {
                     },
                 },
                 BindingV2 {
+                    name: "aim".to_owned(),
+                    input: InputV2::MouseMove,
+                    action: ActionV2::MouseAim {
+                        region: NormalizedRect {
+                            x: 0.35,
+                            y: 0.06,
+                            w: 0.60,
+                            h: 0.78,
+                        },
+                        sensitivity: 1.2,
+                    },
+                },
+                BindingV2 {
                     name: "fire".to_owned(),
                     input: InputV2::MouseButton {
                         button: "left".to_owned(),
@@ -184,10 +205,12 @@ mod tests {
         assert!(summary.contains("Package: com.example.shooter"));
         assert!(summary.contains("Launch package: true"));
         assert!(summary.contains("Resolution: 1920x1080"));
-        assert!(summary.contains("Controls (2):"));
-        // The joystick materializes its geometry against the surface resolution.
+        assert!(summary.contains("Controls (3):"));
         assert!(summary.contains(
             "movement [key_cluster:wasd] -> virtual_joystick center=(345,842) radius=97 dead_zone=22 contact=1"
+        ));
+        assert!(summary.contains(
+            "aim [mouse_move] -> mouse_aim origin=(1247,485) region=(672,65)-(1823,906) contact=2"
         ));
         assert!(summary.contains("fire [mouse_button:left] -> tap (1650,540)"));
     }
@@ -201,23 +224,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_mouse_aim_action_with_clear_error() {
+    fn rejects_unsupported_macro_action_with_clear_error() {
         let mut profile = supported_profile();
-        profile.bindings[0].action = ActionV2::MouseAim {
-            region: NormalizedRect {
-                x: 0.0,
-                y: 0.0,
-                w: 1.0,
-                h: 1.0,
-            },
-            sensitivity: 1.0,
+        profile.bindings[0].action = ActionV2::Macro {
+            steps: vec![ActionV2::Tap {
+                point: NormalizedPoint { x: 0.5, y: 0.5 },
+            }],
         };
 
         let error = prepare_v2_summary(profile, resolution(), "shooter", true).unwrap_err();
         let message = format!("{error:#}");
 
         assert!(
-            message.contains("unsupported runtime action kind: mouse_aim"),
+            message.contains("unsupported runtime action kind: macro"),
             "unexpected error message: {message}"
         );
         assert!(
