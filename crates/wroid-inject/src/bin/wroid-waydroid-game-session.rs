@@ -106,17 +106,23 @@ fn run(options: Options) -> Result<()> {
         println!("Mouse: {} ({})", mouse.name(), mouse.path().display());
         println!("Android touchscreen: {}", event_node.display());
         println!("Controls: {}", plan.controls.len());
+        if options.trace_input {
+            println!("Input tracing: enabled");
+        }
         println!("Press Esc to stop. Active contacts are cancelled on shutdown.");
 
         let (sender, receiver) = mpsc::channel();
         spawn_keyboard_reader(keyboard, sender.clone());
         spawn_mouse_reader(mouse, sender);
 
-        let mut runtime = UnifiedRuntime::new(plan, injector);
-        let loop_result = run_event_loop(&receiver, &mut runtime);
+        let mut runtime = UnifiedRuntime::new(plan, injector, options.trace_input);
+        let loop_result = run_event_loop(&receiver, &mut runtime, options.trace_input);
         let cleanup_result = runtime.stop();
-        loop_result?;
+        let exit = loop_result?;
         cleanup_result?;
+        match exit {
+            EventLoopExit::EscapeRequested => println!("Stop requested by Esc."),
+        }
         Ok(())
     })();
 
@@ -138,7 +144,15 @@ fn required_path<'a>(path: &'a Option<PathBuf>, label: &str) -> Result<&'a Path>
 enum HostEvent {
     Keyboard(HostKeyEvent),
     Mouse(MouseEvent),
-    ReaderFailed(String),
+    ReaderFailed {
+        reader: &'static str,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventLoopExit {
+    EscapeRequested,
 }
 
 fn spawn_keyboard_reader(mut keyboard: EvdevKeyboard, sender: Sender<HostEvent>) {
@@ -152,7 +166,10 @@ fn spawn_keyboard_reader(mut keyboard: EvdevKeyboard, sender: Sender<HostEvent>)
                 }
             }
             Err(error) => {
-                let _ = sender.send(HostEvent::ReaderFailed(error.to_string()));
+                let _ = sender.send(HostEvent::ReaderFailed {
+                    reader: "keyboard",
+                    message: error.to_string(),
+                });
                 return;
             }
         }
@@ -170,28 +187,55 @@ fn spawn_mouse_reader(mut mouse: EvdevMouse, sender: Sender<HostEvent>) {
                 }
             }
             Err(error) => {
-                let _ = sender.send(HostEvent::ReaderFailed(error.to_string()));
+                let _ = sender.send(HostEvent::ReaderFailed {
+                    reader: "mouse",
+                    message: error.to_string(),
+                });
                 return;
             }
         }
     });
 }
 
-fn run_event_loop(receiver: &Receiver<HostEvent>, runtime: &mut UnifiedRuntime) -> Result<()> {
+fn run_event_loop(
+    receiver: &Receiver<HostEvent>,
+    runtime: &mut UnifiedRuntime,
+    trace_input: bool,
+) -> Result<EventLoopExit> {
     loop {
         match receiver.recv_timeout(IDLE_POLL) {
             Ok(HostEvent::Keyboard(event)) => {
+                if trace_input {
+                    println!(
+                        "[trace] host keyboard key={} transition={:?}",
+                        event.key.profile_name(),
+                        event.transition
+                    );
+                }
                 if event.key.profile_name() == "esc" && event.transition == KeyTransition::Pressed {
-                    return Ok(());
+                    return Ok(EventLoopExit::EscapeRequested);
                 }
                 runtime.handle_keyboard(event)?;
             }
-            Ok(HostEvent::Mouse(event)) => runtime.handle_mouse(event)?,
-            Ok(HostEvent::ReaderFailed(message)) => {
-                return Err(io::Error::other(format!("input reader failed: {message}")).into());
+            Ok(HostEvent::Mouse(event)) => {
+                if trace_input {
+                    println!("[trace] host mouse {event:?}");
+                }
+                runtime.handle_mouse(event)?;
+            }
+            Ok(HostEvent::ReaderFailed { reader, message }) => {
+                return Err(io::Error::other(format!(
+                    "{reader} input reader failed: {message}"
+                ))
+                .into());
             }
             Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return Ok(()),
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::other(
+                    "all input readers disconnected unexpectedly while the game session was running",
+                )
+                .into());
+            }
         }
     }
 }
@@ -201,10 +245,11 @@ struct UnifiedRuntime {
     engine: TouchEngine<UinputTouchInjector>,
     directions: BTreeMap<String, DirectionalInput>,
     tap_contacts: BTreeMap<String, ContactId>,
+    trace_input: bool,
 }
 
 impl UnifiedRuntime {
-    fn new(plan: RuntimeControlPlan, injector: UinputTouchInjector) -> Self {
+    fn new(plan: RuntimeControlPlan, injector: UinputTouchInjector, trace_input: bool) -> Self {
         let mut next_contact = plan
             .controls
             .iter()
@@ -230,6 +275,7 @@ impl UnifiedRuntime {
             engine: TouchEngine::new(injector),
             directions: BTreeMap::new(),
             tap_contacts,
+            trace_input,
         }
     }
 
@@ -264,7 +310,16 @@ impl UnifiedRuntime {
                     changed |= update_direction(&mut direction.down, down, key, pressed);
                     changed |= update_direction(&mut direction.right, right, key, pressed);
                     if changed {
-                        joystick.apply(&mut self.engine, *direction)?;
+                        let submitted = joystick.apply(&mut self.engine, *direction)?;
+                        if self.trace_input {
+                            println!(
+                                "[trace] runtime joystick binding={} contact={} direction={direction:?} submitted={} position={:?}",
+                                control.name,
+                                joystick.contact_id().get(),
+                                submitted,
+                                self.engine.state().position(joystick.contact_id())
+                            );
+                        }
                     }
                 }
                 _ => {}
@@ -280,8 +335,18 @@ impl UnifiedRuntime {
                     if let (InputV2::MouseMove, RuntimeControlAction::MouseAim { aim }) =
                         (&control.input, &control.action)
                     {
-                        aim.begin(&mut self.engine)?;
-                        aim.move_by(&mut self.engine, MouseAimDelta::new(dx, dy))?;
+                        let began = aim.begin(&mut self.engine)?;
+                        let moved = aim.move_by(&mut self.engine, MouseAimDelta::new(dx, dy))?;
+                        if self.trace_input {
+                            println!(
+                                "[trace] runtime aim binding={} contact={} delta=({dx},{dy}) began={} moved={} position={:?}",
+                                control.name,
+                                aim.contact_id().get(),
+                                began,
+                                moved,
+                                self.engine.state().position(aim.contact_id())
+                            );
+                        }
                     }
                 }
             }
@@ -323,12 +388,27 @@ impl UnifiedRuntime {
             TouchPhase::Up,
             point,
         )))?;
+        if self.trace_input {
+            println!(
+                "[trace] runtime tap binding={binding} contact={} point=({},{}) submitted=down+up",
+                contact_id.get(),
+                point.x,
+                point.y
+            );
+        }
         Ok(())
     }
 
     fn stop(&mut self) -> Result<()> {
         self.directions.clear();
-        self.engine.cancel_all()?;
+        let active_before = self.engine.state().active_contact_count();
+        let cancelled = self.engine.cancel_all()?;
+        if self.trace_input {
+            println!(
+                "[trace] runtime cleanup active_before={} cancel_frame_submitted={cancelled}",
+                active_before
+            );
+        }
         Ok(())
     }
 }
@@ -354,6 +434,7 @@ struct Options {
     height: u32,
     grab: bool,
     show_ui: bool,
+    trace_input: bool,
     cleanup: bool,
 }
 
@@ -368,6 +449,7 @@ impl Options {
             height: DEFAULT_HEIGHT,
             grab: true,
             show_ui: true,
+            trace_input: false,
             cleanup: false,
         };
         let mut args = args.into_iter();
@@ -377,6 +459,7 @@ impl Options {
                 "--cleanup" => options.cleanup = true,
                 "--no-grab" => options.grab = false,
                 "--no-ui" => options.show_ui = false,
+                "--trace-input" => options.trace_input = true,
                 "--width" => options.width = parse_next(&mut args, "--width")?,
                 "--height" => options.height = parse_next(&mut args, "--height")?,
                 value if value.starts_with("--") => {
@@ -422,10 +505,44 @@ fn invalid_input(message: impl Into<String>) -> Box<dyn Error + Send + Sync> {
 
 fn print_usage() {
     println!(
-        "Usage: wroid-waydroid-game-session <profile-v2.json> <keyboard-event-node> <mouse-event-node> [--width W] [--height H] [--no-grab] [--no-ui]"
+        "Usage: wroid-waydroid-game-session <profile-v2.json> <keyboard-event-node> <mouse-event-node> [--width W] [--height H] [--no-grab] [--no-ui] [--trace-input]"
     );
     println!(
-        "Example: sudo ./target/release/wroid-waydroid-game-session profiles/examples/shooter-v2.json /dev/input/event7 /dev/input/event9 --width 1920 --height 1080"
+        "Example: sudo ./target/release/wroid-waydroid-game-session profiles/examples/shooter-v2.json /dev/input/event7 /dev/input/event9 --width 1920 --height 1080 --trace-input"
     );
     println!("Recovery: sudo ./target/release/wroid-waydroid-game-session --cleanup");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_trace_input_flag() {
+        let options = Options::parse([
+            "profile.json".to_owned(),
+            "/dev/input/event7".to_owned(),
+            "/dev/input/event3".to_owned(),
+            "--trace-input".to_owned(),
+            "--no-grab".to_owned(),
+        ])
+        .unwrap()
+        .unwrap();
+
+        assert!(options.trace_input);
+        assert!(!options.grab);
+        assert_eq!(options.profile_path, Some(PathBuf::from("profile.json")));
+    }
+
+    #[test]
+    fn cleanup_does_not_require_positional_paths() {
+        let options = Options::parse(["--cleanup".to_owned()])
+            .unwrap()
+            .unwrap();
+
+        assert!(options.cleanup);
+        assert!(options.profile_path.is_none());
+        assert!(options.keyboard_path.is_none());
+        assert!(options.mouse_path.is_none());
+    }
 }
