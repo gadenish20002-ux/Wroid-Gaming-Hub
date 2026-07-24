@@ -1,6 +1,6 @@
 use std::ffi::OsString;
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -9,9 +9,12 @@ use std::thread::sleep;
 use std::time::Duration;
 
 pub const WROID_TOUCHSCREEN_NAME: &str = "Wroid Gaming Touchscreen";
+pub const DEFAULT_WAYDROID_LOG: &str = "/var/lib/waydroid/waydroid.log";
 
 const STATUS_ATTEMPTS: usize = 60;
+const USER_READY_ATTEMPTS: usize = 240;
 const STATUS_INTERVAL: Duration = Duration::from_millis(500);
+const DEFAULT_ANDROID_USER_ID: u32 = 0;
 
 #[derive(Debug, Clone)]
 pub struct DesktopUser {
@@ -118,6 +121,7 @@ pub struct DesktopWaydroidSession {
     child: Child,
     user: DesktopUser,
     active: bool,
+    log_offset: u64,
 }
 
 impl DesktopWaydroidSession {
@@ -131,6 +135,7 @@ impl DesktopWaydroidSession {
             user.name(),
             user.wayland_display().to_string_lossy()
         );
+        let log_offset = current_log_len(Path::new(DEFAULT_WAYDROID_LOG))?;
         let child = user
             .command(&["session", "start"])
             .stdin(Stdio::null())
@@ -141,6 +146,7 @@ impl DesktopWaydroidSession {
             child,
             user,
             active: true,
+            log_offset,
         };
 
         if let Err(error) = session.wait_until_running() {
@@ -154,8 +160,43 @@ impl DesktopWaydroidSession {
         &self.user
     }
 
-    pub fn show_full_ui(&self) -> io::Result<()> {
+    pub fn show_full_ui(&mut self) -> io::Result<()> {
+        self.wait_until_android_user_ready(DEFAULT_ANDROID_USER_ID)?;
         self.user.run(&["show-full-ui"])
+    }
+
+    pub fn wait_until_android_user_ready(&mut self, user_id: u32) -> io::Result<()> {
+        let marker = android_user_ready_marker(user_id);
+        let log_path = Path::new(DEFAULT_WAYDROID_LOG);
+        let mut observed = String::new();
+
+        for _ in 0..USER_READY_ATTEMPTS {
+            if let Some(status) = self.child.try_wait()? {
+                return Err(io::Error::other(format!(
+                    "Waydroid user session exited before Android user {user_id} became ready: {status}"
+                )));
+            }
+
+            let delta = read_log_delta(log_path, &mut self.log_offset)?;
+            if !delta.is_empty() {
+                observed.push_str(&delta);
+                if observed.contains(&marker) {
+                    println!(
+                        "Android with user {user_id} is ready (readiness confirmed by Waydroid)."
+                    );
+                    return Ok(());
+                }
+            }
+            sleep(STATUS_INTERVAL);
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!(
+                "Waydroid did not report Android user {user_id} readiness before UI launch{}",
+                readiness_log_context(&observed)
+            ),
+        ))
     }
 
     pub fn stop(&mut self) -> io::Result<()> {
@@ -325,6 +366,48 @@ pub fn stop_child(child: &mut Child) -> io::Result<()> {
     Ok(())
 }
 
+fn current_log_len(path: &Path) -> io::Result<u64> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error),
+    }
+}
+
+fn read_log_delta(path: &Path, offset: &mut u64) -> io::Result<String> {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(error) => return Err(error),
+    };
+    let len = file.metadata()?.len();
+    if len < *offset {
+        *offset = 0;
+    }
+    file.seek(SeekFrom::Start(*offset))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    *offset = file.stream_position()?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn android_user_ready_marker(user_id: u32) -> String {
+    format!("Android with user {user_id} is ready")
+}
+
+fn readiness_log_context(observed: &str) -> String {
+    if observed.is_empty() {
+        return String::new();
+    }
+    let start = observed
+        .char_indices()
+        .rev()
+        .nth(2047)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    format!("\nRecent Waydroid log output:\n{}", &observed[start..])
+}
+
 fn waydroid_status() -> io::Result<String> {
     let output = waydroid_command(&["status"]).output()?;
     Ok(combined_output(&output))
@@ -436,6 +519,8 @@ fn detect_wayland_display(runtime_dir: &Path) -> io::Result<OsString> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
 
     #[test]
@@ -484,5 +569,35 @@ mod tests {
     #[test]
     fn allows_stopped_container_before_native_setup() {
         ensure_container_stopped_status("Session:\tSTOPPED\nContainer:\tSTOPPED\n").unwrap();
+    }
+
+    #[test]
+    fn readiness_cursor_ignores_stale_log_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("waydroid.log");
+        fs::write(&path, "Android with user 0 is ready\n").unwrap();
+        let mut offset = current_log_len(&path).unwrap();
+
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "session starting").unwrap();
+        let first_delta = read_log_delta(&path, &mut offset).unwrap();
+        assert!(!first_delta.contains(&android_user_ready_marker(0)));
+
+        writeln!(file, "Android with user 0 is ready").unwrap();
+        let second_delta = read_log_delta(&path, &mut offset).unwrap();
+        assert!(second_delta.contains(&android_user_ready_marker(0)));
+    }
+
+    #[test]
+    fn readiness_log_reader_recovers_after_truncation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("waydroid.log");
+        fs::write(&path, "older log contents that are deliberately long\n").unwrap();
+        let mut offset = current_log_len(&path).unwrap();
+
+        fs::write(&path, "Android with user 0 is ready\n").unwrap();
+        let delta = read_log_delta(&path, &mut offset).unwrap();
+
+        assert!(delta.contains(&android_user_ready_marker(0)));
     }
 }
