@@ -181,7 +181,9 @@ impl DesktopWaydroidSession {
             if !delta.is_empty() {
                 observed.push_str(&delta);
                 if observed.contains(&marker) {
-                    println!("Android with user {user_id} is ready (readiness confirmed by Waydroid).");
+                    println!(
+                        "Android with user {user_id} is ready (readiness confirmed by Waydroid)."
+                    );
                     return Ok(());
                 }
             }
