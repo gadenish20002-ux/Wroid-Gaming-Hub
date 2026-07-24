@@ -224,10 +224,9 @@ fn run_event_loop(
                 runtime.handle_mouse(event)?;
             }
             Ok(HostEvent::ReaderFailed { reader, message }) => {
-                return Err(io::Error::other(format!(
-                    "{reader} input reader failed: {message}"
-                ))
-                .into());
+                return Err(
+                    io::Error::other(format!("{reader} input reader failed: {message}")).into(),
+                );
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
@@ -536,9 +535,7 @@ mod tests {
 
     #[test]
     fn cleanup_does_not_require_positional_paths() {
-        let options = Options::parse(["--cleanup".to_owned()])
-            .unwrap()
-            .unwrap();
+        let options = Options::parse(["--cleanup".to_owned()]).unwrap().unwrap();
 
         assert!(options.cleanup);
         assert!(options.profile_path.is_none());
