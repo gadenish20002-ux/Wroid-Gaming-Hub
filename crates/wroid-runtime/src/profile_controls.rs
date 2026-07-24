@@ -261,7 +261,10 @@ mod tests {
             }
         );
         assert_eq!(aim.origin(), Point { x: 1247, y: 485 });
-        assert_eq!(aim.sensitivity(), MouseAimSensitivity::new(1200, 1000).unwrap());
+        assert_eq!(
+            aim.sensitivity(),
+            MouseAimSensitivity::new(1200, 1000).unwrap()
+        );
 
         let fire = plan.control("fire").unwrap();
         assert_eq!(
