@@ -8,13 +8,13 @@ use std::time::Duration;
 
 use wroid_core::profile_v2::{InputV2, ProfileV2};
 use wroid_core::{Point, Resolution};
-use wroid_input::mouse::{EvdevMouse, MouseButtonTransition, MouseEvent, RelativeMouseMotion};
-use wroid_input::{EvdevKeyboard, HostKeyEvent, KeyTransition};
 use wroid_inject::{
     ensure_container_stopped, ensure_root, remove_default_bridge, wait_for_android_boot_completed,
     wait_for_android_input_device, DesktopUser, DesktopWaydroidSession, DeviceConfig,
     InputDeviceNode, InstalledWaydroidBridge, UinputTouchInjector, WROID_TOUCHSCREEN_NAME,
 };
+use wroid_input::mouse::{EvdevMouse, MouseButtonTransition, MouseEvent, RelativeMouseMotion};
+use wroid_input::{EvdevKeyboard, HostKeyEvent, KeyTransition};
 use wroid_runtime::{
     ContactId, DirectionalInput, MouseAimDelta, RuntimeControlAction, RuntimeControlPlan,
     TouchEngine, TouchEvent, TouchFrame, TouchPhase,
@@ -98,7 +98,11 @@ fn run(options: Options) -> Result<()> {
 
         println!("Unified game session is live.");
         println!("Profile: {} ({})", plan.profile_name, plan.package_name);
-        println!("Keyboard: {} ({})", keyboard.name(), keyboard.path().display());
+        println!(
+            "Keyboard: {} ({})",
+            keyboard.name(),
+            keyboard.path().display()
+        );
         println!("Mouse: {} ({})", mouse.name(), mouse.path().display());
         println!("Android touchscreen: {}", event_node.display());
         println!("Controls: {}", plan.controls.len());
@@ -287,7 +291,9 @@ impl UnifiedRuntime {
                 let button = button_event.button.profile_name();
                 for control in self.plan.controls.clone() {
                     if let (
-                        InputV2::MouseButton { button: binding_button },
+                        InputV2::MouseButton {
+                            button: binding_button,
+                        },
                         RuntimeControlAction::Tap { point },
                     ) = (&control.input, &control.action)
                     {
