@@ -1,11 +1,18 @@
+use std::io::{self, Read};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
 const WAYDROID_SHELL_ROOT_ERROR: &str = "Action \"shell\" needs root access";
 const WAYDROID_SHELL_ROOT_MESSAGE: &str =
     "Waydroid shell backend requires root privileges on this system. Try: sudo target/debug/wroid ...";
+const APP_LIST_TIMEOUT: Duration = Duration::from_secs(2);
+const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const COMMAND_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AndroidActivity {
@@ -100,9 +107,13 @@ impl Waydroid {
     }
 
     pub fn app_list_packages(&self) -> Result<Vec<String>> {
-        let output = Command::new("waydroid")
-            .args(app_list_args())
-            .output()
+        self.app_list_packages_with_timeout(APP_LIST_TIMEOUT)
+    }
+
+    pub fn app_list_packages_with_timeout(&self, timeout: Duration) -> Result<Vec<String>> {
+        let mut command = Command::new("waydroid");
+        command.args(app_list_args());
+        let output = output_with_timeout(&mut command, timeout.min(APP_LIST_TIMEOUT))
             .context("failed to run waydroid app list")?;
         ensure_success("waydroid app list", &output)?;
 
@@ -115,6 +126,14 @@ impl Waydroid {
             .output()
             .context("failed to run waydroid app launch")?;
         ensure_success("waydroid app launch", &output)
+    }
+
+    pub fn app_open_uri(&self, action: &str, uri: &str) -> Result<()> {
+        let output = Command::new("waydroid")
+            .args(app_intent_args(action, uri))
+            .output()
+            .context("failed to run waydroid app intent")?;
+        ensure_success("waydroid app intent", &output)
     }
 
     pub fn app_launch_package_as_user(
@@ -176,6 +195,113 @@ impl Waydroid {
     }
 }
 
+fn output_with_timeout(command: &mut Command, timeout: Duration) -> Result<Output> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    let mut child = command.spawn().context("failed to spawn command")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("command stdout is unavailable")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("command stderr is unavailable")?;
+    let stdout_reader = thread::spawn(move || read_output(stdout));
+    let stderr_reader = thread::spawn(move || read_output(stderr));
+    let started = Instant::now();
+
+    let status = loop {
+        if stdout_reader.is_finished() && stderr_reader.is_finished() {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => {}
+                Err(error) => {
+                    kill_process_group(&mut child);
+                    let _ = stdout_reader.join();
+                    let _ = stderr_reader.join();
+                    return Err(error).context("failed to poll command");
+                }
+            }
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            kill_process_group(&mut child);
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            bail!(
+                "command timed out after {:.2} seconds",
+                timeout.as_secs_f64()
+            );
+        }
+        thread::sleep(COMMAND_POLL_INTERVAL.min(timeout - elapsed));
+    };
+
+    let stdout = join_output_reader(stdout_reader, "stdout")?;
+    let stderr = join_output_reader(stderr_reader, "stderr")?;
+    if stdout.exceeded_limit || stderr.exceeded_limit {
+        bail!("command output exceeded the 4 MiB capture limit");
+    }
+    Ok(Output {
+        status,
+        stdout: stdout.bytes,
+        stderr: stderr.bytes,
+    })
+}
+
+#[derive(Debug)]
+struct CapturedOutput {
+    bytes: Vec<u8>,
+    exceeded_limit: bool,
+}
+
+fn read_output(mut stream: impl Read) -> io::Result<CapturedOutput> {
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    let mut exceeded_limit = false;
+    loop {
+        let count = stream.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        let remaining = COMMAND_OUTPUT_LIMIT.saturating_sub(output.len());
+        let retained = remaining.min(count);
+        output.extend_from_slice(&buffer[..retained]);
+        exceeded_limit |= retained < count;
+    }
+    Ok(CapturedOutput {
+        bytes: output,
+        exceeded_limit,
+    })
+}
+
+fn join_output_reader(
+    reader: thread::JoinHandle<io::Result<CapturedOutput>>,
+    label: &str,
+) -> Result<CapturedOutput> {
+    reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("command {label} reader panicked"))?
+        .with_context(|| format!("failed to read command {label}"))
+}
+
+fn kill_process_group(child: &mut std::process::Child) {
+    if let Ok(pid) = i32::try_from(child.id()) {
+        // SAFETY: the child was spawned into a new process group whose ID is
+        // its owned PID. A negative PID targets only that group.
+        let result = unsafe { libc::kill(-pid, libc::SIGKILL) };
+        if result != 0 {
+            let _ = child.kill();
+        }
+    } else {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
 pub fn is_available() -> bool {
     Waydroid.is_available()
 }
@@ -208,8 +334,16 @@ pub fn app_list_packages() -> Result<Vec<String>> {
     Waydroid.app_list_packages()
 }
 
+pub fn app_list_packages_with_timeout(timeout: Duration) -> Result<Vec<String>> {
+    Waydroid.app_list_packages_with_timeout(timeout)
+}
+
 pub fn app_launch_package(package_name: &str) -> Result<()> {
     Waydroid.app_launch_package(package_name)
+}
+
+pub fn app_open_uri(action: &str, uri: &str) -> Result<()> {
+    Waydroid.app_open_uri(action, uri)
 }
 
 pub fn app_launch_package_as_user(
@@ -282,6 +416,10 @@ fn app_list_args() -> [&'static str; 2] {
 
 fn app_launch_args(package_name: &str) -> [&str; 3] {
     ["app", "launch", package_name]
+}
+
+fn app_intent_args<'a>(action: &'a str, uri: &'a str) -> [&'a str; 4] {
+    ["app", "intent", action, uri]
 }
 
 fn app_launch_as_user_args(
@@ -407,6 +545,53 @@ fn map_waydroid_shell_error(command: &str, stdout: &str, stderr: &str) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn command_timeout_bounds_a_hung_process() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30"]);
+        let started = Instant::now();
+
+        let error = output_with_timeout(&mut command, Duration::from_millis(50)).unwrap_err();
+
+        assert!(error.to_string().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn command_timeout_bounds_descendant_held_output_pipes() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30 &"]);
+        let started = Instant::now();
+
+        let error = output_with_timeout(&mut command, Duration::from_millis(50)).unwrap_err();
+
+        assert!(error.to_string().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn command_capture_preserves_fast_stdout_stderr_and_status() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf out; printf err >&2; exit 7"]);
+
+        let output = output_with_timeout(&mut command, Duration::from_secs(1)).unwrap();
+
+        assert_eq!(output.status.code(), Some(7));
+        assert_eq!(output.stdout, b"out");
+        assert_eq!(output.stderr, b"err");
+    }
+
+    #[test]
+    fn command_capture_rejects_output_over_four_mibibytes() {
+        let mut command = Command::new("head");
+        command.args(["-c", "4194305", "/dev/zero"]);
+
+        let error = output_with_timeout(&mut command, Duration::from_secs(2)).unwrap_err();
+
+        assert!(error.to_string().contains("4 MiB capture limit"));
+    }
 
     #[test]
     fn maps_waydroid_shell_root_error_to_actionable_message() {
@@ -518,6 +703,22 @@ com.example.raw
         assert_eq!(
             app_launch_args("com.example.game"),
             ["app", "launch", "com.example.game"]
+        );
+    }
+
+    #[test]
+    fn app_uri_uses_waydroid_intent_args_without_a_shell() {
+        assert_eq!(
+            app_intent_args(
+                "android.intent.action.VIEW",
+                "market://details?id=com.example.game"
+            ),
+            [
+                "app",
+                "intent",
+                "android.intent.action.VIEW",
+                "market://details?id=com.example.game"
+            ]
         );
     }
 
