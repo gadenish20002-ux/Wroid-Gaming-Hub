@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Wroid Controls Studio</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="boot-screen" id="bootScreen">
+      <div class="boot-mark">W</div>
+      <div class="boot-copy">
+        <span>WROID CONTROL SYSTEM</span>
+        <strong>Loading profile map…</strong>
+      </div>
+    </div>
+
+    <div class="app-shell" id="appShell" hidden>
+      <header class="topbar">
+        <div class="brand-lockup">
+          <div class="brand-mark" aria-hidden="true">
+            <span>W</span>
+          </div>
+          <div>
+            <p class="eyebrow">Wroid Gaming Hub</p>
+            <h1>Controls Studio <sup>V2</sup></h1>
+          </div>
+        </div>
+        <div class="session-strip">
+          <span class="pulse-dot"></span>
+          <span>LOCAL SESSION</span>
+          <span class="session-divider"></span>
+          <span id="saveState">SYNCED</span>
+        </div>
+        <div class="top-actions">
+          <button class="button button-ghost" id="restoreButton" type="button" title="Load the profile state from before the latest save" disabled>Previous save</button>
+          <button class="button button-ghost" id="undoButton" type="button" title="Undo (Ctrl+Z)">Undo</button>
+          <button class="button button-ghost" id="redoButton" type="button" title="Redo (Ctrl+Shift+Z)">Redo</button>
+          <button class="button button-primary" id="saveButton" type="button">
+            <span>Save profile</span>
+            <kbd>Ctrl S</kbd>
+          </button>
+        </div>
+      </header>
+
+      <aside class="library-panel panel">
+        <section class="profile-identity">
+          <p class="section-index">01 / PROFILE</p>
+          <label class="field-label" for="profileName">Display name</label>
+          <input class="text-input title-input" id="profileName" autocomplete="off">
+          <label class="field-label" for="packageName">Android package</label>
+          <input class="text-input mono-input" id="packageName" autocomplete="off" spellcheck="false">
+          <div class="field-pair">
+            <div>
+              <label class="field-label" for="orientation">Orientation</label>
+              <select class="select-input" id="orientation">
+                <option value="landscape">Landscape</option>
+                <option value="portrait">Portrait</option>
+                <option value="any">Any</option>
+              </select>
+            </div>
+            <div>
+              <span class="field-label">Schema</span>
+              <div class="readout">PROFILE / 02</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="binding-library">
+          <div class="section-heading">
+            <div>
+              <p class="section-index">02 / LAYERS</p>
+              <h2>Control map</h2>
+            </div>
+            <span class="count-chip" id="bindingCount">0</span>
+          </div>
+          <div class="search-wrap">
+            <span aria-hidden="true">⌕</span>
+            <input id="bindingSearch" type="search" placeholder="Filter bindings…" autocomplete="off">
+          </div>
+          <div class="binding-list" id="bindingList"></div>
+        </section>
+
+        <section class="add-controls">
+          <p class="section-index">03 / ADD CONTROL</p>
+          <div class="add-grid">
+            <button class="add-control" type="button" data-add="tap">
+              <span class="add-icon tap-icon"></span>
+              <span><strong>Tap</strong><small>Key or mouse</small></span>
+            </button>
+            <button class="add-control" type="button" data-add="hold">
+              <span class="add-icon hold-icon"></span>
+              <span><strong>Hold</strong><small>Automatic fire</small></span>
+            </button>
+            <button class="add-control" type="button" data-add="virtual_joystick">
+              <span class="add-icon stick-icon"></span>
+              <span><strong>Joystick</strong><small>4-key cluster</small></span>
+            </button>
+            <button class="add-control" type="button" data-add="mouse_aim">
+              <span class="add-icon aim-icon"></span>
+              <span><strong>Mouse aim</strong><small>Relative camera</small></span>
+            </button>
+          </div>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <div class="workspace-toolbar">
+          <div class="viewport-label">
+            <span class="live-tag">LIVE MAP</span>
+            <span id="viewportReadout">1920 × 1080 / LANDSCAPE</span>
+          </div>
+          <div class="toolbar-actions">
+            <input id="screenshotInput" type="file" accept="image/*" hidden>
+            <span class="background-state" id="backgroundState">NO BACKGROUND</span>
+            <button class="tool-button capture-button" id="captureButton" type="button">
+              <span>◉</span> Live align
+            </button>
+            <button class="tool-button" id="screenshotButton" type="button">
+              <span>▧</span> Import image
+            </button>
+            <button class="tool-button remove-background" id="clearBackgroundButton" type="button" hidden>
+              <span>×</span> Clear
+            </button>
+            <button class="tool-button test-button" id="testButton" type="button" aria-pressed="false">
+              <span>⌁</span> Test inputs
+            </button>
+            <button class="tool-button is-active" id="gridButton" type="button" aria-pressed="true">
+              <span>⌗</span> Snap 0.5%
+            </button>
+            <button class="tool-button is-active" id="labelsButton" type="button" aria-pressed="true">
+              <span>Aa</span> Labels
+            </button>
+          </div>
+        </div>
+
+        <section class="calibration-dock" id="calibrationDock" aria-label="Live window calibration" hidden>
+          <div class="calibration-source">
+            <span class="calibration-live-dot"></span>
+            <span><small>LIVE WINDOW</small><strong id="calibrationSource">Waiting for source</strong></span>
+          </div>
+          <label class="calibration-control">
+            <span>ZOOM <output id="calibrationZoomValue">100%</output></span>
+            <input id="calibrationZoom" type="range" min="100" max="150" step="1" value="100">
+          </label>
+          <label class="calibration-control">
+            <span>HORIZONTAL <output id="calibrationXValue">0</output></span>
+            <input id="calibrationX" type="range" min="-100" max="100" step="1" value="0">
+          </label>
+          <label class="calibration-control">
+            <span>VERTICAL <output id="calibrationYValue">0</output></span>
+            <input id="calibrationY" type="range" min="-100" max="100" step="1" value="0">
+          </label>
+          <div class="calibration-actions">
+            <button class="tool-button" id="calibrationResetButton" type="button">Reset</button>
+            <button class="tool-button calibration-save" id="calibrationSaveButton" type="button">
+              <span>▣</span> Save aligned frame
+            </button>
+            <button class="tool-button calibration-stop" id="calibrationStopButton" type="button">End live</button>
+          </div>
+        </section>
+
+        <div class="stage-zone">
+          <div class="stage-frame">
+            <div class="corner corner-tl"></div>
+            <div class="corner corner-tr"></div>
+            <div class="corner corner-bl"></div>
+            <div class="corner corner-br"></div>
+            <div class="viewport is-grid" id="viewport">
+              <img id="screenshot" alt="" hidden>
+              <canvas id="liveCalibrationCanvas" aria-label="Live Waydroid window calibration preview" hidden></canvas>
+              <div class="empty-surface" id="emptySurface">
+                <div class="surface-orbit"></div>
+                <div class="surface-copy">
+                  <span>ANDROID SURFACE</span>
+                  <strong>Capture the Waydroid window or drop a screenshot</strong>
+                  <small>The calibration image is stored locally beside this profile.</small>
+                </div>
+              </div>
+              <div class="control-layer" id="controlLayer"></div>
+              <div class="input-test-hud" id="inputTestHud" hidden aria-live="polite">
+                <span>LOCAL INPUT PREVIEW</span>
+                <strong id="inputTestReadout">Press a mapped key or mouse button</strong>
+                <small id="inputTestMatches">No Android events are sent in this mode.</small>
+              </div>
+              <div class="surface-axis axis-x"><span>X</span></div>
+              <div class="surface-axis axis-y"><span>Y</span></div>
+            </div>
+          </div>
+          <div class="stage-footer">
+            <span><i class="legend-dot tap-dot"></i> Tap</span>
+            <span><i class="legend-dot hold-dot"></i> Hold</span>
+            <span><i class="legend-dot stick-dot"></i> Virtual joystick</span>
+            <span><i class="legend-dot aim-dot"></i> Mouse aim</span>
+            <span class="coordinate-readout" id="cursorReadout">X ——— / Y ———</span>
+          </div>
+        </div>
+      </main>
+
+      <aside class="inspector-panel panel">
+        <div class="section-heading inspector-heading">
+          <div>
+            <p class="section-index">04 / INSPECTOR</p>
+            <h2>Binding detail</h2>
+          </div>
+          <button class="icon-button danger" id="deleteButton" type="button" title="Delete selected control">×</button>
+        </div>
+        <div id="inspectorBody" class="inspector-body"></div>
+        <div class="inspector-empty" id="inspectorEmpty">
+          <div class="empty-reticle"></div>
+          <strong>Select a control</strong>
+          <span>Pick a layer or click a marker on the Android surface.</span>
+        </div>
+        <div class="inspector-footer">
+          <div class="session-target">
+            <div class="session-target-heading">
+              <span>SESSION TARGET</span>
+              <small>ANDROID RENDER SIZE</small>
+            </div>
+            <div class="resolution-switch" id="resolutionSwitch" role="radiogroup" aria-label="Live test render resolution">
+              <button type="button" role="radio" aria-checked="false" data-resolution="1280x720">720</button>
+              <button type="button" role="radio" aria-checked="true" data-resolution="1600x900">900</button>
+              <button type="button" role="radio" aria-checked="false" data-resolution="1920x1080">1080</button>
+            </div>
+          </div>
+          <button class="button button-live wide" id="liveTestButton" type="button" title="During live play, F12 releases or reacquires input; Ctrl+Esc stops the session.">
+            <span class="live-test-mark">▶</span>
+            Run map in Waydroid
+          </button>
+          <button class="button button-ghost wide" id="duplicateButton" type="button">Duplicate binding</button>
+          <button class="button button-close wide" id="closeButton" type="button">Save &amp; close studio</button>
+        </div>
+      </aside>
+
+      <footer class="statusbar">
+        <div id="validationState"><span class="status-led ok"></span> Profile valid</div>
+        <div><span>GRID</span> 0.005</div>
+        <div><span>COORDS</span> NORMALIZED</div>
+        <div class="status-spacer"></div>
+        <div id="selectedStatus"><span>SELECTED</span> NONE</div>
+      </footer>
+    </div>
+
+    <div class="toast-stack" id="toastStack" aria-live="polite"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>

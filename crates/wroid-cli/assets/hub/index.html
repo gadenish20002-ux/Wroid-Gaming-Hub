@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Wroid Gaming Hub</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="grain" aria-hidden="true"></div>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="#library" aria-label="Wroid home">
+          <span class="brand-mark"><i></i><i></i><i></i></span>
+          <span>
+            <strong>WROID</strong>
+            <small>GAMING HUB</small>
+          </span>
+        </a>
+
+        <nav class="nav" aria-label="Main navigation">
+          <button class="nav-item active" data-scroll="library">Library</button>
+          <button class="nav-item" data-scroll="systems">System</button>
+          <button class="nav-item" data-scroll="controls">Controls</button>
+        </nav>
+
+        <div class="top-actions">
+          <div class="runtime-pill" id="runtime-pill">
+            <span class="pulse"></span>
+            <span id="runtime-label">Scanning Waydroid</span>
+          </div>
+          <button class="icon-button" id="refresh-button" aria-label="Refresh system status" title="Refresh">↻</button>
+          <button class="quiet-button" id="store-button">Play Store</button>
+          <button class="icon-button" id="close-button" aria-label="Close Wroid Hub" title="Close">×</button>
+        </div>
+      </header>
+
+      <main>
+        <section class="hero game-custom" id="hero">
+          <div class="hero-grid" aria-hidden="true"></div>
+          <div class="hero-copy">
+            <div class="eyebrow">
+              <span>READY PROFILE</span>
+              <span class="index" id="hero-index">01 / 04</span>
+            </div>
+            <h1 id="hero-name">Loading library</h1>
+            <p id="hero-description">Preparing your Waydroid game deck…</p>
+            <div class="hero-tags">
+              <span id="hero-install-state">Checking package</span>
+              <span id="hero-binding-count">— controls</span>
+              <span id="hero-controls-state">Checking control map</span>
+              <span>Direct Waydroid render</span>
+              <span id="hero-session-state" hidden>Last session —</span>
+            </div>
+            <div class="hero-actions">
+              <button class="launch-button" id="launch-button">
+                <span class="launch-icon" id="launch-icon">▶</span>
+                <span>
+                  <small id="launch-eyebrow">START SESSION</small>
+                  <strong id="launch-label">Launch game</strong>
+                </span>
+              </button>
+              <button class="edit-button" id="edit-button">
+                <span class="crosshair">⌖</span>
+                Edit controls
+              </button>
+            </div>
+            <p class="launch-note" id="launch-note">Gameplay stays unprivileged; the verified helper manages only the temporary input bridge.</p>
+            <details class="session-report" id="session-report" hidden>
+              <summary>
+                <span>LAST SESSION</span>
+                <strong id="session-report-title">Session report</strong>
+                <time id="session-report-time"></time>
+                <i aria-hidden="true">＋</i>
+              </summary>
+              <div class="session-metrics" id="session-metrics" hidden>
+                <div>
+                  <span>INPUT P95</span>
+                  <strong id="session-input-p95">—</strong>
+                  <small id="session-input-samples">NO SAMPLES</small>
+                </div>
+                <div>
+                  <span>KERNEL P95</span>
+                  <strong id="session-kernel-p95">—</strong>
+                  <small id="session-kernel-samples">NO SAMPLES</small>
+                </div>
+                <div>
+                  <span>TOUCH FRAMES</span>
+                  <strong id="session-touch-frames">—</strong>
+                  <small>SUBMITTED</small>
+                </div>
+                <div>
+                  <span>PEAK CONTACTS</span>
+                  <strong id="session-peak-contacts">—</strong>
+                  <small>SIMULTANEOUS</small>
+                </div>
+              </div>
+              <pre id="session-report-detail"></pre>
+            </details>
+          </div>
+
+          <div class="hero-art" aria-hidden="true">
+            <span class="game-code" id="game-code">WR/00</span>
+            <div class="scan-disc">
+              <div class="disc-ring ring-a"></div>
+              <div class="disc-ring ring-b"></div>
+              <div class="disc-core">
+                <span id="hero-monogram">W</span>
+              </div>
+            </div>
+            <div class="trajectory trajectory-a"></div>
+            <div class="trajectory trajectory-b"></div>
+            <div class="coordinate coord-a">X 0.642</div>
+            <div class="coordinate coord-b">Y 0.438</div>
+          </div>
+
+          <aside class="telemetry">
+            <div class="telemetry-title">SESSION TARGET</div>
+            <div class="preset-switch" id="preset-switch" role="radiogroup" aria-label="Performance preset">
+              <button data-resolution="1280x720" role="radio" aria-checked="false">
+                <strong>Speed</strong><small>1280×720</small>
+              </button>
+              <button data-resolution="1600x900" role="radio" aria-checked="true">
+                <strong>Balanced</strong><small>1600×900</small>
+              </button>
+              <button data-resolution="1920x1080" role="radio" aria-checked="false">
+                <strong>Quality</strong><small>1920×1080</small>
+              </button>
+            </div>
+            <button class="game-mode-toggle" id="game-mode-toggle" type="button" role="switch" aria-checked="true">
+              <span><strong>GameMode</strong><small>Auto when installed</small></span>
+              <span class="game-mode-state" id="game-mode-state">AUTO</span>
+            </button>
+            <dl>
+              <div><dt>Input path</dt><dd>evdev → uinput</dd></div>
+              <div><dt>Video path</dt><dd>direct display</dd></div>
+              <div><dt>Aim mode</dt><dd id="aim-mode">profile-defined</dd></div>
+            </dl>
+          </aside>
+        </section>
+
+        <section class="library-section" id="library">
+          <div class="section-heading">
+            <div>
+              <span class="section-number">01</span>
+              <div>
+                <p>LOCAL PROFILE DECK</p>
+                <h2>Your games</h2>
+              </div>
+            </div>
+            <div class="library-actions">
+              <button class="text-button sideload-trigger" id="sideload-button" type="button"><span>↓</span> Sideload APK</button>
+              <input id="sideload-input" type="file" accept=".apk,application/vnd.android.package-archive" hidden>
+              <button class="text-button" id="import-button" type="button">＋ Import Profile V2</button>
+              <input id="import-input" type="file" accept=".json,application/json" hidden>
+            </div>
+          </div>
+          <section class="package-intake" id="package-intake" data-state="idle" aria-live="polite" aria-labelledby="package-intake-title" hidden>
+            <div class="package-scanner" aria-hidden="true"><i></i><span>LOCAL / STATIC ANALYSIS</span></div>
+            <header>
+              <div class="package-identity">
+                <p>PACKAGE INTAKE <span>/ 04</span></p>
+                <h3 id="package-intake-title">Android package</h3>
+                <small id="package-file-name">No file selected</small>
+              </div>
+              <strong class="package-state" id="package-state">STANDBY</strong>
+            </header>
+            <div class="package-progress" id="package-progress" role="progressbar" aria-label="APK upload progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <i id="package-progress-fill"></i>
+              <span id="package-progress-label">0%</span>
+            </div>
+            <dl class="package-readout">
+              <div><dt>FORMAT</dt><dd id="package-format">—</dd></div>
+              <div><dt>PAYLOAD</dt><dd id="package-size">—</dd></div>
+              <div><dt>NATIVE ABI</dt><dd id="package-abis">—</dd></div>
+              <div><dt>WAYDROID FIT</dt><dd id="package-compatibility">—</dd></div>
+            </dl>
+            <p class="package-detail" id="package-detail">Choose a single APK for local inspection.</p>
+            <div class="package-actions">
+              <button id="package-install-button" type="button" disabled>Install to Waydroid <span>↗</span></button>
+              <button id="package-discard-button" type="button">Discard</button>
+            </div>
+          </section>
+          <div class="game-grid" id="game-grid" aria-live="polite">
+            <div class="skeleton-card"></div>
+            <div class="skeleton-card"></div>
+            <div class="skeleton-card"></div>
+            <div class="skeleton-card"></div>
+          </div>
+        </section>
+
+        <section class="systems-section" id="systems">
+          <div class="section-heading">
+            <div>
+              <span class="section-number">02</span>
+              <div>
+                <p>PREFLIGHT / LOCAL ONLY</p>
+                <h2>System deck</h2>
+              </div>
+            </div>
+            <button class="text-button" id="show-waydroid-button">Open Waydroid UI ↗</button>
+          </div>
+
+          <div class="system-deck">
+            <article class="system-card primary-card">
+              <header>
+                <span class="system-icon">W</span>
+                <div><p>ANDROID RUNTIME</p><h3>Waydroid</h3></div>
+                <span class="state-chip" id="waydroid-chip">Scanning</span>
+              </header>
+              <pre id="waydroid-detail">Collecting runtime state…</pre>
+              <div class="input-self-test">
+                <button id="input-self-test-button" type="button">
+                  <span>⌁</span>
+                  Run input self-test
+                </button>
+                <small>NO APK · 20 SEC · AUTO CLEANUP</small>
+              </div>
+            </article>
+
+            <article class="system-card">
+              <header>
+                <span class="system-icon keyboard-icon">K</span>
+                <div><p>CAPTURE DEVICE</p><h3>Keyboard</h3></div>
+                <span class="state-dot" id="keyboard-dot"></span>
+              </header>
+              <label class="device-picker keyboard-picker">
+                <span>ACTIVE INPUT</span>
+                <select id="keyboard-select" aria-label="Keyboard capture device" disabled>
+                  <option>Scanning evdev devices…</option>
+                </select>
+                <small class="device-path" id="keyboard-path">Detecting evdev path…</small>
+              </label>
+            </article>
+
+            <article class="system-card">
+              <header>
+                <span class="system-icon mouse-icon">M</span>
+                <div><p>CAPTURE DEVICE</p><h3>Mouse</h3></div>
+                <span class="state-dot" id="mouse-dot"></span>
+              </header>
+              <label class="device-picker mouse-picker">
+                <span>ACTIVE INPUT</span>
+                <select id="mouse-select" aria-label="Mouse capture device" disabled>
+                  <option>Scanning evdev devices…</option>
+                </select>
+                <small class="device-path" id="mouse-path">Detecting evdev path…</small>
+              </label>
+            </article>
+
+            <article class="system-card security-card">
+              <header>
+                <span class="system-icon shield-icon">◇</span>
+                <div><p>INPUT SAFETY</p><h3 id="focus-protection-title">Focus guard</h3></div>
+                <span class="state-dot" id="focus-protection-dot"></span>
+              </header>
+              <p id="focus-protection-detail">Detecting compositor focus support…</p>
+            </article>
+
+            <article class="system-card security-card helper-card">
+              <header>
+                <span class="system-icon helper-icon">H</span>
+                <div><p>PRIVILEGE BOUNDARY</p><h3 id="helper-title">Bridge helper</h3></div>
+                <span class="state-chip" id="helper-chip">Scanning</span>
+              </header>
+              <p id="helper-detail">Verifying root ownership and permissions…</p>
+              <button class="compatibility-setup helper-setup" id="helper-setup-button" type="button" hidden>Install secure helper ↗</button>
+            </article>
+
+            <article class="system-card graphics-card">
+              <header>
+                <span class="system-icon graphics-icon">G</span>
+                <div><p>PERFORMANCE PREFLIGHT</p><h3 id="graphics-title">Graphics pipeline</h3></div>
+                <span class="state-chip" id="graphics-chip">Scanning</span>
+              </header>
+              <div class="graphics-readout">
+                <div>
+                  <span>HOST RENDERER</span>
+                  <strong id="graphics-renderer">Detecting active GPU…</strong>
+                  <small id="graphics-driver">DRM driver —</small>
+                </div>
+                <div>
+                  <span>WAYDROID GRAPHICS</span>
+                  <strong id="android-graphics">Reading EGL / Vulkan…</strong>
+                  <small id="android-abi">Android ABI —</small>
+                </div>
+                <div>
+                  <span>ACTIVE DISPLAY</span>
+                  <strong id="display-mode">Detecting output…</strong>
+                  <small id="desktop-session">Desktop session —</small>
+                </div>
+                <div>
+                  <span>FRAME PACING</span>
+                  <strong id="frame-pacing">Waiting for Waydroid…</strong>
+                  <small id="frame-pacing-detail">Compositor timing —</small>
+                </div>
+              </div>
+              <div class="finding-strip" id="graphics-findings"></div>
+              <button class="compatibility-setup graphics-setup" id="graphics-setup-button" type="button" hidden>Use active GPU ↗</button>
+            </article>
+
+            <article class="system-card compatibility-card" id="compatibility-card">
+              <header>
+                <span class="system-icon compatibility-icon">A</span>
+                <div><p>GAME COMPATIBILITY</p><h3 id="compatibility-title">Android game path</h3></div>
+                <span class="state-chip" id="compatibility-chip">Scanning</span>
+              </header>
+              <div class="compatibility-summary">
+                <div>
+                  <span>ANDROID TARGET</span>
+                  <strong id="compatibility-android">Reading Android ABI…</strong>
+                  <small id="compatibility-abis">Supported ABIs —</small>
+                </div>
+                <div>
+                  <span>NATIVE BRIDGE</span>
+                  <strong id="compatibility-bridge">Checking ARM translation…</strong>
+                  <small id="compatibility-store">Google Play —</small>
+                </div>
+                <div class="storage-summary">
+                  <span>GAME STORAGE</span>
+                  <strong id="storage-available">Inspecting volume…</strong>
+                  <div class="storage-meter" aria-hidden="true"><i id="storage-fill"></i></div>
+                  <small id="storage-detail">Capacity preflight —</small>
+                </div>
+                <div class="compatibility-action">
+                  <span>NEXT STEP</span>
+                  <strong id="compatibility-next">Scanning game prerequisites…</strong>
+                  <button class="compatibility-setup" id="compatibility-setup-button" type="button">Open setup resources ↗</button>
+                </div>
+              </div>
+              <div class="compatibility-games" id="compatibility-games"></div>
+              <div class="finding-strip" id="compatibility-findings"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="controls-section" id="controls">
+          <div class="controls-copy">
+            <span class="section-number">03</span>
+            <p>PROFILE V2 / VISUAL CALIBRATION</p>
+            <h2>Make every control land exactly where you expect.</h2>
+            <p class="body-copy">Open the installed game with Controls Studio, place keyboard, joystick and mouse-aim regions over its live HUD, then save an aligned frame. Wroid validates every profile before it can launch.</p>
+            <button class="edit-button" id="controls-edit-button">⌖ Edit selected profile</button>
+          </div>
+          <div class="control-map" aria-hidden="true">
+            <div class="map-surface">
+              <span class="key key-w">W</span>
+              <span class="key key-a">A</span>
+              <span class="key key-s">S</span>
+              <span class="key key-d">D</span>
+              <span class="touch touch-fire">LMB</span>
+              <span class="touch touch-aim">RMB</span>
+              <span class="aim-region">MOUSE AIM<i></i></span>
+              <svg viewBox="0 0 700 310" preserveAspectRatio="none">
+                <path d="M128 221 C250 110 365 258 552 130"></path>
+                <path d="M130 223 C270 268 430 65 600 88"></path>
+              </svg>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer>
+        <span>WROID / LOCAL GAMING LAYER</span>
+        <span id="library-path">Loading profile library…</span>
+        <span id="version-label">v—</span>
+      </footer>
+    </div>
+
+    <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>

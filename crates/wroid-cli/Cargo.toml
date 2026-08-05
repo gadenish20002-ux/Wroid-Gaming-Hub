@@ -12,10 +12,16 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 crossterm.workspace = true
+dbus.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 wroid-adb = { path = "../wroid-adb" }
+wroid-android = { path = "../wroid-android" }
 wroid-core = { path = "../wroid-core" }
 wroid-daemon = { path = "../wroid-daemon" }
 wroid-inject = { path = "../wroid-inject" }
+wroid-input = { path = "../wroid-input" }
 wroid-runtime = { path = "../wroid-runtime" }
 wroid-waydroid = { path = "../wroid-waydroid" }
 

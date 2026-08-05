@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 pub(crate) const DEFAULT_LAUNCH_DELAY_MS: u64 = 1500;
 
 #[derive(Debug, Parser)]
-#[command(name = "wroid", about = "Wroid Gaming Hub CLI")]
+#[command(name = "wroid", version, about = "Wroid Gaming Hub CLI")]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: Commands,
@@ -14,6 +14,68 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Commands {
+    /// Install, inspect, or remove the user-level desktop application.
+    Desktop {
+        #[command(subcommand)]
+        command: DesktopCommand,
+    },
+    /// Install or inspect the minimal root-owned input bridge helper.
+    Helper {
+        #[command(subcommand)]
+        command: HelperCommand,
+    },
+    /// Inspect host and Waydroid graphics performance readiness.
+    Performance {
+        #[arg(long)]
+        json: bool,
+        /// Configure Waydroid to use the GPU driving the active host renderer.
+        #[arg(long, conflicts_with = "json")]
+        setup_gpu: bool,
+    },
+    /// Inspect Android ABI, ARM translation, Play Store, and popular-game readiness.
+    Compatibility {
+        #[arg(long)]
+        json: bool,
+        /// Open or install a supported graphical Waydroid extension manager.
+        #[arg(long, conflicts_with = "json")]
+        setup: bool,
+    },
+    /// Internal interactive installer for Waydroid Helper.
+    #[command(hide = true)]
+    SetupWaydroidHelper {
+        #[arg(long)]
+        installer: String,
+    },
+    /// Internal detached graphical installer for the production bridge helper.
+    #[command(hide = true)]
+    InstallHelperGraphical,
+    /// Internal detached worker for a Hub-staged APK ticket.
+    #[command(hide = true)]
+    InstallApkWorker {
+        #[arg(long)]
+        ticket: String,
+    },
+    /// Internal interactive Waydroid GPU setup.
+    #[command(hide = true)]
+    SetupWaydroidGpu {
+        #[arg(long)]
+        device: PathBuf,
+    },
+    /// Internal privileged Waydroid GPU config writer.
+    #[command(hide = true)]
+    ConfigureWaydroidGpu {
+        #[arg(long)]
+        device: PathBuf,
+    },
+    /// Open the Wroid desktop gaming hub in the default browser.
+    Hub {
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        #[arg(long)]
+        no_open: bool,
+        #[arg(long)]
+        profiles_dir: Option<PathBuf>,
+    },
     Doctor {
         #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
         backend: InputBackend,
@@ -42,12 +104,73 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: SessionCommand,
     },
+    /// Start or inspect the private per-user Wroid runtime daemon.
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
     Play {
         profile_path: PathBuf,
         #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
         backend: InputBackend,
         #[arg(long)]
         scale_to_current: bool,
+    },
+    /// Run a low-latency profile v2 session through evdev and persistent uinput.
+    PlayV2 {
+        profile_path: PathBuf,
+        #[arg(long)]
+        keyboard: Option<PathBuf>,
+        #[arg(long)]
+        mouse: Option<PathBuf>,
+        #[arg(long, default_value_t = 1920)]
+        width: u32,
+        #[arg(long, default_value_t = 1080)]
+        height: u32,
+        #[arg(long)]
+        no_grab: bool,
+        #[arg(long)]
+        no_ui: bool,
+        #[arg(long)]
+        no_launch: bool,
+        #[arg(long)]
+        trace_input: bool,
+        #[arg(long, hide = true)]
+        exit_after_ms: Option<u64>,
+        /// Internal desktop focus relay used by launch-v2.
+        #[arg(long, hide = true)]
+        focus_socket: Option<PathBuf>,
+    },
+    /// Stop desktop Waydroid and launch play-v2 with only the bridge helper elevated.
+    LaunchV2 {
+        profile_path: PathBuf,
+        #[arg(long)]
+        keyboard: Option<PathBuf>,
+        #[arg(long)]
+        mouse: Option<PathBuf>,
+        #[arg(long, default_value_t = 1600)]
+        width: u32,
+        #[arg(long, default_value_t = 900)]
+        height: u32,
+        #[arg(long)]
+        no_grab: bool,
+        #[arg(long)]
+        no_ui: bool,
+        #[arg(long)]
+        no_launch: bool,
+        #[arg(long)]
+        trace_input: bool,
+        /// Stop automatically after the live diagnostic interval.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=3600))]
+        exit_after_seconds: Option<u64>,
+    },
+    /// Internal crash-recovery watchdog for launch-v2.
+    #[command(hide = true)]
+    RestoreDesktopSession {
+        #[arg(long)]
+        parent_pid: u32,
+        #[arg(long)]
+        ticket: String,
     },
     Run {
         profile_path: PathBuf,
@@ -74,9 +197,35 @@ pub(crate) enum Commands {
 }
 
 #[derive(Debug, Subcommand)]
+pub(crate) enum DesktopCommand {
+    /// Install the current Wroid binary and application-menu entry.
+    Install,
+    /// Show user-level desktop installation paths and state.
+    Status,
+    /// Remove the Wroid binary and application-menu entry, preserving profiles.
+    Uninstall,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum HelperCommand {
+    /// Install the staged helper once as a root-owned executable.
+    Install,
+    /// Verify helper ownership, permissions, and production readiness.
+    Status,
+}
+
+#[derive(Debug, Subcommand)]
 pub(crate) enum ProfileCommand {
     Validate {
         path: PathBuf,
+    },
+    /// Open the local visual editor for a profile v2 JSON file.
+    EditV2 {
+        path: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        #[arg(long)]
+        no_open: bool,
     },
     Example {
         path: PathBuf,
@@ -277,6 +426,15 @@ pub(crate) enum AppCommand {
         backend: InputBackend,
         #[arg(long)]
         allow_any_extension: bool,
+        /// Override a confirmed ABI incompatibility after inspection.
+        #[arg(long)]
+        force_incompatible: bool,
+    },
+    /// Inspect Android package format, native ABIs, and Waydroid compatibility.
+    Inspect {
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
     },
     Current {
         #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
@@ -300,10 +458,9 @@ pub(crate) enum BindingCommand {
 pub(crate) enum SessionCommand {
     /// Prepare a daemon-managed runtime control plan from a profile v2 document.
     ///
-    /// This loads the profile, materializes a runtime control plan against the
-    /// given Android surface resolution, and prints the prepared session. It is
-    /// the in-memory daemon path: no input capture or injection is started, and
-    /// unsupported actions fail with an explicit error instead of being skipped.
+    /// This sends the profile through protocol v1, materializes a runtime
+    /// control plan against the Android surface, and records the prepared
+    /// session. No input capture or injection is started yet.
     PrepareV2 {
         profile_path: PathBuf,
         #[arg(long)]
@@ -315,6 +472,16 @@ pub(crate) enum SessionCommand {
         #[arg(long)]
         no_launch: bool,
     },
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub(crate) enum DaemonCommand {
+    /// Start wroidd for the current desktop user if it is not running.
+    Start,
+    /// Verify the private daemon socket and protocol version.
+    Status,
+    /// List sessions currently owned by wroidd.
+    Sessions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -374,6 +541,21 @@ mod tests {
         };
 
         assert_eq!(backend, InputBackend::WaydroidShell);
+    }
+
+    #[test]
+    fn daemon_lifecycle_commands_parse() {
+        for (argument, expected) in [
+            ("start", DaemonCommand::Start),
+            ("status", DaemonCommand::Status),
+            ("sessions", DaemonCommand::Sessions),
+        ] {
+            let cli = Cli::try_parse_from(["wroid", "daemon", argument]).unwrap();
+            let Commands::Daemon { command } = cli.command else {
+                panic!("expected daemon command");
+            };
+            assert_eq!(command, expected);
+        }
     }
 
     #[test]
@@ -559,6 +741,7 @@ mod tests {
             path,
             backend,
             allow_any_extension,
+            force_incompatible,
         } = command
         else {
             panic!("expected install-apk command");
@@ -567,6 +750,22 @@ mod tests {
         assert_eq!(path, PathBuf::from("downloads/game.bin"));
         assert_eq!(backend, InputBackend::WaydroidShell);
         assert!(allow_any_extension);
+        assert!(!force_incompatible);
+    }
+
+    #[test]
+    fn app_inspect_accepts_json_output() {
+        let cli = Cli::try_parse_from(["wroid", "app", "inspect", "downloads/game.xapk", "--json"])
+            .unwrap();
+
+        let Commands::App {
+            command: AppCommand::Inspect { path, json },
+        } = cli.command
+        else {
+            panic!("expected app inspect command");
+        };
+        assert_eq!(path, PathBuf::from("downloads/game.xapk"));
+        assert!(json);
     }
 
     #[test]
@@ -659,5 +858,284 @@ mod tests {
         assert_eq!(profile_id, "com.android.settings");
         assert_eq!(backend, InputBackend::WaydroidShell);
         assert!(scale_to_current);
+    }
+
+    #[test]
+    fn play_v2_parses_devices_resolution_and_safety_flags() {
+        let cli = Cli::try_parse_from([
+            "wroid",
+            "play-v2",
+            "profiles/examples/brawlstars-v2.json",
+            "--keyboard",
+            "/dev/input/by-id/keyboard-event-kbd",
+            "--mouse",
+            "/dev/input/by-id/mouse-event-mouse",
+            "--width",
+            "1600",
+            "--height",
+            "900",
+            "--no-grab",
+            "--no-launch",
+            "--trace-input",
+        ])
+        .unwrap();
+
+        let Commands::PlayV2 {
+            profile_path,
+            keyboard,
+            mouse,
+            width,
+            height,
+            no_grab,
+            no_launch,
+            trace_input,
+            exit_after_ms,
+            ..
+        } = cli.command
+        else {
+            panic!("expected play-v2 command");
+        };
+
+        assert_eq!(
+            profile_path,
+            PathBuf::from("profiles/examples/brawlstars-v2.json")
+        );
+        assert_eq!(
+            keyboard,
+            Some(PathBuf::from("/dev/input/by-id/keyboard-event-kbd"))
+        );
+        assert_eq!(
+            mouse,
+            Some(PathBuf::from("/dev/input/by-id/mouse-event-mouse"))
+        );
+        assert_eq!((width, height), (1600, 900));
+        assert!(no_grab);
+        assert!(no_launch);
+        assert!(trace_input);
+        assert!(exit_after_ms.is_none());
+    }
+
+    #[test]
+    fn profile_edit_v2_parses_local_server_options() {
+        let cli = Cli::try_parse_from([
+            "wroid",
+            "profile",
+            "edit-v2",
+            "profiles/examples/brawlstars-v2.json",
+            "--port",
+            "9876",
+            "--no-open",
+        ])
+        .unwrap();
+
+        let Commands::Profile { command } = cli.command else {
+            panic!("expected profile command");
+        };
+        let ProfileCommand::EditV2 {
+            path,
+            port,
+            no_open,
+        } = command
+        else {
+            panic!("expected edit-v2 command");
+        };
+
+        assert_eq!(path, PathBuf::from("profiles/examples/brawlstars-v2.json"));
+        assert_eq!(port, 9876);
+        assert!(no_open);
+    }
+
+    #[test]
+    fn hub_parses_local_server_and_library_options() {
+        let cli = Cli::try_parse_from([
+            "wroid",
+            "hub",
+            "--port",
+            "9001",
+            "--no-open",
+            "--profiles-dir",
+            "/tmp/wroid-games",
+        ])
+        .unwrap();
+
+        let Commands::Hub {
+            port,
+            no_open,
+            profiles_dir,
+        } = cli.command
+        else {
+            panic!("expected hub command");
+        };
+
+        assert_eq!(port, 9001);
+        assert!(no_open);
+        assert_eq!(profiles_dir, Some(PathBuf::from("/tmp/wroid-games")));
+    }
+
+    #[test]
+    fn launch_v2_uses_balanced_resolution_by_default() {
+        let cli =
+            Cli::try_parse_from(["wroid", "launch-v2", "profiles/examples/pubg-v2.json"]).unwrap();
+
+        let Commands::LaunchV2 {
+            profile_path,
+            width,
+            height,
+            ..
+        } = cli.command
+        else {
+            panic!("expected launch-v2 command");
+        };
+
+        assert_eq!(
+            profile_path,
+            PathBuf::from("profiles/examples/pubg-v2.json")
+        );
+        assert_eq!((width, height), (1600, 900));
+    }
+
+    #[test]
+    fn launch_v2_accepts_bounded_diagnostic_timeout() {
+        let cli = Cli::try_parse_from([
+            "wroid",
+            "launch-v2",
+            "profiles/examples/pubg-v2.json",
+            "--no-launch",
+            "--trace-input",
+            "--exit-after-seconds",
+            "20",
+        ])
+        .unwrap();
+
+        let Commands::LaunchV2 {
+            no_launch,
+            trace_input,
+            exit_after_seconds,
+            ..
+        } = cli.command
+        else {
+            panic!("expected launch-v2 command");
+        };
+        assert!(no_launch);
+        assert!(trace_input);
+        assert_eq!(exit_after_seconds, Some(20));
+        assert!(Cli::try_parse_from([
+            "wroid",
+            "launch-v2",
+            "profiles/examples/pubg-v2.json",
+            "--exit-after-seconds",
+            "0",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn hidden_desktop_restore_watchdog_command_parses() {
+        let cli = Cli::try_parse_from([
+            "wroid",
+            "restore-desktop-session",
+            "--parent-pid",
+            "42",
+            "--ticket",
+            "0123456789abcdef0123456789abcdef",
+        ])
+        .unwrap();
+        let Commands::RestoreDesktopSession { parent_pid, ticket } = cli.command else {
+            panic!("expected restore-desktop-session command");
+        };
+        assert_eq!(parent_pid, 42);
+        assert_eq!(ticket, "0123456789abcdef0123456789abcdef");
+    }
+
+    #[test]
+    fn hidden_apk_install_worker_command_parses_ticket_only() {
+        let ticket = "0123456789abcdef0123456789abcdef0123456789abcdef";
+        let cli = Cli::try_parse_from(["wroid", "install-apk-worker", "--ticket", ticket]).unwrap();
+        let Commands::InstallApkWorker { ticket: parsed } = cli.command else {
+            panic!("expected install-apk-worker command");
+        };
+        assert_eq!(parsed, ticket);
+    }
+
+    #[test]
+    fn desktop_install_command_parses() {
+        let cli = Cli::try_parse_from(["wroid", "desktop", "install"]).unwrap();
+        let Commands::Desktop { command } = cli.command else {
+            panic!("expected desktop command");
+        };
+        assert!(matches!(command, DesktopCommand::Install));
+    }
+
+    #[test]
+    fn helper_install_and_status_commands_parse() {
+        for (subcommand, expected) in [
+            ("install", HelperCommand::Install),
+            ("status", HelperCommand::Status),
+        ] {
+            let cli = Cli::try_parse_from(["wroid", "helper", subcommand]).unwrap();
+            let Commands::Helper { command } = cli.command else {
+                panic!("expected helper command");
+            };
+            assert_eq!(
+                std::mem::discriminant(&command),
+                std::mem::discriminant(&expected)
+            );
+        }
+    }
+
+    #[test]
+    fn performance_command_accepts_json_output() {
+        let cli = Cli::try_parse_from(["wroid", "performance", "--json"]).unwrap();
+        let Commands::Performance { json, setup_gpu } = cli.command else {
+            panic!("expected performance command");
+        };
+        assert!(json);
+        assert!(!setup_gpu);
+    }
+
+    #[test]
+    fn performance_command_accepts_gpu_setup() {
+        let cli = Cli::try_parse_from(["wroid", "performance", "--setup-gpu"]).unwrap();
+        let Commands::Performance { json, setup_gpu } = cli.command else {
+            panic!("expected performance command");
+        };
+        assert!(!json);
+        assert!(setup_gpu);
+    }
+
+    #[test]
+    fn compatibility_command_accepts_json_output() {
+        let cli = Cli::try_parse_from(["wroid", "compatibility", "--json"]).unwrap();
+        let Commands::Compatibility { json, setup } = cli.command else {
+            panic!("expected compatibility command");
+        };
+        assert!(json);
+        assert!(!setup);
+    }
+
+    #[test]
+    fn compatibility_command_accepts_setup_action() {
+        let cli = Cli::try_parse_from(["wroid", "compatibility", "--setup"]).unwrap();
+        let Commands::Compatibility { json, setup } = cli.command else {
+            panic!("expected compatibility command");
+        };
+        assert!(!json);
+        assert!(setup);
+    }
+
+    #[test]
+    fn hidden_waydroid_helper_installer_command_parses() {
+        let cli =
+            Cli::try_parse_from(["wroid", "setup-waydroid-helper", "--installer", "yay"]).unwrap();
+        let Commands::SetupWaydroidHelper { installer } = cli.command else {
+            panic!("expected setup-waydroid-helper command");
+        };
+        assert_eq!(installer, "yay");
+    }
+
+    #[test]
+    fn hidden_graphical_bridge_helper_installer_command_parses() {
+        let cli = Cli::try_parse_from(["wroid", "install-helper-graphical"]).unwrap();
+        assert!(matches!(cli.command, Commands::InstallHelperGraphical));
     }
 }

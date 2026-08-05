@@ -1,23 +1,29 @@
 //! Daemon-backed session commands.
 //!
-//! These commands exercise the in-memory daemon session manager so the CLI can
-//! prepare profile v2 control plans through the same typed runtime contracts the
-//! future `wroidd` process and desktop UI will use. No input capture, injection,
-//! or Waydroid lifecycle work happens here yet: preparation only materializes a
-//! runtime control plan and reports it.
+//! Profile preparation is sent to the private per-user `wroidd` protocol. No
+//! input capture, injection, or Waydroid lifecycle work happens here yet:
+//! preparation only materializes and records a runtime control plan.
 
-use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use wroid_core::profile_v2::{InputV2, ProfileV2};
+#[cfg(test)]
+use std::fmt::Write as _;
+#[cfg(test)]
+use wroid_core::profile_v2::InputV2;
+use wroid_core::profile_v2::ProfileV2;
 use wroid_core::Resolution;
+use wroid_daemon::ipc::{DaemonRequest, DaemonResult};
+#[cfg(test)]
 use wroid_daemon::DaemonSessionManager;
+#[cfg(test)]
 use wroid_runtime::{
     DisplayInfo, PreparedSession, RuntimeControlAction, RuntimeControlPlan, SessionId,
 };
 
 use crate::output;
+
+use super::runtime_daemon;
 
 /// Load a profile v2 document and prepare a daemon-managed runtime control plan.
 pub(crate) fn prepare_v2(
@@ -28,17 +34,38 @@ pub(crate) fn prepare_v2(
 ) -> Result<()> {
     let profile = ProfileV2::load_from_path(&profile_path)
         .with_context(|| format!("failed to load profile v2 from {}", profile_path.display()))?;
-
-    let summary = prepare_v2_summary(profile, resolution, &session_id, !no_launch)
-        .with_context(|| format!("failed to prepare session '{session_id}'"))?;
-
-    output::write_stdout(&summary)
+    if let Err(error) = profile.validate() {
+        anyhow::bail!("invalid profile v2:\n  - {}", error.errors.join("\n  - "));
+    }
+    let client = runtime_daemon::ensure_running()
+        .context("failed to start the per-user Wroid runtime daemon")?;
+    let result = client
+        .request(DaemonRequest::PrepareProfileV2 {
+            session_id: session_id.clone(),
+            profile,
+            width: resolution.width,
+            height: resolution.height,
+            launch_package: !no_launch,
+        })
+        .with_context(|| format!("failed to prepare session '{session_id}' through wroidd"))?;
+    let DaemonResult::Session { session } = result else {
+        anyhow::bail!("wroidd returned an unexpected response to session preparation");
+    };
+    output::write_stdout(&format!(
+        "Prepared session: {}\nState: {:?}\nPackage: {}\nLaunch package: {}\nControls: {}\n",
+        session.session_id,
+        session.state,
+        session.package_name,
+        session.launch_package,
+        session.control_count,
+    ))
 }
 
 /// Prepare the session in an in-memory daemon and render a human-readable report.
 ///
 /// Kept separate from [`prepare_v2`] so tests can assert the rendered control
 /// plan and unsupported-action failure paths without touching the filesystem.
+#[cfg(test)]
 fn prepare_v2_summary(
     profile: ProfileV2,
     resolution: Resolution,
@@ -67,6 +94,7 @@ fn prepare_v2_summary(
     Ok(render_prepared(&prepared, plan, launch_package))
 }
 
+#[cfg(test)]
 fn render_prepared(
     prepared: &PreparedSession,
     plan: &RuntimeControlPlan,
@@ -96,6 +124,7 @@ fn render_prepared(
     output
 }
 
+#[cfg(test)]
 fn describe_input(input: &InputV2) -> String {
     match input {
         InputV2::Key { key } => format!("key:{key}"),
@@ -110,19 +139,26 @@ fn describe_input(input: &InputV2) -> String {
     }
 }
 
+#[cfg(test)]
 fn describe_action(action: &RuntimeControlAction) -> String {
     match action {
         RuntimeControlAction::Tap { point } => format!("tap ({},{})", point.x, point.y),
-        RuntimeControlAction::VirtualJoystick { joystick } => format!(
-            "virtual_joystick center=({},{}) radius={} dead_zone={} contact={}",
+        RuntimeControlAction::Hold { point } => format!("hold ({},{})", point.x, point.y),
+        RuntimeControlAction::VirtualJoystick {
+            joystick,
+            mode,
+            reaffirm_interval,
+        } => format!(
+            "virtual_joystick center=({},{}) radius={} dead_zone={} contact={} mode={mode:?} reaffirm_ms={:?}",
             joystick.center().x,
             joystick.center().y,
             joystick.radius(),
             joystick.dead_zone(),
             joystick.contact_id().get(),
+            reaffirm_interval.map(|value| value.as_millis()),
         ),
-        RuntimeControlAction::MouseAim { aim } => format!(
-            "mouse_aim origin=({},{}) region=({},{})-({},{}) contact={}",
+        RuntimeControlAction::MouseAim { aim, settings } => format!(
+            "mouse_aim origin=({},{}) region=({},{})-({},{}) contacts={}/{} toggle={}",
             aim.origin().x,
             aim.origin().y,
             aim.region().left,
@@ -130,6 +166,8 @@ fn describe_action(action: &RuntimeControlAction) -> String {
             aim.region().right,
             aim.region().bottom,
             aim.contact_id().get(),
+            settings.alternate_contact_id.get(),
+            settings.toggle_key.as_deref().unwrap_or("always"),
         ),
     }
 }
@@ -173,6 +211,11 @@ mod tests {
                             h: 0.78,
                         },
                         sensitivity: 1.2,
+                        toggle_key: Some("tab".to_owned()),
+                        recenter_threshold: 0.7,
+                        recenter_gap_ms: 0,
+                        ads_multiplier: Some(0.6),
+                        reaffirm_ms: Some(50),
                     },
                 },
                 BindingV2 {
@@ -180,7 +223,7 @@ mod tests {
                     input: InputV2::MouseButton {
                         button: "left".to_owned(),
                     },
-                    action: ActionV2::Tap {
+                    action: ActionV2::Hold {
                         point: NormalizedPoint { x: 0.86, y: 0.50 },
                     },
                 },
@@ -210,9 +253,9 @@ mod tests {
             "movement [key_cluster:wasd] -> virtual_joystick center=(345,842) radius=97 dead_zone=22 contact=1"
         ));
         assert!(summary.contains(
-            "aim [mouse_move] -> mouse_aim origin=(1247,485) region=(672,65)-(1823,906) contact=2"
+            "aim [mouse_move] -> mouse_aim origin=(1247,485) region=(672,65)-(1823,906) contacts=2/3 toggle=tab"
         ));
-        assert!(summary.contains("fire [mouse_button:left] -> tap (1650,540)"));
+        assert!(summary.contains("fire [mouse_button:left] -> hold (1650,540)"));
     }
 
     #[test]

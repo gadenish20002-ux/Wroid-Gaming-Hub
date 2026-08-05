@@ -1,25 +1,67 @@
 pub(crate) mod app;
+pub(crate) mod compatibility;
+pub(crate) mod desktop;
 pub(crate) mod device;
 pub(crate) mod doctor;
+pub(crate) mod editor;
+pub(crate) mod game_catalog;
+pub(crate) mod graphics;
+pub(crate) mod hub;
 pub(crate) mod input;
+pub(crate) mod kwin_focus;
+pub(crate) mod launch_v2;
+pub(crate) mod play_v2;
+pub(crate) mod preferences;
 pub(crate) mod profile;
 pub(crate) mod run;
+pub(crate) mod runtime_daemon;
 pub(crate) mod session;
+pub(crate) mod storage;
+pub(crate) mod system_helper;
+pub(crate) mod terminal;
 
 use anyhow::Result;
 use wroid_core::Resolution;
 
 use crate::backend::InputExecutor;
 use crate::cli::{
-    AppCommand, BindingCommand, Cli, Commands, DeviceCommand, InputCommand, ProfileCommand,
-    SessionCommand,
+    AppCommand, BindingCommand, Cli, Commands, DaemonCommand, DesktopCommand, DeviceCommand,
+    HelperCommand, InputCommand, ProfileCommand, SessionCommand,
 };
 
 pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
     match cli.command {
+        Commands::Desktop { command } => match command {
+            DesktopCommand::Install => desktop::install(),
+            DesktopCommand::Status => desktop::status(),
+            DesktopCommand::Uninstall => desktop::uninstall(),
+        },
+        Commands::Helper { command } => match command {
+            HelperCommand::Install => system_helper::install(),
+            HelperCommand::Status => system_helper::status(),
+        },
+        Commands::Performance { json, setup_gpu } => graphics::print_report(json, setup_gpu),
+        Commands::Compatibility { json, setup } => compatibility::run(json, setup),
+        Commands::SetupWaydroidHelper { installer } => {
+            compatibility::install_and_open_helper(&installer)
+        }
+        Commands::InstallHelperGraphical => system_helper::install_graphical(),
+        Commands::InstallApkWorker { ticket } => hub::install_apk_worker(input_executor, &ticket),
+        Commands::SetupWaydroidGpu { device } => graphics::setup_gpu_interactive(&device),
+        Commands::ConfigureWaydroidGpu { device } => graphics::configure_waydroid_gpu(&device),
+        Commands::Hub {
+            port,
+            no_open,
+            profiles_dir,
+        } => hub::run_hub(port, !no_open, profiles_dir),
         Commands::Doctor { backend } => doctor::doctor(input_executor, backend),
         Commands::Profile { command } => match command {
             ProfileCommand::Validate { path } => profile::validate_profile(path),
+            ProfileCommand::EditV2 {
+                path,
+                port,
+                no_open,
+            } => editor::edit_v2(path, port, !no_open),
             ProfileCommand::Example { path } => profile::write_example_profile(path),
             ProfileCommand::New {
                 path,
@@ -168,7 +210,15 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
                 path,
                 backend,
                 allow_any_extension,
-            } => app::app_install_apk(input_executor, backend, path, allow_any_extension),
+                force_incompatible,
+            } => app::app_install_apk(
+                input_executor,
+                backend,
+                path,
+                allow_any_extension,
+                force_incompatible,
+            ),
+            AppCommand::Inspect { path, json } => app::app_inspect(path, json),
             AppCommand::Current { backend } => app::app_current(input_executor, backend),
         },
         Commands::Binding { command } => match command {
@@ -199,11 +249,71 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
                 no_launch,
             ),
         },
+        Commands::Daemon { command } => match command {
+            DaemonCommand::Start => runtime_daemon::start(),
+            DaemonCommand::Status => runtime_daemon::status(),
+            DaemonCommand::Sessions => runtime_daemon::sessions(),
+        },
         Commands::Play {
             profile_path,
             backend,
             scale_to_current,
         } => run::play(input_executor, profile_path, backend, scale_to_current),
+        Commands::PlayV2 {
+            profile_path,
+            keyboard,
+            mouse,
+            width,
+            height,
+            no_grab,
+            no_ui,
+            no_launch,
+            trace_input,
+            exit_after_ms,
+            focus_socket,
+        } => play_v2::play_v2(
+            profile_path,
+            play_v2::PlayV2Options {
+                keyboard,
+                mouse,
+                resolution: Resolution { width, height },
+                grab: !no_grab,
+                show_ui: !no_ui,
+                launch_package: !no_launch,
+                trace_input,
+                exit_after: exit_after_ms.map(std::time::Duration::from_millis),
+                focus_socket,
+            },
+        )
+        .map(|_| ()),
+        Commands::LaunchV2 {
+            profile_path,
+            keyboard,
+            mouse,
+            width,
+            height,
+            no_grab,
+            no_ui,
+            no_launch,
+            trace_input,
+            exit_after_seconds,
+        } => launch_v2::launch_v2(
+            profile_path,
+            play_v2::PlayV2Options {
+                keyboard,
+                mouse,
+                resolution: Resolution { width, height },
+                grab: !no_grab,
+                show_ui: !no_ui,
+                launch_package: !no_launch,
+                trace_input,
+                exit_after: exit_after_seconds.map(std::time::Duration::from_secs),
+                focus_socket: None,
+            },
+        ),
+        Commands::RestoreDesktopSession { parent_pid, ticket } => {
+            launch_v2::restore_desktop_session(parent_pid, &ticket)
+        }
         Commands::Run {
             profile_path,
             backend,
