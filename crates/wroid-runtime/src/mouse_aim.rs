@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use thiserror::Error;
 use wroid_core::{Point, Resolution};
 
@@ -50,6 +52,13 @@ impl MouseAimSensitivity {
 
     fn scale(self, delta: i32) -> i64 {
         (i64::from(delta) * i64::from(self.numerator)) / i64::from(self.denominator)
+    }
+
+    fn scale_i64(self, delta: i64) -> i64 {
+        delta
+            .saturating_mul(i64::from(self.numerator))
+            .checked_div(i64::from(self.denominator))
+            .unwrap_or_default()
     }
 }
 
@@ -142,6 +151,12 @@ pub enum MouseAimConfigError {
     },
     #[error("mouse aim sensitivity must be non-zero, got {numerator}/{denominator}")]
     InvalidSensitivity { numerator: u32, denominator: u32 },
+    #[error("mouse aim primary and alternate contact IDs must differ, got {contact_id}")]
+    DuplicateContactId { contact_id: u16 },
+    #[error("mouse aim recenter threshold must be within 100..=1000 milli, got {milli}")]
+    InvalidRecenterThreshold { milli: u16 },
+    #[error("mouse aim reaffirm interval must be greater than zero")]
+    ZeroReaffirmInterval,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,6 +270,332 @@ impl MouseAim {
             position,
         )))?;
         Ok(true)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MouseAimSettings {
+    pub alternate_contact_id: ContactId,
+    pub toggle_key: Option<String>,
+    pub recenter_threshold_milli: u16,
+    pub recenter_gap: Duration,
+    pub ads_multiplier: Option<MouseAimSensitivity>,
+    pub reaffirm_interval: Option<Duration>,
+}
+
+impl Default for MouseAimSettings {
+    fn default() -> Self {
+        Self {
+            alternate_contact_id: ContactId::new(2),
+            toggle_key: None,
+            recenter_threshold_milli: 700,
+            recenter_gap: Duration::ZERO,
+            ads_multiplier: None,
+            reaffirm_interval: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseAimUpdate {
+    Ignored,
+    Activated,
+    Moved,
+    Recentered,
+    Deactivated,
+    Reaffirmed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingRecenter {
+    contact_id: ContactId,
+    previous_contact_id: ContactId,
+    ready_at: Duration,
+    dx: i64,
+    dy: i64,
+}
+
+/// Stateful mouse-to-touch controller with toggle activation and seamless
+/// contact-slot recentering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MouseAimController {
+    aim: MouseAim,
+    settings: MouseAimSettings,
+    active_contact_id: Option<ContactId>,
+    next_contact_id: ContactId,
+    pending_recenter: Option<PendingRecenter>,
+    ads_active: bool,
+    recenter_count: u64,
+    last_reaffirm_at: Option<Duration>,
+}
+
+impl MouseAimController {
+    pub fn new(aim: MouseAim, settings: MouseAimSettings) -> Result<Self, MouseAimConfigError> {
+        if settings.alternate_contact_id == aim.contact_id {
+            return Err(MouseAimConfigError::DuplicateContactId {
+                contact_id: aim.contact_id.get(),
+            });
+        }
+        if !(100..=1_000).contains(&settings.recenter_threshold_milli) {
+            return Err(MouseAimConfigError::InvalidRecenterThreshold {
+                milli: settings.recenter_threshold_milli,
+            });
+        }
+        if matches!(settings.reaffirm_interval, Some(interval) if interval.is_zero()) {
+            return Err(MouseAimConfigError::ZeroReaffirmInterval);
+        }
+
+        let next_contact_id = settings.alternate_contact_id;
+        Ok(Self {
+            aim,
+            settings,
+            active_contact_id: None,
+            next_contact_id,
+            pending_recenter: None,
+            ads_active: false,
+            recenter_count: 0,
+            last_reaffirm_at: None,
+        })
+    }
+
+    pub const fn aim(&self) -> &MouseAim {
+        &self.aim
+    }
+
+    pub const fn settings(&self) -> &MouseAimSettings {
+        &self.settings
+    }
+
+    pub const fn is_active(&self) -> bool {
+        self.active_contact_id.is_some() || self.pending_recenter.is_some()
+    }
+
+    pub const fn recenter_count(&self) -> u64 {
+        self.recenter_count
+    }
+
+    pub fn activate<I: TouchInjector>(
+        &mut self,
+        engine: &mut TouchEngine<I>,
+        now: Duration,
+    ) -> Result<MouseAimUpdate, TouchEngineError> {
+        if self.is_active() {
+            return Ok(MouseAimUpdate::Ignored);
+        }
+        let contact_id = self.aim.contact_id;
+        engine.begin_contact(contact_id, self.aim.origin)?;
+        self.active_contact_id = Some(contact_id);
+        self.next_contact_id = self.settings.alternate_contact_id;
+        self.last_reaffirm_at = Some(now);
+        Ok(MouseAimUpdate::Activated)
+    }
+
+    pub fn toggle<I: TouchInjector>(
+        &mut self,
+        engine: &mut TouchEngine<I>,
+        now: Duration,
+    ) -> Result<MouseAimUpdate, TouchEngineError> {
+        if self.is_active() {
+            self.deactivate(engine)
+        } else {
+            self.activate(engine, now)
+        }
+    }
+
+    pub const fn set_ads_active(&mut self, active: bool) {
+        self.ads_active = active;
+    }
+
+    pub fn move_by<I: TouchInjector>(
+        &mut self,
+        engine: &mut TouchEngine<I>,
+        delta: MouseAimDelta,
+        now: Duration,
+    ) -> Result<MouseAimUpdate, TouchEngineError> {
+        if delta.is_zero() || !self.is_active() {
+            return Ok(MouseAimUpdate::Ignored);
+        }
+
+        let (dx, dy) = self.scaled_delta(delta);
+        if let Some(pending) = &mut self.pending_recenter {
+            pending.dx = pending.dx.saturating_add(dx);
+            pending.dy = pending.dy.saturating_add(dy);
+            return self.tick(engine, now);
+        }
+
+        let Some(contact_id) = self.active_contact_id else {
+            return Ok(MouseAimUpdate::Ignored);
+        };
+        let Some(current) = engine.state().position(contact_id) else {
+            return Ok(MouseAimUpdate::Ignored);
+        };
+        let target = self.aim.region.clamp(offset_point(current, dx, dy));
+        if target == current {
+            return Ok(MouseAimUpdate::Ignored);
+        }
+
+        if self.past_recenter_threshold(target) {
+            return self.recenter(engine, contact_id, current, dx, dy, now);
+        }
+
+        engine.move_contact(contact_id, target)?;
+        self.last_reaffirm_at = Some(now);
+        Ok(MouseAimUpdate::Moved)
+    }
+
+    pub fn tick<I: TouchInjector>(
+        &mut self,
+        engine: &mut TouchEngine<I>,
+        now: Duration,
+    ) -> Result<MouseAimUpdate, TouchEngineError> {
+        if let Some(pending) = self.pending_recenter {
+            if now < pending.ready_at {
+                return Ok(MouseAimUpdate::Ignored);
+            }
+            engine.begin_contact(pending.contact_id, self.aim.origin)?;
+            self.active_contact_id = Some(pending.contact_id);
+            self.next_contact_id = pending.previous_contact_id;
+            self.pending_recenter = None;
+            self.last_reaffirm_at = Some(now);
+            self.apply_residual(engine, pending.contact_id, pending.dx, pending.dy)?;
+            return Ok(MouseAimUpdate::Recentered);
+        }
+
+        let Some(interval) = self.settings.reaffirm_interval else {
+            return Ok(MouseAimUpdate::Ignored);
+        };
+        let Some(contact_id) = self.active_contact_id else {
+            return Ok(MouseAimUpdate::Ignored);
+        };
+        if self
+            .last_reaffirm_at
+            .is_some_and(|last| now.saturating_sub(last) < interval)
+        {
+            return Ok(MouseAimUpdate::Ignored);
+        }
+        let Some(position) = engine.state().position(contact_id) else {
+            return Ok(MouseAimUpdate::Ignored);
+        };
+        engine.move_contact(contact_id, position)?;
+        self.last_reaffirm_at = Some(now);
+        Ok(MouseAimUpdate::Reaffirmed)
+    }
+
+    pub fn deactivate<I: TouchInjector>(
+        &mut self,
+        engine: &mut TouchEngine<I>,
+    ) -> Result<MouseAimUpdate, TouchEngineError> {
+        let mut changed = false;
+        if let Some(contact_id) = self.active_contact_id.take() {
+            if engine.state().is_active(contact_id) {
+                engine.end_contact(contact_id)?;
+                changed = true;
+            }
+        }
+        if self.pending_recenter.take().is_some() {
+            changed = true;
+        }
+        self.ads_active = false;
+        self.last_reaffirm_at = None;
+        Ok(if changed {
+            MouseAimUpdate::Deactivated
+        } else {
+            MouseAimUpdate::Ignored
+        })
+    }
+
+    pub fn cancel<I: TouchInjector>(
+        &mut self,
+        engine: &mut TouchEngine<I>,
+    ) -> Result<bool, TouchEngineError> {
+        let mut changed = self.pending_recenter.take().is_some();
+        if let Some(contact_id) = self.active_contact_id.take() {
+            if let Some(position) = engine.state().position(contact_id) {
+                engine.submit(TouchFrame::single(TouchEvent::new(
+                    contact_id,
+                    TouchPhase::Cancel,
+                    position,
+                )))?;
+                changed = true;
+            }
+        }
+        self.ads_active = false;
+        self.last_reaffirm_at = None;
+        Ok(changed)
+    }
+
+    fn scaled_delta(&self, delta: MouseAimDelta) -> (i64, i64) {
+        let mut dx = self.aim.sensitivity.scale(delta.dx);
+        let mut dy = self.aim.sensitivity.scale(delta.dy);
+        if self.ads_active {
+            if let Some(multiplier) = self.settings.ads_multiplier {
+                dx = multiplier.scale_i64(dx);
+                dy = multiplier.scale_i64(dy);
+            }
+        }
+        (dx, dy)
+    }
+
+    fn past_recenter_threshold(&self, target: Point) -> bool {
+        let half_width = (self.aim.region.right - self.aim.region.left) / 2;
+        let half_height = (self.aim.region.bottom - self.aim.region.top) / 2;
+        let radius = u64::from(half_width.min(half_height))
+            .saturating_mul(u64::from(self.settings.recenter_threshold_milli))
+            / 1_000;
+        let dx = i64::from(target.x) - i64::from(self.aim.origin.x);
+        let dy = i64::from(target.y) - i64::from(self.aim.origin.y);
+        let distance_squared = dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy)) as u64;
+        distance_squared > radius.saturating_mul(radius)
+    }
+
+    fn recenter<I: TouchInjector>(
+        &mut self,
+        engine: &mut TouchEngine<I>,
+        old_contact_id: ContactId,
+        old_position: Point,
+        dx: i64,
+        dy: i64,
+        now: Duration,
+    ) -> Result<MouseAimUpdate, TouchEngineError> {
+        let new_contact_id = self.next_contact_id;
+
+        if self.settings.recenter_gap.is_zero() {
+            engine.submit(TouchFrame::new([
+                TouchEvent::new(new_contact_id, TouchPhase::Down, self.aim.origin),
+                TouchEvent::new(old_contact_id, TouchPhase::Up, old_position),
+            ]))?;
+            self.active_contact_id = Some(new_contact_id);
+            self.next_contact_id = old_contact_id;
+            self.last_reaffirm_at = Some(now);
+            self.apply_residual(engine, new_contact_id, dx, dy)?;
+        } else {
+            engine.end_contact(old_contact_id)?;
+            self.active_contact_id = None;
+            self.pending_recenter = Some(PendingRecenter {
+                contact_id: new_contact_id,
+                previous_contact_id: old_contact_id,
+                ready_at: now.saturating_add(self.settings.recenter_gap),
+                dx,
+                dy,
+            });
+        }
+        self.recenter_count = self.recenter_count.saturating_add(1);
+
+        Ok(MouseAimUpdate::Recentered)
+    }
+
+    fn apply_residual<I: TouchInjector>(
+        &self,
+        engine: &mut TouchEngine<I>,
+        contact_id: ContactId,
+        dx: i64,
+        dy: i64,
+    ) -> Result<(), TouchEngineError> {
+        let target = self.aim.region.clamp(offset_point(self.aim.origin, dx, dy));
+        if target != self.aim.origin {
+            engine.move_contact(contact_id, target)?;
+        }
+        Ok(())
     }
 }
 
@@ -453,5 +794,142 @@ mod tests {
             ),
             Err(MouseAimConfigError::OriginOutOfRegion { .. })
         ));
+    }
+
+    fn controller(gap: Duration) -> MouseAimController {
+        MouseAimController::new(
+            aim(),
+            MouseAimSettings {
+                alternate_contact_id: ContactId::new(10),
+                toggle_key: Some("tab".to_owned()),
+                recenter_threshold_milli: 500,
+                recenter_gap: gap,
+                ads_multiplier: Some(MouseAimSensitivity::new(1, 2).unwrap()),
+                reaffirm_interval: Some(Duration::from_millis(50)),
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn controller_toggles_and_applies_ads_multiplier() {
+        let mut controller = controller(Duration::ZERO);
+        let mut engine = TouchEngine::new(RecordingInjector::default());
+
+        assert_eq!(
+            controller
+                .toggle(&mut engine, Duration::from_millis(0))
+                .unwrap(),
+            MouseAimUpdate::Activated
+        );
+        controller.set_ads_active(true);
+        assert_eq!(
+            controller
+                .move_by(
+                    &mut engine,
+                    MouseAimDelta::new(20, -10),
+                    Duration::from_millis(1)
+                )
+                .unwrap(),
+            MouseAimUpdate::Moved
+        );
+        assert_eq!(
+            engine.state().position(ContactId::new(9)),
+            Some(Point { x: 970, y: 535 })
+        );
+        assert_eq!(
+            controller
+                .toggle(&mut engine, Duration::from_millis(2))
+                .unwrap(),
+            MouseAimUpdate::Deactivated
+        );
+        assert_eq!(engine.state().active_contact_count(), 0);
+    }
+
+    #[test]
+    fn controller_recenters_with_two_distinct_contacts_in_one_frame() {
+        let mut controller = controller(Duration::ZERO);
+        let mut engine = TouchEngine::new(RecordingInjector::default());
+        controller.activate(&mut engine, Duration::ZERO).unwrap();
+
+        assert_eq!(
+            controller
+                .move_by(
+                    &mut engine,
+                    MouseAimDelta::new(200, 0),
+                    Duration::from_millis(1)
+                )
+                .unwrap(),
+            MouseAimUpdate::Recentered
+        );
+
+        let recenter = &engine.injector().frames[1];
+        assert_eq!(recenter.events().len(), 2);
+        assert_eq!(recenter.events()[0].contact_id, ContactId::new(10));
+        assert_eq!(recenter.events()[0].phase, TouchPhase::Down);
+        assert_eq!(recenter.events()[1].contact_id, ContactId::new(9));
+        assert_eq!(recenter.events()[1].phase, TouchPhase::Up);
+        assert_eq!(controller.recenter_count(), 1);
+        assert!(engine.state().is_active(ContactId::new(10)));
+        assert!(!engine.state().is_active(ContactId::new(9)));
+    }
+
+    #[test]
+    fn gap_recenter_buffers_motion_until_tick() {
+        let mut controller = controller(Duration::from_millis(10));
+        let mut engine = TouchEngine::new(RecordingInjector::default());
+        controller.activate(&mut engine, Duration::ZERO).unwrap();
+        controller
+            .move_by(
+                &mut engine,
+                MouseAimDelta::new(200, 0),
+                Duration::from_millis(1),
+            )
+            .unwrap();
+        controller
+            .move_by(
+                &mut engine,
+                MouseAimDelta::new(10, 0),
+                Duration::from_millis(5),
+            )
+            .unwrap();
+
+        assert_eq!(engine.state().active_contact_count(), 0);
+        assert_eq!(
+            controller
+                .tick(&mut engine, Duration::from_millis(11))
+                .unwrap(),
+            MouseAimUpdate::Recentered
+        );
+        assert_eq!(
+            engine.state().position(ContactId::new(10)),
+            Some(Point { x: 1170, y: 540 })
+        );
+    }
+
+    #[test]
+    fn controller_reaffirms_and_cancels_active_contact() {
+        let mut controller = controller(Duration::ZERO);
+        let mut engine = TouchEngine::new(RecordingInjector::default());
+        controller.activate(&mut engine, Duration::ZERO).unwrap();
+
+        assert_eq!(
+            controller
+                .tick(&mut engine, Duration::from_millis(49))
+                .unwrap(),
+            MouseAimUpdate::Ignored
+        );
+        assert_eq!(
+            controller
+                .tick(&mut engine, Duration::from_millis(50))
+                .unwrap(),
+            MouseAimUpdate::Reaffirmed
+        );
+        assert!(controller.cancel(&mut engine).unwrap());
+        assert_eq!(engine.state().active_contact_count(), 0);
+        assert_eq!(
+            engine.injector().frames.last().unwrap().events()[0].phase,
+            TouchPhase::Cancel
+        );
     }
 }

@@ -4,7 +4,7 @@
 //! terminal, or a GUI toolkit. It owns the state machine that turns logical
 //! touch contact changes into atomic frames for a persistent injection backend.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::error::Error;
 
 use thiserror::Error;
@@ -17,7 +17,8 @@ mod services;
 
 pub use joystick::{AnalogInput, DirectionalInput, VirtualJoystick, VirtualJoystickConfigError};
 pub use mouse_aim::{
-    MouseAim, MouseAimConfigError, MouseAimDelta, MouseAimRegion, MouseAimSensitivity,
+    MouseAim, MouseAimConfigError, MouseAimController, MouseAimDelta, MouseAimRegion,
+    MouseAimSensitivity, MouseAimSettings, MouseAimUpdate,
 };
 pub use profile_controls::{
     RuntimeControlAction, RuntimeControlBinding, RuntimeControlPlan, RuntimeControlPlanError,
@@ -65,31 +66,84 @@ impl TouchEvent {
     }
 }
 
+const INLINE_TOUCH_EVENT_CAPACITY: usize = 4;
+const EMPTY_TOUCH_EVENT: TouchEvent =
+    TouchEvent::new(ContactId::new(0), TouchPhase::Cancel, Point { x: 0, y: 0 });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TouchFrameEvents {
+    Inline {
+        events: [TouchEvent; INLINE_TOUCH_EVENT_CAPACITY],
+        len: u8,
+    },
+    Heap(Vec<TouchEvent>),
+}
+
 /// Contact transitions that must be submitted to Android as one synchronized frame.
+///
+/// Normal gameplay frames (one movement/contact update, or the two-event mouse
+/// recenter) stay inline and do not allocate. Larger cleanup frames spill to a
+/// vector.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TouchFrame {
-    events: Vec<TouchEvent>,
+    events: TouchFrameEvents,
 }
 
 impl TouchFrame {
     pub fn new(events: impl IntoIterator<Item = TouchEvent>) -> Self {
+        let mut iterator = events.into_iter();
+        let mut inline = [EMPTY_TOUCH_EVENT; INLINE_TOUCH_EVENT_CAPACITY];
+        for (index, slot) in inline.iter_mut().enumerate() {
+            let Some(event) = iterator.next() else {
+                return Self {
+                    events: TouchFrameEvents::Inline {
+                        events: inline,
+                        len: index as u8,
+                    },
+                };
+            };
+            *slot = event;
+        }
+
+        let Some(first_heap_event) = iterator.next() else {
+            return Self {
+                events: TouchFrameEvents::Inline {
+                    events: inline,
+                    len: INLINE_TOUCH_EVENT_CAPACITY as u8,
+                },
+            };
+        };
+        let (remaining, _) = iterator.size_hint();
+        let mut heap = Vec::with_capacity(
+            INLINE_TOUCH_EVENT_CAPACITY
+                .saturating_add(1)
+                .saturating_add(remaining),
+        );
+        heap.extend_from_slice(&inline);
+        heap.push(first_heap_event);
+        heap.extend(iterator);
         Self {
-            events: events.into_iter().collect(),
+            events: TouchFrameEvents::Heap(heap),
         }
     }
 
     pub fn single(event: TouchEvent) -> Self {
+        let mut events = [EMPTY_TOUCH_EVENT; INLINE_TOUCH_EVENT_CAPACITY];
+        events[0] = event;
         Self {
-            events: vec![event],
+            events: TouchFrameEvents::Inline { events, len: 1 },
         }
     }
 
     pub fn events(&self) -> &[TouchEvent] {
-        &self.events
+        match &self.events {
+            TouchFrameEvents::Inline { events, len } => &events[..usize::from(*len)],
+            TouchFrameEvents::Heap(events) => events,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.events.is_empty()
+        self.events().is_empty()
     }
 }
 
@@ -168,16 +222,16 @@ impl TouchState {
             .map(|(contact_id, point)| (*contact_id, *point))
     }
 
-    fn next_state(&self, frame: &TouchFrame) -> Result<Self, TouchStateError> {
+    fn validate_frame(&self, frame: &TouchFrame) -> Result<(), TouchStateError> {
         if frame.is_empty() {
             return Err(TouchStateError::EmptyFrame);
         }
 
-        let mut seen = BTreeSet::new();
-        let mut next = self.clone();
-
-        for event in frame.events() {
-            if !seen.insert(event.contact_id) {
+        for (index, event) in frame.events().iter().enumerate() {
+            if frame.events()[..index]
+                .iter()
+                .any(|previous| previous.contact_id == event.contact_id)
+            {
                 return Err(TouchStateError::DuplicateContactInFrame {
                     contact_id: event.contact_id.get(),
                 });
@@ -185,26 +239,21 @@ impl TouchState {
 
             match event.phase {
                 TouchPhase::Down => {
-                    if next
-                        .active_contacts
-                        .insert(event.contact_id, event.position)
-                        .is_some()
-                    {
+                    if self.active_contacts.contains_key(&event.contact_id) {
                         return Err(TouchStateError::ContactAlreadyActive {
                             contact_id: event.contact_id.get(),
                         });
                     }
                 }
                 TouchPhase::Move => {
-                    let Some(position) = next.active_contacts.get_mut(&event.contact_id) else {
+                    if !self.active_contacts.contains_key(&event.contact_id) {
                         return Err(TouchStateError::ContactNotActive {
                             contact_id: event.contact_id.get(),
                         });
-                    };
-                    *position = event.position;
+                    }
                 }
                 TouchPhase::Up | TouchPhase::Cancel => {
-                    if next.active_contacts.remove(&event.contact_id).is_none() {
+                    if !self.active_contacts.contains_key(&event.contact_id) {
                         return Err(TouchStateError::ContactNotActive {
                             contact_id: event.contact_id.get(),
                         });
@@ -212,8 +261,21 @@ impl TouchState {
                 }
             }
         }
+        Ok(())
+    }
 
-        Ok(next)
+    fn apply_frame(&mut self, frame: &TouchFrame) {
+        for event in frame.events() {
+            match event.phase {
+                TouchPhase::Down | TouchPhase::Move => {
+                    self.active_contacts
+                        .insert(event.contact_id, event.position);
+                }
+                TouchPhase::Up | TouchPhase::Cancel => {
+                    self.active_contacts.remove(&event.contact_id);
+                }
+            }
+        }
     }
 }
 
@@ -227,9 +289,9 @@ pub enum TouchEngineError {
 
 /// Applies validated touch frames to a persistent injector.
 ///
-/// A frame is validated against a cloned state first. The committed state is
-/// updated only after the backend confirms successful injection, which prevents
-/// runtime state from diverging from Android when a backend fails.
+/// A frame is validated without mutating state, submitted to the backend, then
+/// committed in place only after successful injection. This preserves atomic
+/// failure semantics without cloning the active-contact map on every movement.
 pub struct TouchEngine<I> {
     injector: I,
     state: TouchState,
@@ -260,9 +322,9 @@ impl<I: TouchInjector> TouchEngine<I> {
     }
 
     pub fn submit(&mut self, frame: TouchFrame) -> Result<(), TouchEngineError> {
-        let next_state = self.state.next_state(&frame)?;
+        self.state.validate_frame(&frame)?;
         self.injector.inject(&frame)?;
-        self.state = next_state;
+        self.state.apply_frame(&frame);
         Ok(())
     }
 
@@ -313,12 +375,10 @@ impl<I: TouchInjector> TouchEngine<I> {
             return Ok(false);
         }
 
-        let events: Vec<_> = self
-            .state
-            .active_contacts()
-            .map(|(contact_id, position)| TouchEvent::new(contact_id, TouchPhase::Cancel, position))
-            .collect();
-        self.submit(TouchFrame::new(events))?;
+        let frame = TouchFrame::new(self.state.active_contacts().map(|(contact_id, position)| {
+            TouchEvent::new(contact_id, TouchPhase::Cancel, position)
+        }));
+        self.submit(frame)?;
         Ok(true)
     }
 }
@@ -346,6 +406,32 @@ mod tests {
 
     fn point(x: u32, y: u32) -> Point {
         Point { x, y }
+    }
+
+    #[test]
+    fn gameplay_touch_frames_stay_in_inline_storage() {
+        let single = TouchFrame::single(TouchEvent::new(
+            ContactId::new(1),
+            TouchPhase::Move,
+            point(10, 20),
+        ));
+        let recenter = TouchFrame::new([
+            TouchEvent::new(ContactId::new(2), TouchPhase::Down, point(30, 40)),
+            TouchEvent::new(ContactId::new(1), TouchPhase::Up, point(10, 20)),
+        ]);
+
+        assert!(matches!(single.events, TouchFrameEvents::Inline { .. }));
+        assert!(matches!(recenter.events, TouchFrameEvents::Inline { .. }));
+    }
+
+    #[test]
+    fn large_touch_frames_preserve_every_event_in_heap_fallback() {
+        let frame = TouchFrame::new(
+            (1..=5).map(|id| TouchEvent::new(ContactId::new(id), TouchPhase::Down, point(10, 20))),
+        );
+
+        assert!(matches!(frame.events, TouchFrameEvents::Heap(_)));
+        assert_eq!(frame.events().len(), 5);
     }
 
     #[test]

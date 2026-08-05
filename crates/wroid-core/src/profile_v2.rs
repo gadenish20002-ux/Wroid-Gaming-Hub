@@ -28,6 +28,25 @@ impl ProfileV2 {
         serde_json::from_str(&data).map_err(ProfileV2LoadError::Json)
     }
 
+    pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), ProfileV2SaveError> {
+        self.validate()?;
+        let path = path.as_ref();
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("profile.json");
+        let temporary = parent.join(format!(".{file_name}.wroid-{}.tmp", std::process::id()));
+        let mut data = serde_json::to_string_pretty(self)?;
+        data.push('\n');
+        fs::write(&temporary, data).map_err(ProfileV2SaveError::Io)?;
+        if let Err(error) = fs::rename(&temporary, path) {
+            let _ = fs::remove_file(&temporary);
+            return Err(ProfileV2SaveError::Io(error));
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<(), ProfileV2ValidationError> {
         let mut errors = Vec::new();
 
@@ -55,6 +74,12 @@ impl ProfileV2 {
 
             validate_input(&binding.input, &binding.name, &mut errors);
             validate_action(&binding.action, &binding.name, &mut errors);
+            validate_binding_compatibility(
+                &binding.input,
+                &binding.action,
+                &binding.name,
+                &mut errors,
+            );
         }
 
         if errors.is_empty() {
@@ -105,6 +130,9 @@ pub enum ActionV2 {
     Tap {
         point: NormalizedPoint,
     },
+    Hold {
+        point: NormalizedPoint,
+    },
     VirtualJoystick {
         center: NormalizedPoint,
         radius: f64,
@@ -119,6 +147,16 @@ pub enum ActionV2 {
         region: NormalizedRect,
         #[serde(default = "default_sensitivity")]
         sensitivity: f64,
+        #[serde(default)]
+        toggle_key: Option<String>,
+        #[serde(default = "default_recenter_threshold")]
+        recenter_threshold: f64,
+        #[serde(default)]
+        recenter_gap_ms: u64,
+        #[serde(default)]
+        ads_multiplier: Option<f64>,
+        #[serde(default)]
+        reaffirm_ms: Option<u64>,
     },
     Macro {
         steps: Vec<ActionV2>,
@@ -158,6 +196,16 @@ pub struct NormalizedRect {
 
 #[derive(Debug, Error)]
 pub enum ProfileV2LoadError {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
+#[derive(Debug, Error)]
+pub enum ProfileV2SaveError {
+    #[error(transparent)]
+    InvalidProfile(#[from] ProfileV2ValidationError),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
@@ -205,6 +253,11 @@ fn validate_input(input: &InputV2, binding: &str, errors: &mut Vec<String>) {
         InputV2::Key { key } if key.trim().is_empty() => {
             errors.push(format!("binding {binding} has an empty key input"));
         }
+        InputV2::Key { key } if !known_key_name(key) => {
+            errors.push(format!(
+                "binding {binding} uses unsupported key input: {key}"
+            ));
+        }
         InputV2::KeyCluster {
             up,
             left,
@@ -216,8 +269,31 @@ fn validate_input(input: &InputV2, binding: &str, errors: &mut Vec<String>) {
         {
             errors.push(format!("binding {binding} has an empty key_cluster input"));
         }
+        InputV2::KeyCluster {
+            up,
+            left,
+            down,
+            right,
+        } if [up, left, down, right]
+            .iter()
+            .any(|value| !known_key_name(value)) =>
+        {
+            errors.push(format!(
+                "binding {binding} key_cluster contains an unsupported key"
+            ));
+        }
         InputV2::MouseButton { button } if button.trim().is_empty() => {
             errors.push(format!("binding {binding} has an empty mouse button"));
+        }
+        InputV2::MouseButton { button }
+            if !matches!(
+                button.trim().to_ascii_lowercase().as_str(),
+                "left" | "right" | "middle" | "side" | "extra"
+            ) =>
+        {
+            errors.push(format!(
+                "binding {binding} uses unsupported mouse button: {button}"
+            ));
         }
         InputV2::Key { .. }
         | InputV2::KeyCluster { .. }
@@ -228,8 +304,13 @@ fn validate_input(input: &InputV2, binding: &str, errors: &mut Vec<String>) {
 
 fn validate_action(action: &ActionV2, binding: &str, errors: &mut Vec<String>) {
     match action {
-        ActionV2::Tap { point } => {
-            validate_point(*point, &format!("binding {binding} tap point"), errors);
+        ActionV2::Tap { point } | ActionV2::Hold { point } => {
+            let kind = if matches!(action, ActionV2::Tap { .. }) {
+                "tap"
+            } else {
+                "hold"
+            };
+            validate_point(*point, &format!("binding {binding} {kind} point"), errors);
         }
         ActionV2::VirtualJoystick {
             center,
@@ -266,6 +347,11 @@ fn validate_action(action: &ActionV2, binding: &str, errors: &mut Vec<String>) {
         ActionV2::MouseAim {
             region,
             sensitivity,
+            toggle_key,
+            recenter_threshold,
+            ads_multiplier,
+            reaffirm_ms,
+            ..
         } => {
             validate_rect(
                 *region,
@@ -275,6 +361,31 @@ fn validate_action(action: &ActionV2, binding: &str, errors: &mut Vec<String>) {
             if !sensitivity.is_finite() || *sensitivity <= 0.0 {
                 errors.push(format!(
                     "binding {binding} mouse_aim sensitivity must be finite and greater than zero"
+                ));
+            }
+            if toggle_key
+                .as_deref()
+                .is_some_and(|key| !known_key_name(key))
+            {
+                errors.push(format!(
+                    "binding {binding} mouse_aim toggle_key must be a supported key name"
+                ));
+            }
+            if !recenter_threshold.is_finite() || !(0.1..=1.0).contains(recenter_threshold) {
+                errors.push(format!(
+                    "binding {binding} mouse_aim recenter_threshold must be finite and within 0.1..=1.0"
+                ));
+            }
+            if ads_multiplier
+                .is_some_and(|value| !value.is_finite() || !(0.1..=1.0).contains(&value))
+            {
+                errors.push(format!(
+                    "binding {binding} mouse_aim ads_multiplier must be finite and within 0.1..=1.0"
+                ));
+            }
+            if matches!(reaffirm_ms, Some(0)) {
+                errors.push(format!(
+                    "binding {binding} mouse_aim reaffirm_ms must be greater than zero"
                 ));
             }
         }
@@ -288,6 +399,57 @@ fn validate_action(action: &ActionV2, binding: &str, errors: &mut Vec<String>) {
                 validate_action(step, &format!("{binding}.step[{index}]"), errors);
             }
         }
+    }
+}
+
+fn validate_binding_compatibility(
+    input: &InputV2,
+    action: &ActionV2,
+    binding: &str,
+    errors: &mut Vec<String>,
+) {
+    let required = match action {
+        ActionV2::Tap { .. } | ActionV2::Hold { .. }
+            if !matches!(input, InputV2::Key { .. } | InputV2::MouseButton { .. }) =>
+        {
+            Some("key or mouse_button")
+        }
+        ActionV2::VirtualJoystick { .. } if !matches!(input, InputV2::KeyCluster { .. }) => {
+            Some("key_cluster")
+        }
+        ActionV2::MouseAim { .. } if !matches!(input, InputV2::MouseMove) => Some("mouse_move"),
+        ActionV2::Tap { .. }
+        | ActionV2::Hold { .. }
+        | ActionV2::VirtualJoystick { .. }
+        | ActionV2::MouseAim { .. }
+        | ActionV2::Macro { .. } => None,
+    };
+    if let Some(required) = required {
+        errors.push(format!(
+            "binding {binding} pairs {} input with {} action; {} requires {required}",
+            input_kind(input),
+            action_kind(action),
+            action_kind(action),
+        ));
+    }
+}
+
+fn input_kind(input: &InputV2) -> &'static str {
+    match input {
+        InputV2::Key { .. } => "key",
+        InputV2::KeyCluster { .. } => "key_cluster",
+        InputV2::MouseButton { .. } => "mouse_button",
+        InputV2::MouseMove => "mouse_move",
+    }
+}
+
+fn action_kind(action: &ActionV2) -> &'static str {
+    match action {
+        ActionV2::Tap { .. } => "tap",
+        ActionV2::Hold { .. } => "hold",
+        ActionV2::VirtualJoystick { .. } => "virtual_joystick",
+        ActionV2::MouseAim { .. } => "mouse_aim",
+        ActionV2::Macro { .. } => "macro",
     }
 }
 
@@ -327,6 +489,61 @@ const fn default_sensitivity() -> f64 {
     1.0
 }
 
+const fn default_recenter_threshold() -> f64 {
+    0.7
+}
+
+fn known_key_name(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "0" | "1"
+            | "2"
+            | "3"
+            | "4"
+            | "5"
+            | "6"
+            | "7"
+            | "8"
+            | "9"
+            | "a"
+            | "b"
+            | "c"
+            | "d"
+            | "e"
+            | "f"
+            | "g"
+            | "h"
+            | "i"
+            | "j"
+            | "k"
+            | "l"
+            | "m"
+            | "n"
+            | "o"
+            | "p"
+            | "q"
+            | "r"
+            | "s"
+            | "t"
+            | "u"
+            | "v"
+            | "w"
+            | "x"
+            | "y"
+            | "z"
+            | "space"
+            | "tab"
+            | "shift"
+            | "ctrl"
+            | "alt"
+            | "up"
+            | "left"
+            | "down"
+            | "right"
+            | "esc"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,6 +577,44 @@ mod tests {
     #[test]
     fn valid_profile_passes() {
         valid_profile().validate().unwrap();
+    }
+
+    #[test]
+    fn incompatible_input_action_pairs_are_rejected() {
+        let mut profile = valid_profile();
+        profile.bindings[0].input = InputV2::Key {
+            key: "w".to_owned(),
+        };
+        let errors = profile.validate().unwrap_err().errors.join("; ");
+        assert!(errors.contains("virtual_joystick requires key_cluster"));
+
+        let mut profile = valid_profile();
+        profile.bindings[1].input = InputV2::MouseMove;
+        let errors = profile.validate().unwrap_err().errors.join("; ");
+        assert!(errors.contains("tap requires key or mouse_button"));
+    }
+
+    #[test]
+    fn hold_action_round_trips_and_validates_its_point() {
+        let action: ActionV2 =
+            serde_json::from_str(r#"{"kind":"hold","point":{"x":0.91,"y":0.48}}"#).unwrap();
+        assert_eq!(
+            action,
+            ActionV2::Hold {
+                point: NormalizedPoint { x: 0.91, y: 0.48 }
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&action).unwrap()["kind"],
+            serde_json::json!("hold")
+        );
+
+        let mut profile = valid_profile();
+        profile.bindings[0].action = ActionV2::Hold {
+            point: NormalizedPoint { x: 1.1, y: 0.48 },
+        };
+        let errors = profile.validate().unwrap_err().errors.join("; ");
+        assert!(errors.contains("hold point"));
     }
 
     #[test]
@@ -447,5 +702,101 @@ mod tests {
             .errors
             .iter()
             .any(|item| item.contains("dead_zone must be smaller than radius")));
+    }
+
+    #[test]
+    fn legacy_mouse_aim_uses_comfort_defaults() {
+        let action: ActionV2 = serde_json::from_str(
+            r#"{
+                "kind": "mouse_aim",
+                "region": { "x": 0.35, "y": 0.05, "w": 0.6, "h": 0.85 },
+                "sensitivity": 1.2
+            }"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            action,
+            ActionV2::MouseAim {
+                toggle_key: None,
+                recenter_threshold,
+                recenter_gap_ms: 0,
+                ads_multiplier: None,
+                reaffirm_ms: None,
+                ..
+            } if (recenter_threshold - 0.7).abs() < f64::EPSILON
+        ));
+    }
+
+    #[test]
+    fn mouse_aim_comfort_fields_validate() {
+        let mut profile = valid_profile();
+        profile.bindings.push(BindingV2 {
+            name: "aim".to_owned(),
+            input: InputV2::MouseMove,
+            action: ActionV2::MouseAim {
+                region: NormalizedRect {
+                    x: 0.35,
+                    y: 0.05,
+                    w: 0.6,
+                    h: 0.85,
+                },
+                sensitivity: 1.2,
+                toggle_key: Some("tab".to_owned()),
+                recenter_threshold: 0.7,
+                recenter_gap_ms: 0,
+                ads_multiplier: Some(0.6),
+                reaffirm_ms: Some(50),
+            },
+        });
+
+        profile.validate().unwrap();
+
+        let ActionV2::MouseAim {
+            ref mut toggle_key,
+            ref mut recenter_threshold,
+            ref mut ads_multiplier,
+            ref mut reaffirm_ms,
+            ..
+        } = profile.bindings.last_mut().unwrap().action
+        else {
+            unreachable!()
+        };
+        *toggle_key = Some("unknown".to_owned());
+        *recenter_threshold = 0.05;
+        *ads_multiplier = Some(1.2);
+        *reaffirm_ms = Some(0);
+
+        let errors = profile.validate().unwrap_err().errors.join("; ");
+        assert!(errors.contains("toggle_key"));
+        assert!(errors.contains("recenter_threshold"));
+        assert!(errors.contains("ads_multiplier"));
+        assert!(errors.contains("reaffirm_ms"));
+    }
+
+    #[test]
+    fn saves_valid_profile_atomically_and_loads_it_back() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("profile.json");
+        let profile = valid_profile();
+
+        profile.save_to_path(&path).unwrap();
+
+        assert_eq!(ProfileV2::load_from_path(&path).unwrap(), profile);
+        assert!(fs::read_to_string(path).unwrap().ends_with('\n'));
+    }
+
+    #[test]
+    fn refuses_to_save_invalid_profile() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("profile.json");
+        let mut profile = valid_profile();
+        profile.name.clear();
+
+        assert!(matches!(
+            profile.save_to_path(&path),
+            Err(ProfileV2SaveError::InvalidProfile(_))
+        ));
+        assert!(!path.exists());
     }
 }

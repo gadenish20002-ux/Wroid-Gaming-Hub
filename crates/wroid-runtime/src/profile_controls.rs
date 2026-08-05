@@ -1,12 +1,15 @@
+use std::time::Duration;
+
 use thiserror::Error;
 use wroid_core::profile_v2::{
-    materialize_axis, ActionV2, BindingV2, InputV2, ProfileV2, ProfileV2ValidationError,
+    materialize_axis, ActionV2, BindingV2, InputV2, JoystickMode, ProfileV2,
+    ProfileV2ValidationError,
 };
 use wroid_core::{Point, Resolution};
 
 use crate::{
-    ContactId, MouseAim, MouseAimConfigError, MouseAimRegion, MouseAimSensitivity, VirtualJoystick,
-    VirtualJoystickConfigError,
+    ContactId, MouseAim, MouseAimConfigError, MouseAimRegion, MouseAimSensitivity,
+    MouseAimSettings, VirtualJoystick, VirtualJoystickConfigError,
 };
 
 /// Runtime-ready controls materialized from a profile v2 document.
@@ -58,9 +61,21 @@ pub struct RuntimeControlBinding {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeControlAction {
-    Tap { point: Point },
-    VirtualJoystick { joystick: VirtualJoystick },
-    MouseAim { aim: MouseAim },
+    Tap {
+        point: Point,
+    },
+    Hold {
+        point: Point,
+    },
+    VirtualJoystick {
+        joystick: VirtualJoystick,
+        mode: JoystickMode,
+        reaffirm_interval: Option<Duration>,
+    },
+    MouseAim {
+        aim: MouseAim,
+        settings: MouseAimSettings,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -94,11 +109,15 @@ fn materialize_action(
         ActionV2::Tap { point } => Ok(RuntimeControlAction::Tap {
             point: point.materialize(resolution),
         }),
+        ActionV2::Hold { point } => Ok(RuntimeControlAction::Hold {
+            point: point.materialize(resolution),
+        }),
         ActionV2::VirtualJoystick {
             center,
             radius,
             dead_zone,
-            ..
+            mode,
+            reaffirm_ms,
         } => {
             let contact_id = allocate_contact_id(next_contact_id);
             let joystick = VirtualJoystick::from_profile_v2_geometry(
@@ -108,13 +127,23 @@ fn materialize_action(
                 binding: binding.name.clone(),
                 source,
             })?;
-            Ok(RuntimeControlAction::VirtualJoystick { joystick })
+            Ok(RuntimeControlAction::VirtualJoystick {
+                joystick,
+                mode: mode.clone(),
+                reaffirm_interval: reaffirm_ms.map(Duration::from_millis),
+            })
         }
         ActionV2::MouseAim {
             region,
             sensitivity,
+            toggle_key,
+            recenter_threshold,
+            recenter_gap_ms,
+            ads_multiplier,
+            reaffirm_ms,
         } => {
             let contact_id = allocate_contact_id(next_contact_id);
+            let alternate_contact_id = allocate_contact_id(next_contact_id);
             let left = materialize_axis(region.x, resolution.width);
             let top = materialize_axis(region.y, resolution.height);
             let right = materialize_axis(region.x + region.w, resolution.width);
@@ -141,7 +170,25 @@ fn materialize_action(
                     source,
                 },
             )?;
-            Ok(RuntimeControlAction::MouseAim { aim })
+            let ads_multiplier = ads_multiplier
+                .map(|value| {
+                    materialize_mouse_sensitivity(value).ok_or_else(|| {
+                        RuntimeControlPlanError::InvalidMouseAimSensitivity {
+                            binding: binding.name.clone(),
+                            sensitivity: value,
+                        }
+                    })
+                })
+                .transpose()?;
+            let settings = MouseAimSettings {
+                alternate_contact_id,
+                toggle_key: toggle_key.clone(),
+                recenter_threshold_milli: (*recenter_threshold * 1_000.0).round() as u16,
+                recenter_gap: Duration::from_millis(*recenter_gap_ms),
+                ads_multiplier,
+                reaffirm_interval: reaffirm_ms.map(Duration::from_millis),
+            };
+            Ok(RuntimeControlAction::MouseAim { aim, settings })
         }
         ActionV2::Macro { .. } => Err(RuntimeControlPlanError::UnsupportedAction {
             binding: binding.name.clone(),
@@ -208,6 +255,11 @@ mod tests {
                             h: 0.78,
                         },
                         sensitivity: 1.2,
+                        toggle_key: Some("tab".to_owned()),
+                        recenter_threshold: 0.7,
+                        recenter_gap_ms: 0,
+                        ads_multiplier: Some(0.6),
+                        reaffirm_ms: Some(50),
                     },
                 },
                 BindingV2 {
@@ -217,6 +269,15 @@ mod tests {
                     },
                     action: ActionV2::Tap {
                         point: NormalizedPoint { x: 0.86, y: 0.50 },
+                    },
+                },
+                BindingV2 {
+                    name: "automatic_fire".to_owned(),
+                    input: InputV2::MouseButton {
+                        button: "side".to_owned(),
+                    },
+                    action: ActionV2::Hold {
+                        point: NormalizedPoint { x: 0.80, y: 0.40 },
                     },
                 },
             ],
@@ -235,22 +296,37 @@ mod tests {
         assert_eq!(plan.profile_name, "Shooter v2");
         assert_eq!(plan.package_name, "com.example.shooter");
         assert_eq!(plan.resolution, resolution);
-        assert_eq!(plan.controls.len(), 3);
+        assert_eq!(plan.controls.len(), 4);
 
         let movement = plan.control("movement").unwrap();
-        let RuntimeControlAction::VirtualJoystick { joystick } = &movement.action else {
+        let RuntimeControlAction::VirtualJoystick {
+            joystick,
+            mode,
+            reaffirm_interval,
+        } = &movement.action
+        else {
             panic!("movement should materialize as a virtual joystick");
         };
         assert_eq!(joystick.contact_id(), ContactId::new(1));
         assert_eq!(joystick.center(), Point { x: 345, y: 842 });
         assert_eq!(joystick.radius(), 97);
         assert_eq!(joystick.dead_zone(), 22);
+        assert_eq!(mode, &JoystickMode::Hold);
+        assert_eq!(*reaffirm_interval, Some(Duration::from_millis(50)));
 
         let aim = plan.control("aim").unwrap();
-        let RuntimeControlAction::MouseAim { aim } = &aim.action else {
+        let RuntimeControlAction::MouseAim { aim, settings } = &aim.action else {
             panic!("aim should materialize as mouse aim");
         };
         assert_eq!(aim.contact_id(), ContactId::new(2));
+        assert_eq!(settings.alternate_contact_id, ContactId::new(3));
+        assert_eq!(settings.toggle_key.as_deref(), Some("tab"));
+        assert_eq!(settings.recenter_threshold_milli, 700);
+        assert_eq!(
+            settings.ads_multiplier,
+            Some(MouseAimSensitivity::new(600, 1000).unwrap())
+        );
+        assert_eq!(settings.reaffirm_interval, Some(Duration::from_millis(50)));
         assert_eq!(
             aim.region(),
             MouseAimRegion {
@@ -271,6 +347,14 @@ mod tests {
             &fire.action,
             &RuntimeControlAction::Tap {
                 point: Point { x: 1650, y: 540 }
+            }
+        );
+
+        let automatic_fire = plan.control("automatic_fire").unwrap();
+        assert_eq!(
+            &automatic_fire.action,
+            &RuntimeControlAction::Hold {
+                point: Point { x: 1535, y: 432 }
             }
         );
     }
