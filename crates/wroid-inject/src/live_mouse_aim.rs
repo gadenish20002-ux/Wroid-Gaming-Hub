@@ -17,13 +17,15 @@ use wroid_runtime::{
     TouchEngine, TouchEngineError, TouchInjector,
 };
 
-use crate::waydroid_bridge::{remove_default_bridge, InputDeviceNode, InstalledWaydroidBridge};
+use crate::waydroid_bridge::{
+    remove_default_bridge, InputDeviceNode, InstalledWaydroidBridge, WaydroidBridgeLease,
+};
 use crate::waydroid_session::{
     ensure_container_stopped, ensure_root, spawn_android_getevent_trace, stop_child,
     wait_for_android_boot_completed, wait_for_android_input_device, DesktopUser,
-    DesktopWaydroidSession, WROID_TOUCHSCREEN_NAME,
+    DesktopWaydroidSession,
 };
-use crate::{DeviceConfig, UinputTouchInjector};
+use crate::{DeviceConfig, UinputTouchInjector, WROID_TOUCHSCREEN_NAME};
 
 pub const DEFAULT_MOUSE_AIM_WIDTH: u32 = 1920;
 pub const DEFAULT_MOUSE_AIM_HEIGHT: u32 = 1080;
@@ -228,6 +230,7 @@ pub fn run_live_mouse_aim_cli(args: &[String], binary_name: &str) -> LiveMouseAi
 
 pub fn cleanup_live_mouse_aim_bridge() -> LiveMouseAimResult<()> {
     ensure_root("Waydroid live mouse aim")?;
+    let _bridge_lease = WaydroidBridgeLease::acquire_default("live mouse aim recovery")?;
     remove_default_bridge()?;
     println!("Removed the managed Wroid input bridge from the Waydroid LXC config.");
     Ok(())
@@ -235,6 +238,7 @@ pub fn cleanup_live_mouse_aim_bridge() -> LiveMouseAimResult<()> {
 
 pub fn run_live_mouse_aim_session(options: LiveMouseAimOptions) -> LiveMouseAimResult<()> {
     ensure_root("Waydroid live mouse aim")?;
+    let _bridge_lease = WaydroidBridgeLease::acquire_default("live mouse aim session")?;
     ensure_container_stopped()?;
     remove_default_bridge()?;
     install_interrupt_handler()?;

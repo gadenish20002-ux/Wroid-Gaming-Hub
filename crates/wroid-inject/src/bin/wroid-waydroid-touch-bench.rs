@@ -9,7 +9,7 @@ use wroid_core::Point;
 use wroid_inject::{
     ensure_container_stopped, ensure_root, remove_default_bridge, wait_for_android_input_device,
     DesktopUser, DesktopWaydroidSession, DeviceConfig, InputDeviceNode, InstalledWaydroidBridge,
-    UinputTouchInjector, WROID_TOUCHSCREEN_NAME,
+    UinputTouchInjector, WaydroidBridgeLease, WROID_TOUCHSCREEN_NAME,
 };
 use wroid_runtime::{ContactId, TouchEngine};
 
@@ -24,6 +24,7 @@ const GETEVENT_TIMEOUT_GRACE_SECONDS: u64 = 10;
 
 fn main() -> Result<(), Box<dyn Error>> {
     ensure_root("Waydroid touch benchmark")?;
+    let _bridge_lease = WaydroidBridgeLease::acquire_default("Waydroid touch benchmark")?;
 
     let Some(options) = Options::parse(std::env::args().skip(1))? else {
         print_usage();

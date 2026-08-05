@@ -9,7 +9,7 @@ use wroid_core::Point;
 use wroid_inject::{
     ensure_container_stopped, ensure_root, remove_default_bridge, wait_for_android_input_device,
     DesktopUser, DesktopWaydroidSession, DeviceConfig, InputDeviceNode, InstalledWaydroidBridge,
-    UinputTouchInjector, WROID_TOUCHSCREEN_NAME,
+    UinputTouchInjector, WaydroidBridgeLease, WROID_TOUCHSCREEN_NAME,
 };
 use wroid_runtime::{ContactId, TouchEngine};
 
@@ -17,6 +17,7 @@ const CAPTURE_EVENT_COUNT: &str = "13";
 
 fn main() -> Result<(), Box<dyn Error>> {
     ensure_root("Waydroid input smoke test")?;
+    let _bridge_lease = WaydroidBridgeLease::acquire_default("input bridge smoke test")?;
 
     if std::env::args().any(|argument| argument == "--cleanup") {
         remove_default_bridge()?;

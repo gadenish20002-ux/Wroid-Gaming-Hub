@@ -3,10 +3,11 @@ use std::path::PathBuf;
 
 use evdev::uinput::VirtualDevice;
 use evdev::{
-    AbsInfo, AbsoluteAxisCode, AttributeSet, InputEvent, KeyCode, PropType, UinputAbsSetup,
+    AbsInfo, AbsoluteAxisCode, AttributeSet, BusType, InputEvent, InputId, KeyCode, PropType,
+    UinputAbsSetup,
 };
 
-use crate::config::MAX_EVENTS_PER_FRAME;
+use crate::config::{MAX_EVENTS_PER_FRAME, WROID_TOUCHSCREEN_PRODUCT, WROID_TOUCHSCREEN_VENDOR};
 use crate::{DeviceConfig, EventSink, LinuxInputEvent};
 
 #[derive(Debug)]
@@ -30,6 +31,12 @@ impl EvdevEventSink {
 
         let device = VirtualDevice::builder()?
             .name(config.name.as_str())
+            .input_id(InputId::new(
+                BusType::BUS_VIRTUAL,
+                WROID_TOUCHSCREEN_VENDOR,
+                WROID_TOUCHSCREEN_PRODUCT,
+                1,
+            ))
             .with_keys(&keys)?
             .with_properties(&properties)?
             .with_absolute_axis(&UinputAbsSetup::new(AbsoluteAxisCode::ABS_X, x_info))?

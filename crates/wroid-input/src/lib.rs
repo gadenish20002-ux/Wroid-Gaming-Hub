@@ -4,8 +4,10 @@
 //! events into backend-independent runtime actions. It does not know about
 //! Waydroid lifecycle, Android packages, GUI toolkits, or profile storage.
 
+use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use evdev::{Device, EventSummary, InputEvent, KeyCode};
 use thiserror::Error;
@@ -13,12 +15,21 @@ use wroid_runtime::DirectionalInput;
 
 pub mod mouse;
 
-const REQUIRED_KEYS: [(KeyCode, &str); 5] = [
+const INPUT_BY_ID: &str = "/dev/input/by-id";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputDeviceInfo {
+    pub path: PathBuf,
+    pub name: String,
+}
+
+const REQUIRED_KEYS: [(KeyCode, &str); 6] = [
     (KeyCode::KEY_W, "W"),
     (KeyCode::KEY_A, "A"),
     (KeyCode::KEY_S, "S"),
     (KeyCode::KEY_D, "D"),
     (KeyCode::KEY_ESC, "Esc"),
+    (KeyCode::KEY_F12, "F12"),
 ];
 
 /// Logical movement keys used by the first keyboard-to-joystick runtime slice.
@@ -34,24 +45,104 @@ pub enum MovementKey {
 /// Profile-visible host keys supported by the current keyboard capture backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HostKey {
-    W,
+    Num0,
+    Num1,
+    Num2,
+    Num3,
+    Num4,
+    Num5,
+    Num6,
+    Num7,
+    Num8,
+    Num9,
     A,
-    S,
+    B,
+    C,
+    W,
     D,
+    E,
+    F,
+    G,
+    H,
+    I,
+    J,
+    K,
+    L,
+    M,
+    N,
+    O,
+    P,
+    Q,
     R,
+    S,
+    T,
+    U,
+    V,
+    X,
+    Y,
+    Z,
     Space,
+    Tab,
+    LeftShift,
+    LeftCtrl,
+    LeftAlt,
+    ArrowUp,
+    ArrowLeft,
+    ArrowDown,
+    ArrowRight,
+    F12,
     Esc,
 }
 
 impl HostKey {
     pub const fn profile_name(self) -> &'static str {
         match self {
-            Self::W => "w",
+            Self::Num0 => "0",
+            Self::Num1 => "1",
+            Self::Num2 => "2",
+            Self::Num3 => "3",
+            Self::Num4 => "4",
+            Self::Num5 => "5",
+            Self::Num6 => "6",
+            Self::Num7 => "7",
+            Self::Num8 => "8",
+            Self::Num9 => "9",
             Self::A => "a",
-            Self::S => "s",
+            Self::B => "b",
+            Self::C => "c",
             Self::D => "d",
+            Self::E => "e",
+            Self::F => "f",
+            Self::G => "g",
+            Self::H => "h",
+            Self::I => "i",
+            Self::J => "j",
+            Self::K => "k",
+            Self::L => "l",
+            Self::M => "m",
+            Self::N => "n",
+            Self::O => "o",
+            Self::P => "p",
+            Self::Q => "q",
             Self::R => "r",
+            Self::S => "s",
+            Self::T => "t",
+            Self::U => "u",
+            Self::V => "v",
+            Self::W => "w",
+            Self::X => "x",
+            Self::Y => "y",
+            Self::Z => "z",
             Self::Space => "space",
+            Self::Tab => "tab",
+            Self::LeftShift => "shift",
+            Self::LeftCtrl => "ctrl",
+            Self::LeftAlt => "alt",
+            Self::ArrowUp => "up",
+            Self::ArrowLeft => "left",
+            Self::ArrowDown => "down",
+            Self::ArrowRight => "right",
+            Self::F12 => "f12",
             Self::Esc => "esc",
         }
     }
@@ -63,7 +154,7 @@ impl HostKey {
             Self::S => Some(MovementKey::Down),
             Self::D => Some(MovementKey::Right),
             Self::Esc => Some(MovementKey::Exit),
-            Self::R | Self::Space => None,
+            _ => None,
         }
     }
 }
@@ -81,6 +172,12 @@ pub enum KeyTransition {
 pub struct HostKeyEvent {
     pub key: HostKey,
     pub transition: KeyTransition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostKeyEventBatch {
+    pub events: Vec<HostKeyEvent>,
+    pub kernel_timestamp: Option<SystemTime>,
 }
 
 impl HostKeyEvent {
@@ -177,6 +274,17 @@ impl DirectionalKeyState {
 
 #[derive(Debug, Error)]
 pub enum KeyboardDeviceError {
+    #[error("failed to discover {kind} devices under /dev/input/by-id: {source}")]
+    Discovery {
+        kind: &'static str,
+        #[source]
+        source: io::Error,
+    },
+    #[error("no usable {kind} device found under {directory}; pass an explicit device path")]
+    NoMatchingDevice {
+        kind: &'static str,
+        directory: PathBuf,
+    },
     #[error("failed to open keyboard device {path}: {source}")]
     Open {
         path: PathBuf,
@@ -211,6 +319,12 @@ pub enum KeyboardDeviceError {
         #[source]
         source: io::Error,
     },
+}
+
+impl KeyboardDeviceError {
+    pub fn is_would_block(&self) -> bool {
+        matches!(self, Self::Read { source, .. } if source.kind() == io::ErrorKind::WouldBlock)
+    }
 }
 
 /// Blocking evdev keyboard reader with optional exclusive grab.
@@ -312,6 +426,11 @@ impl EvdevKeyboard {
     /// profile-visible key events supported by the current runtime slice unless
     /// the device was configured as nonblocking by the caller.
     pub fn next_host_key_events(&mut self) -> Result<Vec<HostKeyEvent>, KeyboardDeviceError> {
+        Ok(self.next_host_key_batch()?.events)
+    }
+
+    /// Returns normalized key events with the oldest matching evdev timestamp.
+    pub fn next_host_key_batch(&mut self) -> Result<HostKeyEventBatch, KeyboardDeviceError> {
         let events = self
             .device
             .fetch_events()
@@ -319,7 +438,19 @@ impl EvdevKeyboard {
                 path: self.path.clone(),
                 source,
             })?;
-        Ok(events.filter_map(normalize_host_input_event).collect())
+        let mut normalized = Vec::new();
+        let mut kernel_timestamp = None;
+        for event in events {
+            let timestamp = event.timestamp();
+            if let Some(event) = normalize_host_input_event(event) {
+                kernel_timestamp = oldest_timestamp(kernel_timestamp, timestamp);
+                normalized.push(event);
+            }
+        }
+        Ok(HostKeyEventBatch {
+            events: normalized,
+            kernel_timestamp,
+        })
     }
 
     /// Blocks until at least one kernel event is available and returns only the
@@ -337,12 +468,134 @@ impl EvdevKeyboard {
     }
 }
 
+fn oldest_timestamp(current: Option<SystemTime>, next: SystemTime) -> Option<SystemTime> {
+    Some(current.map_or(next, |current| current.min(next)))
+}
+
 impl Drop for EvdevKeyboard {
     fn drop(&mut self) {
         if self.grabbed {
             let _ = self.device.ungrab();
         }
     }
+}
+
+pub fn discover_keyboard_path() -> Result<PathBuf, KeyboardDeviceError> {
+    Ok(discover_keyboard_devices()?
+        .into_iter()
+        .next()
+        .expect("device discovery returns an error when no keyboard matches")
+        .path)
+}
+
+pub fn discover_keyboard_devices() -> Result<Vec<InputDeviceInfo>, KeyboardDeviceError> {
+    let candidates =
+        by_id_candidates("-event-kbd").map_err(|source| KeyboardDeviceError::Discovery {
+            kind: "keyboard",
+            source,
+        })?;
+    let mut last_error = None;
+    let mut matches = Vec::new();
+    for path in candidates {
+        match EvdevKeyboard::open(&path) {
+            Ok(device) => matches.push((
+                device_preference(device.name(), &path, "keyboard"),
+                InputDeviceInfo {
+                    path,
+                    name: device.name().to_owned(),
+                },
+            )),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    matches.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1.path.cmp(&right.1.path))
+    });
+    if !matches.is_empty() {
+        return Ok(matches.into_iter().map(|(_, device)| device).collect());
+    }
+    Err(
+        last_error.unwrap_or_else(|| KeyboardDeviceError::NoMatchingDevice {
+            kind: "keyboard",
+            directory: PathBuf::from(INPUT_BY_ID),
+        }),
+    )
+}
+
+pub fn discover_mouse_path() -> Result<PathBuf, mouse::MouseDeviceError> {
+    Ok(discover_mouse_devices()?
+        .into_iter()
+        .next()
+        .expect("device discovery returns an error when no mouse matches")
+        .path)
+}
+
+pub fn discover_mouse_devices() -> Result<Vec<InputDeviceInfo>, mouse::MouseDeviceError> {
+    let candidates =
+        by_id_candidates("-event-mouse").map_err(|source| mouse::MouseDeviceError::Discovery {
+            kind: "mouse",
+            source,
+        })?;
+    let mut last_error = None;
+    let mut matches = Vec::new();
+    for path in candidates {
+        match mouse::EvdevMouse::open(&path) {
+            Ok(device) => matches.push((
+                device_preference(device.name(), &path, "mouse"),
+                InputDeviceInfo {
+                    path,
+                    name: device.name().to_owned(),
+                },
+            )),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    matches.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1.path.cmp(&right.1.path))
+    });
+    if !matches.is_empty() {
+        return Ok(matches.into_iter().map(|(_, device)| device).collect());
+    }
+    Err(
+        last_error.unwrap_or_else(|| mouse::MouseDeviceError::NoMatchingDevice {
+            kind: "mouse",
+            directory: PathBuf::from(INPUT_BY_ID),
+        }),
+    )
+}
+
+fn by_id_candidates(suffix: &str) -> io::Result<Vec<PathBuf>> {
+    let mut candidates = fs::read_dir(INPUT_BY_ID)?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.ends_with(suffix))
+                .then_some(entry.path())
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+    Ok(candidates)
+}
+
+fn device_preference(device_name: &str, path: &Path, expected_kind: &str) -> u8 {
+    let device_name = device_name.to_ascii_lowercase();
+    let path = path.to_string_lossy().to_ascii_lowercase();
+    let other_kind = if expected_kind == "keyboard" {
+        "mouse"
+    } else {
+        "keyboard"
+    };
+    u8::from(device_name.contains(expected_kind)) * 4
+        + u8::from(!device_name.contains(other_kind)) * 2
+        + u8::from(path.contains(expected_kind))
 }
 
 fn normalize_input_event(event: InputEvent) -> Option<KeyboardEvent> {
@@ -355,12 +608,52 @@ fn normalize_host_input_event(event: InputEvent) -> Option<HostKeyEvent> {
     };
 
     let key = match code {
-        KeyCode::KEY_W => HostKey::W,
+        KeyCode::KEY_0 => HostKey::Num0,
+        KeyCode::KEY_1 => HostKey::Num1,
+        KeyCode::KEY_2 => HostKey::Num2,
+        KeyCode::KEY_3 => HostKey::Num3,
+        KeyCode::KEY_4 => HostKey::Num4,
+        KeyCode::KEY_5 => HostKey::Num5,
+        KeyCode::KEY_6 => HostKey::Num6,
+        KeyCode::KEY_7 => HostKey::Num7,
+        KeyCode::KEY_8 => HostKey::Num8,
+        KeyCode::KEY_9 => HostKey::Num9,
         KeyCode::KEY_A => HostKey::A,
-        KeyCode::KEY_S => HostKey::S,
+        KeyCode::KEY_B => HostKey::B,
+        KeyCode::KEY_C => HostKey::C,
         KeyCode::KEY_D => HostKey::D,
+        KeyCode::KEY_E => HostKey::E,
+        KeyCode::KEY_F => HostKey::F,
+        KeyCode::KEY_G => HostKey::G,
+        KeyCode::KEY_H => HostKey::H,
+        KeyCode::KEY_I => HostKey::I,
+        KeyCode::KEY_J => HostKey::J,
+        KeyCode::KEY_K => HostKey::K,
+        KeyCode::KEY_L => HostKey::L,
+        KeyCode::KEY_M => HostKey::M,
+        KeyCode::KEY_N => HostKey::N,
+        KeyCode::KEY_O => HostKey::O,
+        KeyCode::KEY_P => HostKey::P,
+        KeyCode::KEY_Q => HostKey::Q,
         KeyCode::KEY_R => HostKey::R,
+        KeyCode::KEY_S => HostKey::S,
+        KeyCode::KEY_T => HostKey::T,
+        KeyCode::KEY_U => HostKey::U,
+        KeyCode::KEY_V => HostKey::V,
+        KeyCode::KEY_W => HostKey::W,
+        KeyCode::KEY_X => HostKey::X,
+        KeyCode::KEY_Y => HostKey::Y,
+        KeyCode::KEY_Z => HostKey::Z,
         KeyCode::KEY_SPACE => HostKey::Space,
+        KeyCode::KEY_TAB => HostKey::Tab,
+        KeyCode::KEY_LEFTSHIFT => HostKey::LeftShift,
+        KeyCode::KEY_LEFTCTRL => HostKey::LeftCtrl,
+        KeyCode::KEY_LEFTALT => HostKey::LeftAlt,
+        KeyCode::KEY_UP => HostKey::ArrowUp,
+        KeyCode::KEY_LEFT => HostKey::ArrowLeft,
+        KeyCode::KEY_DOWN => HostKey::ArrowDown,
+        KeyCode::KEY_RIGHT => HostKey::ArrowRight,
+        KeyCode::KEY_F12 => HostKey::F12,
         KeyCode::KEY_ESC => HostKey::Esc,
         _ => return None,
     };
@@ -387,7 +680,47 @@ mod tests {
         assert_eq!(HostKey::W.profile_name(), "w");
         assert_eq!(HostKey::R.profile_name(), "r");
         assert_eq!(HostKey::Space.profile_name(), "space");
+        assert_eq!(HostKey::Tab.profile_name(), "tab");
+        assert_eq!(HostKey::ArrowUp.profile_name(), "up");
+        assert_eq!(HostKey::Num1.profile_name(), "1");
+        assert_eq!(HostKey::F12.profile_name(), "f12");
         assert_eq!(HostKey::Esc.profile_name(), "esc");
+    }
+
+    #[test]
+    fn normalizes_f12_as_the_capture_toggle() {
+        let event = InputEvent::new(evdev::EventType::KEY.0, KeyCode::KEY_F12.0, 1);
+
+        assert_eq!(
+            normalize_host_input_event(event),
+            Some(HostKeyEvent::new(HostKey::F12, KeyTransition::Pressed))
+        );
+    }
+
+    #[test]
+    fn discovery_prefers_real_device_kind_over_composite_interfaces() {
+        assert!(
+            device_preference(
+                "Logitech G403 Gaming Mouse",
+                Path::new("/dev/input/by-id/logitech-event-mouse"),
+                "mouse"
+            ) > device_preference(
+                "Hexgears Gaming Keyboard",
+                Path::new("/dev/input/by-id/hexgears-if02-event-mouse"),
+                "mouse"
+            )
+        );
+        assert!(
+            device_preference(
+                "Hexgears Gaming Keyboard",
+                Path::new("/dev/input/by-id/hexgears-event-kbd"),
+                "keyboard"
+            ) > device_preference(
+                "Logitech G403 Gaming Mouse",
+                Path::new("/dev/input/by-id/logitech-if01-event-kbd"),
+                "keyboard"
+            )
+        );
     }
 
     #[test]

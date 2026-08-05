@@ -7,10 +7,12 @@
 mod config;
 mod error;
 mod event;
+mod game_session;
 mod injector;
 #[allow(private_interfaces)]
 mod live_keyboard;
 mod live_mouse_aim;
+mod privileged_bridge;
 mod sink;
 mod state;
 mod transition;
@@ -18,9 +20,16 @@ mod translate;
 mod waydroid_bridge;
 mod waydroid_session;
 
-pub use config::{DeviceConfig, DeviceConfigError, DEFAULT_SLOT_COUNT, MAX_SLOT_COUNT};
+pub use config::{
+    DeviceConfig, DeviceConfigError, DEFAULT_SLOT_COUNT, MAX_SLOT_COUNT, WROID_TOUCHSCREEN_NAME,
+    WROID_TOUCHSCREEN_PRODUCT, WROID_TOUCHSCREEN_VENDOR,
+};
 pub use error::UinputFrameError;
 pub use event::{EventSink, LinuxInputEvent};
+pub use game_session::{
+    run_game_session, run_game_session_cli, GameSessionOptions, GameSessionReport,
+    GameSessionResult, LatencyMetrics,
+};
 pub use injector::UinputTouchInjector;
 pub use live_keyboard::{
     cleanup_live_keyboard_bridge, default_joystick_center, default_joystick_radius,
@@ -35,16 +44,22 @@ pub use live_mouse_aim::{
     LiveMouseAimCommand, LiveMouseAimOptions, MouseAimAction, MouseAimBinding, MouseAimController,
     DEFAULT_MOUSE_AIM_HEIGHT, DEFAULT_MOUSE_AIM_READY_DELAY, DEFAULT_MOUSE_AIM_WIDTH,
 };
+pub use privileged_bridge::{
+    run_privileged_bridge_helper, run_privileged_bridge_helper_check,
+    validate_installed_bridge_helper, BridgeHelperCommand, PrivilegedBridgeHelper,
+    DEFAULT_PRIVILEGED_BRIDGE_HELPER,
+};
 pub use sink::EvdevEventSink;
 pub use waydroid_bridge::{
-    remove_bridge, remove_default_bridge, render_bridge_config, CgroupMode, InputDeviceNode,
-    InstalledWaydroidBridge, WaydroidBridgePaths, DEFAULT_WAYDROID_BRIDGE_CONFIG,
-    DEFAULT_WAYDROID_CONFIG,
+    active_bridge_lease_owner, active_default_bridge_lease_owner, remove_bridge,
+    remove_default_bridge, render_bridge_config, validate_wroid_touchscreen_node, CgroupMode,
+    InputDeviceNode, InstalledWaydroidBridge, WaydroidBridgeLease, WaydroidBridgePaths,
+    DEFAULT_WAYDROID_BRIDGE_CONFIG, DEFAULT_WAYDROID_BRIDGE_LOCK, DEFAULT_WAYDROID_CONFIG,
 };
 pub use waydroid_session::{
     ensure_container_stopped, ensure_root, spawn_android_getevent_trace, stop_child,
-    wait_for_android_boot_completed, wait_for_android_input_device, DesktopUser,
-    DesktopWaydroidSession, WROID_TOUCHSCREEN_NAME,
+    wait_for_android_boot_completed, wait_for_android_display_size, wait_for_android_input_device,
+    DesktopUser, DesktopWaydroidSession,
 };
 
 #[cfg(test)]

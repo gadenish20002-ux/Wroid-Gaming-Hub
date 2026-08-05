@@ -8,8 +8,9 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
-use evdev::{Device, EventSummary, InputEvent, KeyCode, RelativeAxisCode};
+use evdev::{Device, EventSummary, InputEvent, KeyCode, RelativeAxisCode, SynchronizationCode};
 use thiserror::Error;
 
 const REQUIRED_RELATIVE_AXES: [(RelativeAxisCode, &str); 2] = [
@@ -123,8 +124,25 @@ pub enum MouseEvent {
     Button(MouseButtonEvent),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MouseEventBatch {
+    pub events: Vec<MouseEvent>,
+    pub kernel_timestamp: Option<SystemTime>,
+}
+
 #[derive(Debug, Error)]
 pub enum MouseDeviceError {
+    #[error("failed to discover {kind} devices under /dev/input/by-id: {source}")]
+    Discovery {
+        kind: &'static str,
+        #[source]
+        source: io::Error,
+    },
+    #[error("no usable {kind} device found under {directory}; pass an explicit device path")]
+    NoMatchingDevice {
+        kind: &'static str,
+        directory: PathBuf,
+    },
     #[error("failed to open mouse device {path}: {source}")]
     Open {
         path: PathBuf,
@@ -165,6 +183,12 @@ pub enum MouseDeviceError {
     },
 }
 
+impl MouseDeviceError {
+    pub fn is_would_block(&self) -> bool {
+        matches!(self, Self::Read { source, .. } if source.kind() == io::ErrorKind::WouldBlock)
+    }
+}
+
 /// Blocking evdev relative mouse reader with optional exclusive grab.
 ///
 /// Exclusive grab is opt-in. It is useful for gaming mode because relative
@@ -176,6 +200,7 @@ pub struct EvdevMouse {
     path: PathBuf,
     name: String,
     grabbed: bool,
+    normalizer: MouseEventBatcher,
 }
 
 impl EvdevMouse {
@@ -213,6 +238,7 @@ impl EvdevMouse {
             path,
             name,
             grabbed: false,
+            normalizer: MouseEventBatcher::default(),
         })
     }
 
@@ -226,6 +252,10 @@ impl EvdevMouse {
 
     pub const fn is_grabbed(&self) -> bool {
         self.grabbed
+    }
+
+    pub fn clear_pending_report(&mut self) {
+        self.normalizer = MouseEventBatcher::default();
     }
 
     pub fn set_nonblocking(&mut self, nonblocking: bool) -> Result<(), MouseDeviceError> {
@@ -271,14 +301,20 @@ impl EvdevMouse {
     /// normalized mouse events unless nonblocking mode was configured by the
     /// caller.
     pub fn next_events(&mut self) -> Result<Vec<MouseEvent>, MouseDeviceError> {
+        Ok(self.next_event_batch()?.events)
+    }
+
+    /// Returns completed SYN_REPORT-aware events with their oldest evdev timestamp.
+    pub fn next_event_batch(&mut self) -> Result<MouseEventBatch, MouseDeviceError> {
         let events = self
             .device
             .fetch_events()
             .map_err(|source| MouseDeviceError::Read {
                 path: self.path.clone(),
                 source,
-            })?;
-        Ok(events.filter_map(normalize_mouse_input_event).collect())
+            })?
+            .collect::<Vec<_>>();
+        Ok(self.normalizer.push_event_batch(events))
     }
 }
 
@@ -296,6 +332,105 @@ pub fn normalize_mouse_input_event(event: InputEvent) -> Option<MouseEvent> {
         EventSummary::Key(_, code, value) => normalize_button_event(code, value),
         _ => None,
     }
+}
+
+pub fn normalize_mouse_input_events(
+    events: impl IntoIterator<Item = InputEvent>,
+) -> Vec<MouseEvent> {
+    MouseEventBatcher::default().push_events(events)
+}
+
+#[derive(Default)]
+struct MouseEventBatcher {
+    pending: Vec<MouseEvent>,
+    motion: RelativeMouseMotion,
+    wheel: MouseWheel,
+    pending_timestamp: Option<SystemTime>,
+}
+
+impl MouseEventBatcher {
+    fn push_events(&mut self, events: impl IntoIterator<Item = InputEvent>) -> Vec<MouseEvent> {
+        self.push_event_batch(events).events
+    }
+
+    fn push_event_batch(
+        &mut self,
+        events: impl IntoIterator<Item = InputEvent>,
+    ) -> MouseEventBatch {
+        let mut completed = MouseEventBatch {
+            events: Vec::new(),
+            kernel_timestamp: None,
+        };
+        for event in events {
+            let timestamp = event.timestamp();
+            match event.destructure() {
+                EventSummary::RelativeAxis(_, code, value) => match code {
+                    RelativeAxisCode::REL_X => {
+                        self.note_timestamp(timestamp);
+                        self.motion.dx = self.motion.dx.saturating_add(value);
+                    }
+                    RelativeAxisCode::REL_Y => {
+                        self.note_timestamp(timestamp);
+                        self.motion.dy = self.motion.dy.saturating_add(value);
+                    }
+                    RelativeAxisCode::REL_WHEEL => {
+                        self.note_timestamp(timestamp);
+                        self.wheel.vertical = self.wheel.vertical.saturating_add(value);
+                    }
+                    RelativeAxisCode::REL_HWHEEL => {
+                        self.note_timestamp(timestamp);
+                        self.wheel.horizontal = self.wheel.horizontal.saturating_add(value);
+                    }
+                    _ => {}
+                },
+                EventSummary::Key(_, code, value) => {
+                    if let Some(button) = normalize_button_event(code, value) {
+                        self.note_timestamp(timestamp);
+                        self.flush_relative_events();
+                        self.pending.push(button);
+                    }
+                }
+                EventSummary::Synchronization(_, SynchronizationCode::SYN_REPORT, _) => {
+                    self.flush_relative_events();
+                    if !self.pending.is_empty() {
+                        if let Some(timestamp) = self.pending_timestamp {
+                            completed.kernel_timestamp =
+                                oldest_timestamp(completed.kernel_timestamp, timestamp);
+                        }
+                        completed.events.append(&mut self.pending);
+                    }
+                    self.pending_timestamp = None;
+                }
+                EventSummary::Synchronization(_, SynchronizationCode::SYN_DROPPED, _) => {
+                    self.pending.clear();
+                    self.motion = RelativeMouseMotion::default();
+                    self.wheel = MouseWheel::default();
+                    self.pending_timestamp = None;
+                }
+                _ => {}
+            }
+        }
+        completed
+    }
+
+    fn note_timestamp(&mut self, timestamp: SystemTime) {
+        self.pending_timestamp = oldest_timestamp(self.pending_timestamp, timestamp);
+    }
+
+    fn flush_relative_events(&mut self) {
+        if !self.motion.is_zero() {
+            self.pending.push(MouseEvent::Motion(self.motion));
+            self.motion = RelativeMouseMotion::default();
+        }
+        if !self.wheel.is_zero() {
+            self.pending.push(MouseEvent::Wheel(self.wheel));
+            self.wheel = MouseWheel::default();
+        }
+    }
+}
+
+fn oldest_timestamp(current: Option<SystemTime>, next: SystemTime) -> Option<SystemTime> {
+    Some(current.map_or(next, |current| current.min(next)))
 }
 
 fn normalize_relative_axis(code: RelativeAxisCode, value: i32) -> Option<MouseEvent> {
@@ -351,6 +486,23 @@ fn scale_axis(value: i32, sensitivity: f64) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use evdev::EventType;
+
+    fn relative(code: RelativeAxisCode, value: i32) -> InputEvent {
+        InputEvent::new(EventType::RELATIVE.0, code.0, value)
+    }
+
+    fn button(code: KeyCode, value: i32) -> InputEvent {
+        InputEvent::new(EventType::KEY.0, code.0, value)
+    }
+
+    fn sync() -> InputEvent {
+        InputEvent::new(
+            EventType::SYNCHRONIZATION.0,
+            SynchronizationCode::SYN_REPORT.0,
+            0,
+        )
+    }
 
     #[test]
     fn button_names_match_profile_v2_strings() {
@@ -409,5 +561,66 @@ mod tests {
             RelativeMouseMotion::new(1, 2).scaled(0.0),
             RelativeMouseMotion::new(1, 2)
         );
+    }
+
+    #[test]
+    fn batch_coalesces_xy_axes_inside_each_kernel_report() {
+        let events = normalize_mouse_input_events([
+            relative(RelativeAxisCode::REL_X, 4),
+            relative(RelativeAxisCode::REL_Y, -3),
+            relative(RelativeAxisCode::REL_X, 2),
+            sync(),
+            relative(RelativeAxisCode::REL_X, -1),
+            relative(RelativeAxisCode::REL_Y, 5),
+            sync(),
+        ]);
+
+        assert_eq!(
+            events,
+            [
+                MouseEvent::Motion(RelativeMouseMotion::new(6, -3)),
+                MouseEvent::Motion(RelativeMouseMotion::new(-1, 5)),
+            ]
+        );
+    }
+
+    #[test]
+    fn batch_preserves_button_boundaries_and_combines_wheel_axes() {
+        let events = normalize_mouse_input_events([
+            relative(RelativeAxisCode::REL_X, 7),
+            button(KeyCode::BTN_LEFT, 1),
+            relative(RelativeAxisCode::REL_Y, 3),
+            relative(RelativeAxisCode::REL_WHEEL, 1),
+            relative(RelativeAxisCode::REL_HWHEEL, -2),
+            sync(),
+        ]);
+
+        assert_eq!(
+            events,
+            [
+                MouseEvent::Motion(RelativeMouseMotion::new(7, 0)),
+                MouseEvent::Button(MouseButtonEvent::new(
+                    MouseButton::Left,
+                    MouseButtonTransition::Pressed,
+                )),
+                MouseEvent::Motion(RelativeMouseMotion::new(0, 3)),
+                MouseEvent::Wheel(MouseWheel::new(1, -2)),
+            ]
+        );
+    }
+
+    #[test]
+    fn batch_keeps_an_incomplete_report_across_reads() {
+        let mut batcher = MouseEventBatcher::default();
+        let incomplete = batcher.push_event_batch([relative(RelativeAxisCode::REL_X, 8)]);
+        assert!(incomplete.events.is_empty());
+        assert!(incomplete.kernel_timestamp.is_none());
+
+        let completed = batcher.push_event_batch([relative(RelativeAxisCode::REL_Y, -5), sync()]);
+        assert_eq!(
+            completed.events,
+            [MouseEvent::Motion(RelativeMouseMotion::new(8, -5))]
+        );
+        assert_eq!(completed.kernel_timestamp, Some(SystemTime::UNIX_EPOCH));
     }
 }

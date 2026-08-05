@@ -2,8 +2,10 @@ use thiserror::Error;
 
 pub const DEFAULT_SLOT_COUNT: u16 = 10;
 pub const MAX_SLOT_COUNT: u16 = 32;
+pub const WROID_TOUCHSCREEN_NAME: &str = "Wroid Gaming Touchscreen";
+pub const WROID_TOUCHSCREEN_VENDOR: u16 = 0x5752;
+pub const WROID_TOUCHSCREEN_PRODUCT: u16 = 0x0001;
 pub(crate) const MAX_EVENTS_PER_FRAME: usize = MAX_SLOT_COUNT as usize * 4 + 3;
-const DEVICE_NAME: &str = "Wroid Gaming Touchscreen";
 const MAX_DEVICE_NAME_LEN: usize = 78;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,11 +18,11 @@ pub struct DeviceConfig {
 
 impl DeviceConfig {
     pub fn new(width: u32, height: u32) -> Result<Self, DeviceConfigError> {
-        Self::with_name_and_slots(DEVICE_NAME, width, height, DEFAULT_SLOT_COUNT)
+        Self::with_name_and_slots(WROID_TOUCHSCREEN_NAME, width, height, DEFAULT_SLOT_COUNT)
     }
 
     pub fn with_slots(width: u32, height: u32, slot_count: u16) -> Result<Self, DeviceConfigError> {
-        Self::with_name_and_slots(DEVICE_NAME, width, height, slot_count)
+        Self::with_name_and_slots(WROID_TOUCHSCREEN_NAME, width, height, slot_count)
     }
 
     pub fn with_name_and_slots(

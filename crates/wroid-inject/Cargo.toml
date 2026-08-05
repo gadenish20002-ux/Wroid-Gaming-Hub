@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 evdev.workspace = true
+libc.workspace = true
 thiserror.workspace = true
 wroid-core = { path = "../wroid-core" }
 wroid-input = { path = "../wroid-input" }

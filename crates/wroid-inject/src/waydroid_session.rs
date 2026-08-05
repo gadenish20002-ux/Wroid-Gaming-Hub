@@ -1,20 +1,21 @@
 use std::ffi::OsString;
-use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom};
-use std::os::unix::fs::FileTypeExt;
+use std::fs;
+use std::io::{self, BufRead, BufReader, Write};
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::thread::sleep;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::thread::{self, sleep, JoinHandle};
 use std::time::Duration;
-
-pub const WROID_TOUCHSCREEN_NAME: &str = "Wroid Gaming Touchscreen";
-pub const DEFAULT_WAYDROID_LOG: &str = "/var/lib/waydroid/waydroid.log";
 
 const STATUS_ATTEMPTS: usize = 60;
 const USER_READY_ATTEMPTS: usize = 240;
 const STATUS_INTERVAL: Duration = Duration::from_millis(500);
 const DEFAULT_ANDROID_USER_ID: u32 = 0;
+const WAYDROID_WIDTH_PROPERTY: &str = "persist.waydroid.width";
+const WAYDROID_HEIGHT_PROPERTY: &str = "persist.waydroid.height";
+const MAX_WAYDROID_DIMENSION: u32 = 9_999;
 
 #[derive(Debug, Clone)]
 pub struct DesktopUser {
@@ -22,6 +23,13 @@ pub struct DesktopUser {
     home: PathBuf,
     runtime_dir: PathBuf,
     wayland_display: OsString,
+    launch: DesktopUserLaunch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DesktopUserLaunch {
+    Current,
+    Runuser,
 }
 
 impl DesktopUser {
@@ -68,7 +76,70 @@ impl DesktopUser {
             home,
             runtime_dir,
             wayland_display,
+            launch: DesktopUserLaunch::Runuser,
         })
+    }
+
+    pub fn from_current_environment() -> io::Result<Self> {
+        let uid = effective_uid()?;
+        if uid == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "current desktop-user discovery must not run as root",
+            ));
+        }
+        let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "XDG_RUNTIME_DIR is unavailable for the desktop Waydroid session",
+                )
+            })?;
+        let metadata = fs::metadata(&runtime_dir)?;
+        if !metadata.is_dir() || metadata.uid() != uid {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "desktop runtime directory is not owned by the current user: {}",
+                    runtime_dir.display()
+                ),
+            ));
+        }
+        if !runtime_dir.join("bus").exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "desktop DBus socket is missing: {}/bus",
+                    runtime_dir.display()
+                ),
+            ));
+        }
+        let home = std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is unavailable"))?;
+        let name = std::env::var("USER").unwrap_or_else(|_| uid.to_string());
+        let wayland_display = std::env::var_os("WAYLAND_DISPLAY")
+            .filter(|value| !value.is_empty())
+            .map(Ok)
+            .unwrap_or_else(|| detect_wayland_display(&runtime_dir))?;
+        Ok(Self {
+            name,
+            home,
+            runtime_dir,
+            wayland_display,
+            launch: DesktopUserLaunch::Current,
+        })
+    }
+
+    pub fn from_session_environment() -> io::Result<Self> {
+        if effective_uid()? == 0 {
+            Self::from_sudo_environment()
+        } else {
+            Self::from_current_environment()
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -83,29 +154,51 @@ impl DesktopUser {
         let mut wayland = OsString::from("WAYLAND_DISPLAY=");
         wayland.push(&self.wayland_display);
 
-        let mut command = Command::new("runuser");
+        let mut command = match self.launch {
+            DesktopUserLaunch::Current => {
+                let mut command = Command::new("waydroid");
+                command.args(arguments);
+                command
+            }
+            DesktopUserLaunch::Runuser => {
+                let mut command = Command::new("runuser");
+                command
+                    .arg("-u")
+                    .arg(&self.name)
+                    .arg("--")
+                    .arg("env")
+                    .arg(format!("HOME={}", self.home.display()))
+                    .arg(format!("XDG_RUNTIME_DIR={}", self.runtime_dir.display()))
+                    .arg(format!(
+                        "DBUS_SESSION_BUS_ADDRESS=unix:path={}/bus",
+                        self.runtime_dir.display()
+                    ))
+                    .arg(&wayland)
+                    .arg("waydroid")
+                    .args(arguments);
+                command
+            }
+        };
         command
-            .arg("-u")
-            .arg(&self.name)
-            .arg("--")
-            .arg("env")
-            .arg(format!("HOME={}", self.home.display()))
-            .arg(format!("XDG_RUNTIME_DIR={}", self.runtime_dir.display()))
-            .arg(format!(
-                "DBUS_SESSION_BUS_ADDRESS=unix:path={}/bus",
-                self.runtime_dir.display()
-            ))
-            .arg(wayland)
-            .arg("waydroid")
-            .args(arguments);
+            .env("HOME", &self.home)
+            .env("XDG_RUNTIME_DIR", &self.runtime_dir)
+            .env(
+                "DBUS_SESSION_BUS_ADDRESS",
+                format!("unix:path={}/bus", self.runtime_dir.display()),
+            )
+            .env("WAYLAND_DISPLAY", &self.wayland_display);
         isolate_from_terminal_interrupts(&mut command);
         command
     }
 
     fn run(&self, arguments: &[&str]) -> io::Result<()> {
+        self.output(arguments).map(|_| ())
+    }
+
+    fn output(&self, arguments: &[&str]) -> io::Result<Output> {
         let output = self.command(arguments).output()?;
         if output.status.success() {
-            return Ok(());
+            return Ok(output);
         }
 
         Err(io::Error::other(format!(
@@ -117,11 +210,23 @@ impl DesktopUser {
     }
 }
 
+fn effective_uid() -> io::Result<u32> {
+    let status = fs::read_to_string("/proc/self/status")?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|uids| uids.split_whitespace().nth(1))
+        .and_then(|uid| uid.parse::<u32>().ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "cannot read effective UID"))
+}
+
 pub struct DesktopWaydroidSession {
     child: Child,
     user: DesktopUser,
     active: bool,
-    log_offset: u64,
+    ready_users: Vec<u32>,
+    readiness: Receiver<u32>,
+    output_threads: Vec<JoinHandle<()>>,
 }
 
 impl DesktopWaydroidSession {
@@ -135,18 +240,27 @@ impl DesktopWaydroidSession {
             user.name(),
             user.wayland_display().to_string_lossy()
         );
-        let log_offset = current_log_len(Path::new(DEFAULT_WAYDROID_LOG))?;
-        let child = user
+        let mut child = user
             .command(&["session", "start"])
             .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()?;
+        let (readiness, output_threads) = match capture_session_output(&mut child) {
+            Ok(capture) => capture,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
         let mut session = Self {
             child,
             user,
             active: true,
-            log_offset,
+            ready_users: Vec::new(),
+            readiness,
+            output_threads,
         };
 
         if let Err(error) = session.wait_until_running() {
@@ -165,10 +279,47 @@ impl DesktopWaydroidSession {
         self.user.run(&["show-full-ui"])
     }
 
+    pub fn launch_package(&self, package_name: &str) -> io::Result<()> {
+        if package_name.trim().is_empty()
+            || package_name.chars().any(|character| {
+                !(character.is_ascii_alphanumeric() || matches!(character, '_' | '.'))
+            })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid Android package name: {package_name}"),
+            ));
+        }
+        self.user.run(&["app", "launch", package_name])
+    }
+
+    /// Persist the selected Waydroid render size.
+    ///
+    /// Returns `true` when the session must be restarted for the new properties
+    /// to take effect.
+    pub fn configure_resolution(&self, width: u32, height: u32) -> io::Result<bool> {
+        configure_resolution_properties(&self.user, width, height)
+    }
+
+    pub fn confirm_resolution(&self, width: u32, height: u32) -> io::Result<()> {
+        confirm_resolution_properties(&self.user, width, height)
+    }
+
+    pub fn wait_until_android_ready(&mut self) -> io::Result<()> {
+        self.wait_until_android_user_ready(DEFAULT_ANDROID_USER_ID)
+    }
+
+    pub fn restart(&mut self) -> io::Result<()> {
+        self.stop()?;
+        let replacement = Self::start(self.user.clone())?;
+        *self = replacement;
+        Ok(())
+    }
+
     pub fn wait_until_android_user_ready(&mut self, user_id: u32) -> io::Result<()> {
-        let marker = android_user_ready_marker(user_id);
-        let log_path = Path::new(DEFAULT_WAYDROID_LOG);
-        let mut observed = String::new();
+        if self.ready_users.contains(&user_id) {
+            return Ok(());
+        }
 
         for _ in 0..USER_READY_ATTEMPTS {
             if let Some(status) = self.child.try_wait()? {
@@ -177,25 +328,33 @@ impl DesktopWaydroidSession {
                 )));
             }
 
-            let delta = read_log_delta(log_path, &mut self.log_offset)?;
-            if !delta.is_empty() {
-                observed.push_str(&delta);
-                if observed.contains(&marker) {
-                    println!(
-                        "Android with user {user_id} is ready (readiness confirmed by Waydroid)."
+            match self.readiness.recv_timeout(STATUS_INTERVAL) {
+                Ok(ready_user) => {
+                    if !self.ready_users.contains(&ready_user) {
+                        self.ready_users.push(ready_user);
+                    }
+                    if ready_user == user_id {
+                        println!(
+                            "Android with user {user_id} is ready (captured from Waydroid session output)."
                     );
-                    return Ok(());
+                        return Ok(());
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        format!(
+                            "Waydroid session output closed before Android user {user_id} became ready"
+                        ),
+                    ));
                 }
             }
-            sleep(STATUS_INTERVAL);
         }
 
         Err(io::Error::new(
             io::ErrorKind::TimedOut,
-            format!(
-                "Waydroid did not report Android user {user_id} readiness before UI launch{}",
-                readiness_log_context(&observed)
-            ),
+            format!("Waydroid did not report Android user {user_id} readiness before UI launch"),
         ))
     }
 
@@ -217,7 +376,7 @@ impl DesktopWaydroidSession {
             last_status = waydroid_status()?;
             if waydroid_is_stopped(&last_status) {
                 self.active = false;
-                let _ = self.child.wait();
+                self.reap_child_and_output();
                 return match user_stop_error {
                     Some(error) => Err(error),
                     None => Ok(()),
@@ -229,7 +388,7 @@ impl DesktopWaydroidSession {
         let fallback = run_waydroid(&["container", "stop"]);
         self.active = false;
         let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.reap_child_and_output();
         fallback?;
         Err(io::Error::new(
             io::ErrorKind::TimedOut,
@@ -247,8 +406,11 @@ impl DesktopWaydroidSession {
             }
 
             last_status = waydroid_status()?;
-            if container_state(&last_status) == Some("RUNNING") {
-                println!("Waydroid container is RUNNING.");
+            if waydroid_container_started(&last_status) {
+                println!(
+                    "Waydroid container is {}.",
+                    container_state(&last_status).unwrap_or("READY")
+                );
                 return Ok(());
             }
             sleep(STATUS_INTERVAL);
@@ -258,6 +420,13 @@ impl DesktopWaydroidSession {
             io::ErrorKind::TimedOut,
             format!("Waydroid container did not reach RUNNING state\n{last_status}"),
         ))
+    }
+
+    fn reap_child_and_output(&mut self) {
+        let _ = self.child.wait();
+        for output_thread in self.output_threads.drain(..) {
+            let _ = output_thread.join();
+        }
     }
 }
 
@@ -270,15 +439,7 @@ impl Drop for DesktopWaydroidSession {
 }
 
 pub fn ensure_root(tool_name: &str) -> io::Result<()> {
-    let status = fs::read_to_string("/proc/self/status")?;
-    let effective_uid = status
-        .lines()
-        .find_map(|line| line.strip_prefix("Uid:"))
-        .and_then(|uids| uids.split_whitespace().nth(1))
-        .and_then(|uid| uid.parse::<u32>().ok())
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "cannot read effective UID"))?;
-
-    if effective_uid != 0 {
+    if effective_uid()? != 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!("{tool_name} requires root; run it with sudo"),
@@ -292,7 +453,7 @@ pub fn ensure_container_stopped() -> io::Result<()> {
     ensure_container_stopped_status(&status)
 }
 
-fn ensure_container_stopped_status(status: &str) -> io::Result<()> {
+pub(crate) fn ensure_container_stopped_status(status: &str) -> io::Result<()> {
     if container_state(status) == Some("RUNNING") {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
@@ -324,6 +485,26 @@ pub fn wait_for_android_boot_completed() -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::TimedOut,
         format!("Android did not report sys.boot_completed=1\n{last_output}"),
+    ))
+}
+
+pub fn wait_for_android_display_size(width: u32, height: u32) -> io::Result<()> {
+    let mut last_output = String::new();
+    for _ in 0..STATUS_ATTEMPTS {
+        let output = waydroid_command(&["shell", "--", "wm", "size"]).output()?;
+        last_output = combined_output(&output);
+        if output.status.success()
+            && parse_android_display_size(&last_output) == Some((width, height))
+        {
+            println!("Android display size confirmed at {width}x{height}.");
+            return Ok(());
+        }
+        sleep(STATUS_INTERVAL);
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!("Android display size did not become {width}x{height}\n{last_output}"),
     ))
 }
 
@@ -366,46 +547,63 @@ pub fn stop_child(child: &mut Child) -> io::Result<()> {
     Ok(())
 }
 
-fn current_log_len(path: &Path) -> io::Result<u64> {
-    match fs::metadata(path) {
-        Ok(metadata) => Ok(metadata.len()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
-        Err(error) => Err(error),
-    }
+fn android_user_ready_event(line: &str) -> Option<u32> {
+    let (_, event) = line.split_once("Android with user ")?;
+    event
+        .trim_end()
+        .strip_suffix(" is ready")?
+        .parse::<u32>()
+        .ok()
 }
 
-fn read_log_delta(path: &Path, offset: &mut u64) -> io::Result<String> {
-    let mut file = match File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(String::new()),
-        Err(error) => return Err(error),
-    };
-    let len = file.metadata()?.len();
-    if len < *offset {
-        *offset = 0;
-    }
-    file.seek(SeekFrom::Start(*offset))?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    *offset = file.stream_position()?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+fn capture_session_output(child: &mut Child) -> io::Result<(Receiver<u32>, Vec<JoinHandle<()>>)> {
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("Waydroid session stdout pipe is unavailable"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("Waydroid session stderr pipe is unavailable"))?;
+    let (readiness_sender, readiness) = mpsc::channel();
+    let stderr_readiness_sender = readiness_sender.clone();
+    let stdout_thread = thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        let output = io::stdout();
+        let _ = forward_session_output(reader, output, Some(readiness_sender));
+    });
+    let stderr_thread = thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        let output = io::stderr();
+        let _ = forward_session_output(reader, output, Some(stderr_readiness_sender));
+    });
+    Ok((readiness, vec![stdout_thread, stderr_thread]))
 }
 
-fn android_user_ready_marker(user_id: u32) -> String {
-    format!("Android with user {user_id} is ready")
-}
-
-fn readiness_log_context(observed: &str) -> String {
-    if observed.is_empty() {
-        return String::new();
+fn forward_session_output<R, W>(
+    mut reader: R,
+    mut writer: W,
+    readiness: Option<Sender<u32>>,
+) -> io::Result<()>
+where
+    R: BufRead,
+    W: Write,
+{
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            return Ok(());
+        }
+        writer.write_all(&line)?;
+        writer.flush()?;
+        if let (Some(sender), Some(user_id)) = (
+            readiness.as_ref(),
+            android_user_ready_event(&String::from_utf8_lossy(&line)),
+        ) {
+            let _ = sender.send(user_id);
+        }
     }
-    let start = observed
-        .char_indices()
-        .rev()
-        .nth(2047)
-        .map(|(index, _)| index)
-        .unwrap_or(0);
-    format!("\nRecent Waydroid log output:\n{}", &observed[start..])
 }
 
 fn waydroid_status() -> io::Result<String> {
@@ -426,6 +624,10 @@ fn session_state(status: &str) -> Option<&str> {
 
 fn container_state(status: &str) -> Option<&str> {
     status_field(status, "Container")
+}
+
+fn waydroid_container_started(status: &str) -> bool {
+    matches!(container_state(status), Some("RUNNING" | "FROZEN"))
 }
 
 fn waydroid_is_stopped(status: &str) -> bool {
@@ -464,6 +666,131 @@ fn combined_output(output: &Output) -> String {
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&output.stderr));
     text
+}
+
+trait WaydroidPropertyControl {
+    fn get_property(&self, key: &str) -> io::Result<String>;
+    fn set_property(&self, key: &str, value: &str) -> io::Result<()>;
+}
+
+impl WaydroidPropertyControl for DesktopUser {
+    fn get_property(&self, key: &str) -> io::Result<String> {
+        let output = self.output(&["prop", "get", key])?;
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+
+    fn set_property(&self, key: &str, value: &str) -> io::Result<()> {
+        self.run(&["prop", "set", key, value])
+    }
+}
+
+fn configure_resolution_properties<C: WaydroidPropertyControl>(
+    control: &C,
+    width: u32,
+    height: u32,
+) -> io::Result<bool> {
+    if width == 0
+        || height == 0
+        || width > MAX_WAYDROID_DIMENSION
+        || height > MAX_WAYDROID_DIMENSION
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Waydroid render size must be within 1..={MAX_WAYDROID_DIMENSION}; got {width}x{height}"
+            ),
+        ));
+    }
+
+    let original_width = control.get_property(WAYDROID_WIDTH_PROPERTY)?;
+    let original_height = control.get_property(WAYDROID_HEIGHT_PROPERTY)?;
+    let target_width = width.to_string();
+    let target_height = height.to_string();
+    if original_width == target_width && original_height == target_height {
+        println!("Waydroid render resolution is already {width}x{height}.");
+        return Ok(false);
+    }
+
+    let update = (|| -> io::Result<()> {
+        if original_width != target_width {
+            control.set_property(WAYDROID_WIDTH_PROPERTY, &target_width)?;
+        }
+        if original_height != target_height {
+            control.set_property(WAYDROID_HEIGHT_PROPERTY, &target_height)?;
+        }
+        let saved_width = control.get_property(WAYDROID_WIDTH_PROPERTY)?;
+        let saved_height = control.get_property(WAYDROID_HEIGHT_PROPERTY)?;
+        if saved_width != target_width || saved_height != target_height {
+            return Err(io::Error::other(format!(
+                "Waydroid did not persist render size {width}x{height}; saved values are '{saved_width}'x'{saved_height}'"
+            )));
+        }
+        Ok(())
+    })();
+
+    if let Err(update_error) = update {
+        let rollback = restore_resolution_properties(control, &original_width, &original_height);
+        return Err(match rollback {
+            Ok(()) => io::Error::new(
+                update_error.kind(),
+                format!("failed to configure Waydroid render size: {update_error}"),
+            ),
+            Err(rollback_error) => io::Error::other(format!(
+                "failed to configure Waydroid render size: {update_error}; rollback also failed: {rollback_error}"
+            )),
+        });
+    }
+
+    println!(
+        "Configured Waydroid render resolution {width}x{height}; restarting the Android session once."
+    );
+    Ok(true)
+}
+
+fn confirm_resolution_properties<C: WaydroidPropertyControl>(
+    control: &C,
+    width: u32,
+    height: u32,
+) -> io::Result<()> {
+    let reported_width = control.get_property(WAYDROID_WIDTH_PROPERTY)?;
+    let reported_height = control.get_property(WAYDROID_HEIGHT_PROPERTY)?;
+    if reported_width == width.to_string() && reported_height == height.to_string() {
+        println!("Waydroid render resolution confirmed at {width}x{height}.");
+        return Ok(());
+    }
+
+    Err(io::Error::other(format!(
+        "Waydroid render resolution mismatch: requested {width}x{height}, reported {reported_width}x{reported_height}"
+    )))
+}
+
+fn restore_resolution_properties<C: WaydroidPropertyControl>(
+    control: &C,
+    width: &str,
+    height: &str,
+) -> io::Result<()> {
+    let width_result = control.set_property(WAYDROID_WIDTH_PROPERTY, width);
+    let height_result = control.set_property(WAYDROID_HEIGHT_PROPERTY, height);
+    match (width_result, height_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(width_error), Err(height_error)) => Err(io::Error::other(format!(
+            "width restore failed: {width_error}; height restore failed: {height_error}"
+        ))),
+    }
+}
+
+fn parse_android_display_size(output: &str) -> Option<(u32, u32)> {
+    output
+        .lines()
+        .rev()
+        .find_map(|line| parse_size_token(line.trim()))
+}
+
+fn parse_size_token(line: &str) -> Option<(u32, u32)> {
+    let token = line.split_whitespace().last()?;
+    let (width, height) = token.split_once('x')?;
+    Some((width.parse().ok()?, height.parse().ok()?))
 }
 
 fn home_directory(user: &str) -> io::Result<PathBuf> {
@@ -519,9 +846,74 @@ fn detect_wayland_display(runtime_dir: &Path) -> io::Result<OsString> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+    use std::io::Cursor;
 
     use super::*;
+
+    #[derive(Default)]
+    struct FakeProperties {
+        values: RefCell<BTreeMap<String, String>>,
+        writes: RefCell<Vec<(String, String)>>,
+        fail_once: RefCell<Option<String>>,
+        ignore_once: RefCell<Option<String>>,
+    }
+
+    impl FakeProperties {
+        fn with_size(width: &str, height: &str) -> Self {
+            Self {
+                values: RefCell::new(BTreeMap::from([
+                    (WAYDROID_WIDTH_PROPERTY.to_owned(), width.to_owned()),
+                    (WAYDROID_HEIGHT_PROPERTY.to_owned(), height.to_owned()),
+                ])),
+                ..Self::default()
+            }
+        }
+    }
+
+    impl WaydroidPropertyControl for FakeProperties {
+        fn get_property(&self, key: &str) -> io::Result<String> {
+            Ok(self.values.borrow().get(key).cloned().unwrap_or_default())
+        }
+
+        fn set_property(&self, key: &str, value: &str) -> io::Result<()> {
+            self.writes
+                .borrow_mut()
+                .push((key.to_owned(), value.to_owned()));
+            if self.fail_once.borrow().as_deref() == Some(key) {
+                self.fail_once.borrow_mut().take();
+                return Err(io::Error::other("synthetic property failure"));
+            }
+            if self.ignore_once.borrow().as_deref() == Some(key) {
+                self.ignore_once.borrow_mut().take();
+                return Ok(());
+            }
+            self.values
+                .borrow_mut()
+                .insert(key.to_owned(), value.to_owned());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn current_user_waydroid_command_does_not_use_runuser() {
+        let user = DesktopUser {
+            name: "player".to_owned(),
+            home: PathBuf::from("/home/player"),
+            runtime_dir: PathBuf::from("/run/user/1000"),
+            wayland_display: OsString::from("wayland-0"),
+            launch: DesktopUserLaunch::Current,
+        };
+
+        let command = user.command(&["session", "start"]);
+
+        assert_eq!(command.get_program(), "waydroid");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["session", "start"].map(std::ffi::OsStr::new)
+        );
+    }
 
     #[test]
     fn detects_explicitly_stopped_container() {
@@ -540,6 +932,17 @@ mod tests {
         assert!(!waydroid_is_stopped(
             "Session:\tSTOPPED\nContainer:\tRUNNING\n"
         ));
+    }
+
+    #[test]
+    fn running_or_frozen_container_satisfies_startup_gate() {
+        assert!(waydroid_container_started(
+            "Session:\tRUNNING\nContainer:\tRUNNING\n"
+        ));
+        assert!(waydroid_container_started(
+            "Session:\tRUNNING\nContainer:\tFROZEN\n"
+        ));
+        assert!(!waydroid_container_started("Session:\tSTOPPED\n"));
     }
 
     #[test]
@@ -572,32 +975,145 @@ mod tests {
     }
 
     #[test]
-    fn readiness_cursor_ignores_stale_log_entries() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("waydroid.log");
-        fs::write(&path, "Android with user 0 is ready\n").unwrap();
-        let mut offset = current_log_len(&path).unwrap();
+    fn unchanged_render_resolution_does_not_request_restart() {
+        let properties = FakeProperties::with_size("1600", "900");
 
-        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        writeln!(file, "session starting").unwrap();
-        let first_delta = read_log_delta(&path, &mut offset).unwrap();
-        assert!(!first_delta.contains(&android_user_ready_marker(0)));
-
-        writeln!(file, "Android with user 0 is ready").unwrap();
-        let second_delta = read_log_delta(&path, &mut offset).unwrap();
-        assert!(second_delta.contains(&android_user_ready_marker(0)));
+        assert!(!configure_resolution_properties(&properties, 1600, 900).unwrap());
+        assert!(properties.writes.borrow().is_empty());
     }
 
     #[test]
-    fn readiness_log_reader_recovers_after_truncation() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("waydroid.log");
-        fs::write(&path, "older log contents that are deliberately long\n").unwrap();
-        let mut offset = current_log_len(&path).unwrap();
+    fn changed_render_resolution_is_persisted_and_requests_restart() {
+        let properties = FakeProperties::with_size("1920", "1080");
 
-        fs::write(&path, "Android with user 0 is ready\n").unwrap();
-        let delta = read_log_delta(&path, &mut offset).unwrap();
+        assert!(configure_resolution_properties(&properties, 1280, 720).unwrap());
+        assert_eq!(
+            properties
+                .values
+                .borrow()
+                .get(WAYDROID_WIDTH_PROPERTY)
+                .map(String::as_str),
+            Some("1280")
+        );
+        assert_eq!(
+            properties
+                .values
+                .borrow()
+                .get(WAYDROID_HEIGHT_PROPERTY)
+                .map(String::as_str),
+            Some("720")
+        );
+    }
 
-        assert!(delta.contains(&android_user_ready_marker(0)));
+    #[test]
+    fn confirms_exact_rootless_render_resolution() {
+        let properties = FakeProperties::with_size("1600", "900");
+
+        confirm_resolution_properties(&properties, 1600, 900).unwrap();
+    }
+
+    #[test]
+    fn rejects_mismatched_rootless_render_resolution() {
+        let properties = FakeProperties::with_size("1280", "720");
+
+        let error = confirm_resolution_properties(&properties, 1600, 900).unwrap_err();
+
+        assert!(error.to_string().contains("requested 1600x900"));
+        assert!(error.to_string().contains("reported 1280x720"));
+    }
+
+    #[test]
+    fn partial_render_resolution_failure_restores_both_properties() {
+        let properties = FakeProperties::with_size("1920", "1080");
+        *properties.fail_once.borrow_mut() = Some(WAYDROID_HEIGHT_PROPERTY.to_owned());
+
+        let error = configure_resolution_properties(&properties, 1280, 720).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("failed to configure Waydroid render size"));
+        assert_eq!(
+            properties
+                .values
+                .borrow()
+                .get(WAYDROID_WIDTH_PROPERTY)
+                .map(String::as_str),
+            Some("1920")
+        );
+        assert_eq!(
+            properties
+                .values
+                .borrow()
+                .get(WAYDROID_HEIGHT_PROPERTY)
+                .map(String::as_str),
+            Some("1080")
+        );
+    }
+
+    #[test]
+    fn render_resolution_readback_mismatch_restores_both_properties() {
+        let properties = FakeProperties::with_size("1920", "1080");
+        *properties.ignore_once.borrow_mut() = Some(WAYDROID_WIDTH_PROPERTY.to_owned());
+
+        let error = configure_resolution_properties(&properties, 1280, 720).unwrap_err();
+
+        assert!(error.to_string().contains("did not persist render size"));
+        assert_eq!(
+            properties
+                .values
+                .borrow()
+                .get(WAYDROID_WIDTH_PROPERTY)
+                .map(String::as_str),
+            Some("1920")
+        );
+        assert_eq!(
+            properties
+                .values
+                .borrow()
+                .get(WAYDROID_HEIGHT_PROPERTY)
+                .map(String::as_str),
+            Some("1080")
+        );
+    }
+
+    #[test]
+    fn parses_override_display_size_before_physical_size() {
+        assert_eq!(
+            parse_android_display_size("Physical size: 1920x1080\nOverride size: 1280x720\n"),
+            Some((1280, 720))
+        );
+        assert_eq!(
+            parse_android_display_size("Physical size: 1600x900\n"),
+            Some((1600, 900))
+        );
+    }
+
+    #[test]
+    fn parses_android_user_ready_from_real_session_stdout() {
+        assert_eq!(
+            android_user_ready_event("[13:07:35] Android with user 0 is ready\n"),
+            Some(0)
+        );
+        assert_eq!(
+            android_user_ready_event("[gbinder] Service manager /dev/binder has appeared\n"),
+            None
+        );
+        assert_eq!(
+            android_user_ready_event("[13:07:35] Android with user nope is ready\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn session_stdout_is_forwarded_and_publishes_readiness() {
+        let input = b"[gbinder] appeared\n[13:07:35] Android with user 0 is ready\n";
+        let mut output = Vec::new();
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        forward_session_output(Cursor::new(input), &mut output, Some(sender)).unwrap();
+
+        assert_eq!(output, input);
+        assert_eq!(receiver.try_recv().unwrap(), 0);
+        assert!(receiver.try_recv().is_err());
     }
 }
