@@ -1,0 +1,42 @@
+{
+  "schema_version": 2,
+  "name": "Brawl Stars — default landscape HUD",
+  "package_name": "com.supercell.brawlstars",
+  "orientation": "landscape",
+  "bindings": [
+    {
+      "name": "movement",
+      "input": { "kind": "key_cluster", "up": "w", "left": "a", "down": "s", "right": "d" },
+      "action": {
+        "kind": "virtual_joystick",
+        "center": { "x": 0.16, "y": 0.76 },
+        "radius": 0.095,
+        "dead_zone": 0.018,
+        "mode": "hold",
+        "reaffirm_ms": 50
+      }
+    },
+    {
+      "name": "attack",
+      "input": { "kind": "key_cluster", "up": "up", "left": "left", "down": "down", "right": "right" },
+      "action": {
+        "kind": "virtual_joystick",
+        "center": { "x": 0.83, "y": 0.76 },
+        "radius": 0.095,
+        "dead_zone": 0.018,
+        "mode": "hold",
+        "reaffirm_ms": 50
+      }
+    },
+    {
+      "name": "super_auto_aim",
+      "input": { "kind": "key", "key": "space" },
+      "action": { "kind": "tap", "point": { "x": 0.72, "y": 0.82 } }
+    },
+    {
+      "name": "gadget",
+      "input": { "kind": "key", "key": "e" },
+      "action": { "kind": "tap", "point": { "x": 0.90, "y": 0.55 } }
+    }
+  ]
+}

@@ -49,8 +49,8 @@ it is currently one wide CLI-private trait, not split per concern.
 - Profile v2: prototype schema + `wroid-profile-v2-validate` bin. **Not** the
   default runtime format.
 - Input (compatibility): `input tap/swipe/keyevent`, `binding run`.
-- App: list, launch (incl. sudo launch-as-desktop-user), install-apk (extension
-  guard), current activity.
+- App: list, launch (incl. sudo launch-as-desktop-user), extraction-free
+  package format/ABI inspection, install-apk preflight, current activity.
 - Device: screen, density, info; `doctor` with backend recommendation and the
   Waydroid `IP UNKNOWN` warning.
 - Gameplay (compatibility): `play`/`run`/`run-profile` load + validate a profile,
@@ -80,7 +80,20 @@ are the intended production gaming hot path.
    for setup, boot wait, and getevent tracing — never per input frame.
 
 The persistent `UinputTouchInjector` already satisfies "no subprocess per frame";
-the gap is that the CLI gameplay loop does not yet use it.
+`play-v2` and `launch-v2` now use it with direct evdev capture. The desktop-user
+process owns the hot path. A standalone root-owned typed helper validates and
+mounts only the Wroid virtual event node, then accepts only a fixed Android
+input readiness probe, cleanup, or EOF recovery. Boot readiness is captured
+from the owned desktop-user Waydroid session process and render-property
+readiness uses its D-Bus API; no root shell is exposed to the worker. Hub also
+requires the helper's permissions and contents
+to match the staged release. Exact `root:input` mode `4750`, a side-effect-free
+effective-root check, absolute subprocess paths, and environment clearing
+remove per-launch sudo without widening the helper protocol. Hub bootstrap is
+terminal-free:
+Polkit runs only fixed `/usr/bin/install` arguments against a write-sealed
+memfd held by a detached, leased user process, and the installed bytes are
+verified before readiness is published.
 
 ## Duplicated / overlapping logic to consolidate
 
@@ -110,6 +123,12 @@ are a typed allow-list, not arbitrary shell; stateful multitouch; runtime commit
 only after injection accepts; every shutdown/focus-loss/failure releases
 contacts; software renderer is a blocking perf issue; compatibility backend is
 explicit and never silently selected for gaming.
+
+Current status: `launch-v2` already keeps evdev, uinput, profile execution,
+focus control, and telemetry unprivileged. Its typed helper is limited to the
+temporary LXC bridge and fixed crash recovery. Per-user `wroidd` protocol v1
+now owns typed profile preparation and state over a private Unix socket; live
+runtime migration and policy-controlled helper activation remain.
 
 ## Phase-by-phase implementation order
 
@@ -146,9 +165,11 @@ current project prompt.)
 
 ## Risky areas
 
-- **uinput/evdev require privilege and real hardware.** `UinputTouchInjector::open`
-  and grabs are untestable in CI without `/dev/uinput` and a device; keep them
-  behind the `EventSink` trait so logic is unit-tested with a fake sink.
+- **uinput/evdev require explicit device permissions and real hardware.**
+  `UinputTouchInjector::open` and grabs are untestable in CI without
+  `/dev/uinput` and a device; keep them behind the `EventSink` trait so logic is
+  unit-tested with a fake sink. On the validated host, the desktop user has the
+  required `input` group access and rootless uinput creation is smoke-tested.
 - **Exclusive evdev grab** can lock the desktop out of the device; only grab a
   validated device, and guarantee release on every exit path (Drop already does
   this for keyboard/mouse).

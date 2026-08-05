@@ -25,7 +25,7 @@
     {
       "name": "fire",
       "input": { "kind": "mouse_button", "button": "left" },
-      "action": { "kind": "tap", "point": { "x": 0.86, "y": 0.50 } }
+      "action": { "kind": "hold", "point": { "x": 0.86, "y": 0.50 } }
     },
     {
       "name": "reload",

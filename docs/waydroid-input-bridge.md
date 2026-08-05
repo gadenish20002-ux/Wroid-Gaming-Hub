@@ -28,6 +28,18 @@ allowlist program that blocks every device not listed, including Binder devices
 required to boot Android. The smoke bridge preserves Waydroid's existing device
 policy and narrows visibility through the mount namespace instead.
 
+All privileged bridge workflows share one non-blocking kernel lease at
+`/run/wroid/input-bridge.lock`. A second game, smoke test, benchmark, or recovery
+command exits before stopping Waydroid or modifying LXC configuration and names
+the current PID/owner. The kernel releases the lease even if its process crashes;
+the lock file is only readable owner metadata, not the source of lock truth.
+Desktop launches also hold a per-user lease at
+`$XDG_RUNTIME_DIR/wroid/game-launch.lock` before inspecting or stopping the
+desktop Waydroid session. This closes the earlier pre-sudo race where two
+launchers could both plan restoration before the privileged bridge owner
+existed. Hub and Controls Studio probe both leases before opening a second game
+terminal.
+
 ## Build
 
 ```bash
@@ -80,6 +92,15 @@ The binary performs the complete sequence itself:
 7. stops the Waydroid session and container;
 8. removes the temporary bridge.
 
+The production game-session workflow additionally applies the selected Android
+render width and height after boot. The desktop worker waits for a fresh
+user-ready event captured from its owned `waydroid session start` process,
+forwards that process's stdout/stderr, verifies property readback through the
+user D-Bus API, and restarts Waydroid once only when the size changed. The
+installed helper then accepts one fixed, argument-free request to confirm that Android
+`getevent -pl` lists `Wroid Gaming Touchscreen`; it does not expose a general
+root shell to the worker.
+
 Wait until the shell prompt returns. Expected result:
 
 ```text
@@ -117,7 +138,15 @@ Waydroid test captures Android events internally.
 
 ## Recovery
 
-The binary restores the original config on normal success and ordinary errors.
+Bridge installation is transactional: if the managed input config is written
+but the main LXC include cannot be updated, Wroid restores the previous managed
+file before returning an error. Normal cleanup removes only Wroid's include and
+preserves unrelated LXC configuration changes made during the session.
+
+The binary restores the managed state on normal success and ordinary errors.
+If gameplay and one or more cleanup stages fail together, the final error
+reports the runtime, Waydroid shutdown, and bridge cleanup failures instead of
+hiding the recovery problem.
 After `Ctrl+C`, abrupt power loss, or `SIGKILL`, remove the managed include
 explicitly:
 
@@ -134,7 +163,8 @@ sudo grep -n 'config_wroid_input' /var/lib/waydroid/lxc/waydroid/config \
 
 The cleanup command only removes the Wroid-managed include and file. It does not
 modify Waydroid images, application data, Android properties, or unrelated LXC
-configuration.
+configuration. Recovery refuses to run while a live Wroid session owns the
+bridge, preventing it from dismantling an active game's input path.
 
 ## Start the normal session again
 

@@ -160,6 +160,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbus"
+version = "0.9.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ab69f03cc8c4340c9c8e315114e1658e6775a9b16a04357973aa21cec22b32e"
+dependencies = [
+ "libc",
+ "libdbus-sys",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -227,6 +238,15 @@ name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+
+[[package]]
+name = "libdbus-sys"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "328c4789d42200f1eeec05bd86c9c13c7f091d2ba9a6ea35acdf51f31bc0f043"
+dependencies = [
+ "pkg-config",
+]
 
 [[package]]
 name = "linux-raw-sys"
@@ -313,6 +333,12 @@ dependencies = [
  "smallvec",
  "windows-link",
 ]
+
+[[package]]
+name = "pkg-config"
+version = "0.3.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
 name = "proc-macro2"
@@ -637,17 +663,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "wroid-android"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "wroid-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "crossterm",
+ "dbus",
+ "libc",
+ "serde",
+ "serde_json",
  "tempfile",
  "wroid-adb",
+ "wroid-android",
  "wroid-core",
  "wroid-daemon",
  "wroid-inject",
+ "wroid-input",
  "wroid-runtime",
  "wroid-waydroid",
 ]
@@ -666,6 +707,10 @@ dependencies = [
 name = "wroid-daemon"
 version = "0.1.0"
 dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror",
  "wroid-core",
  "wroid-runtime",
@@ -676,6 +721,7 @@ name = "wroid-inject"
 version = "0.1.0"
 dependencies = [
  "evdev",
+ "libc",
  "tempfile",
  "thiserror",
  "wroid-core",
@@ -705,6 +751,7 @@ name = "wroid-waydroid"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
 ]
 
 [[package]]

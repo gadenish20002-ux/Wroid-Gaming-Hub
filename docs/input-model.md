@@ -42,11 +42,23 @@ Supported legacy actions:
 Profile v2 prototype actions:
 
 - `tap`
+- `hold`: keeps one Android contact down until the physical key or mouse button
+  is released.
 - `virtual_joystick`
 - `mouse_aim`
 - `macro`
 
-`mouse_aim` and `macro` remain prototype-only until runtime behavior is wired into the daemon-managed session.
+Tap, hold, virtual joystick, and mouse aim execute in production `play-v2`
+sessions. Macros remain unsupported.
+
+Production bindings use a strict executable compatibility matrix:
+
+- `key` or `mouse_button` → `tap` or `hold`;
+- `key_cluster` → `virtual_joystick`;
+- `mouse_move` → `mouse_aim`.
+
+Profile validation rejects every mismatched input/action pair instead of allowing
+the runtime to ignore it.
 
 ## Virtual Joystick
 
@@ -90,7 +102,7 @@ Example:
 
 ## Relative Mouse Capture
 
-The current relative mouse slice is host-side capture and normalization only. It is validated with:
+The relative mouse capture path is validated with:
 
 ```sh
 cargo run -p wroid-input --bin wroid-mouse-capture -- /dev/input/event7 --max-events 20
@@ -102,7 +114,10 @@ Normalized events include:
 - wheel deltas: vertical and horizontal;
 - mouse buttons: left, right, middle, side, extra.
 
-The future runtime path should map `mouse_move` to `mouse_aim` by applying profile v2 sensitivity and aim-region constraints, then emitting stateful touch frames through `TouchEngine` and the persistent Type-B injector. The shell compatibility backend should not be used for gaming mouse aim.
+Production sessions map `mouse_move` to `mouse_aim`, apply profile sensitivity
+and aim-region constraints, and emit stateful touch frames through `TouchEngine`
+and the persistent Type-B injector. The shell compatibility backend is not used
+for gaming mouse aim.
 
 ## Coordinate Scaling
 
@@ -119,6 +134,5 @@ Use `--scale-to-current` on `play`, `run`, `run-profile`, or `binding run` when 
 
 - The legacy terminal runner still requires terminal focus.
 - Production global input capture is not daemon-managed yet.
-- Relative mouse events are captured and normalized, but Android mouse aim is not wired yet.
-- Profile v2 is validated by a prototype binary and is not the default runtime profile format yet.
+- Profile v2 is the production format for Hub and Controls Studio sessions.
 - Macros are not implemented in the runtime.

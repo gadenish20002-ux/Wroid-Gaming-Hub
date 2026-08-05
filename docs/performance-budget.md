@@ -9,6 +9,8 @@ Waydroid image, renderer, Android resolution, and profile.
 | Metric | Initial acceptance target |
 | --- | ---: |
 | Process creation in gaming input hot path | 0 |
+| Profile/control-plan clones in input hot path | 0 |
+| Heap allocation per steady-state mouse-motion runtime dispatch | 0 |
 | Capture-to-inject latency, p95 | < 5 ms |
 | Capture-to-inject jitter, p95 | < 2 ms |
 | Simultaneous logical touch contacts | >= 10 |
@@ -18,6 +20,33 @@ Waydroid image, renderer, Android resolution, and profile.
 
 The first benchmark compares the existing shell backend with the persistent
 backend on the same host. Results must include median, p95, p99, and maximum.
+Production game-session reports include both reader-to-inject and evdev kernel
+timestamp-to-inject p50/p95/p99/max over batches that actually submit a touch
+frame. Timestamps with a future clock or an implausible age are rejected and
+reported instead of contaminating percentiles. Wroid persists these metrics,
+touch-frame count, and peak contact count in the bounded private last-session
+record; the Hub highlights reader-to-inject p95 above the 5 ms budget. Hardware
+acceptance still needs a recorded live session on each supported host class.
+
+The Hub's bounded input self-test runs this same production session with
+package launch disabled and tracing enabled. Its 20-second live interval makes
+hardware latency and cleanup validation available before game installation;
+sudo authorization and Android boot occur before the timed interval begins.
+
+Hub does not poll system probes periodically while a game is running. It
+performs one deduplicated state refresh after a launch handoff and refreshes
+again only when its browser regains focus or becomes visible, preventing the
+launcher UI from adding recurring gameplay process or graphics-probe load.
+
+The unified runtime borrows its immutable control plan in place. Mouse motion
+iterates the already materialized aim controllers directly; keyboard, mouse
+button, and reaffirm paths no longer clone the plan or binding names per event.
+Normal one- and two-event touch frames use fixed inline storage, and
+`TouchEngine` validates before injection then commits in place instead of
+cloning its contact map. Consequently, an already-active mouse-aim MOVE reaches
+the preallocated uinput buffers without a runtime heap allocation. Joystick
+bookkeeping allocates a binding key only on its first direction event after
+startup or suspension; large cleanup frames retain a heap fallback.
 
 ## Rendering
 
@@ -30,6 +59,49 @@ backend on the same host. Results must include median, p95, p99, and maximum.
 
 FPS alone is insufficient. Reports must include a frame-time distribution and
 1% low behaviour.
+
+The implemented `wroid performance` preflight records the active host renderer,
+direct/accelerated flags, DRM devices and drivers, Waydroid EGL/gralloc/Vulkan
+properties, desktop session, active resolution, and refresh rate. `launch-v2`
+and the Hub refuse to start a game when this probe identifies a software
+renderer. Unknown fields remain visible warnings because some hosts do not ship
+the optional `glxinfo`, `eglinfo`, or `xrandr` utilities.
+
+On hosts with more than one DRM GPU, the report maps each card to its render
+node and compares the active host renderer with Waydroid's
+`gralloc.gbm.device`. `wroid performance --setup-gpu` applies Waydroid's native
+`drm_device` configuration through a visible authorization terminal. The write
+is atomic, creates a first-use backup, uses `waydroid upgrade -o`, and restores
+the previous configuration if regeneration fails. When Waydroid is stopped or
+its DRM property is unavailable, the report keeps Android graphics unknown and
+never guesses that a GPU switch is needed. The interactive setup preserves the
+desktop session state: it stops a running session before regeneration, restores
+it on success or cancelled authorization, and checks the restarted Android
+`gralloc.gbm.device` value before claiming that the switch is active.
+The Hub and Controls Studio presets configure Waydroid's persistent Android
+width and height, verify both property readbacks transactionally, and restart
+the session once only after an actual change. The launch then confirms the
+effective Android `wm size` before enabling the virtual touchscreen or starting
+the package, so the selected performance target and touch coordinate surface
+cannot silently diverge.
+
+Waydroid's hardware composer derives Android's vsync period from the maximum
+active refresh advertised by the Wayland compositor, with a 60 Hz fallback.
+Wroid therefore reports that compositor target and the effective
+`persist.waydroid.no_presentation` state instead of inventing an unsupported
+FPS property. The normal default keeps `wp_presentation` feedback enabled for
+accurate phase timing; explicitly disabling it is a visible warning. Offline
+reports leave the Android pacing target unknown rather than equating it with
+the host display probe.
+
+Normal Hub launches request Feral GameMode by default when a protected system
+`gamemoderun` is installed. This can apply host CPU, scheduler, I/O, and GPU
+policy configured by the machine without adding work to Wroid's gameplay hot
+path. The user can persistently select Off. The daemon accepts only a boolean,
+resolves the wrapper from fixed absolute paths, requires a canonical root-owned
+executable that is not group/other writable, and clears `GAMEMODERUNEXEC` and
+`LD_PRELOAD` before spawn. A missing optional wrapper falls back to the direct
+worker and is never a launch blocker.
 
 ## Lifecycle
 

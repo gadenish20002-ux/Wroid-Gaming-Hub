@@ -29,19 +29,19 @@
 **Interfaces:**
 - Produces: `GAME_FAMILIES`, `family_for_package(&str)`, `variant_for_package(&str)`, `installed_variant(&GameFamily, &[String])`, and catalog-backed Hub kind/description/order lookups.
 
-- [ ] **Step 1: Write failing catalog behavior tests**
+- [x] **Step 1: Write failing catalog behavior tests**
 
 Add literal table tests for all nine verified package ids, rejection of `com.tencent.ig.fake` and `com.dts.freefiremax.clone`, canonical preference when canonical and regional variants coexist, and Hub kind/order for alias profiles.
 
-- [ ] **Step 2: Run focused tests red**
+- [x] **Step 2: Run focused tests red**
 
 Run `CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 cargo test -p wroid-cli game_catalog` and confirm failure because the catalog module and alias lookups do not exist.
 
-- [ ] **Step 3: Implement the catalog and replace Hub package matches**
+- [x] **Step 3: Implement the catalog and replace Hub package matches**
 
 Define immutable family/variant records with stable profile ids and exact packages. Route `starter_order`, `game_kind`, and `game_description` through `family_for_package`; unknown packages retain custom behavior.
 
-- [ ] **Step 4: Run focused tests green**
+- [x] **Step 4: Run focused tests green**
 
 Run `CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 cargo test -p wroid-cli game_catalog` and `cargo test -p wroid-cli hub::tests`; require all selected tests to pass without warnings.
 
@@ -54,19 +54,19 @@ Run `CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 cargo test -p wroid-cli game_ca
 - Consumes: `GAME_FAMILIES`, `family_for_package`, and `installed_variant`.
 - Produces: four family compatibility rows with optional detected package, plus exact `ensure_package_installed_if_known(&str)` behavior.
 
-- [ ] **Step 1: Write failing compatibility tests**
+- [x] **Step 1: Write failing compatibility tests**
 
 Add tests where only `com.pubg.krmobile` or `com.dts.freefiremax` is installed. Assert the family row is installed and names that package; assert exact preflight accepts that profile and rejects the absent global sibling. Add a near-prefix package case that stays unrecognized.
 
-- [ ] **Step 2: Run focused tests red**
+- [x] **Step 2: Run focused tests red**
 
 Run `CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 cargo test -p wroid-cli compatibility::tests` and confirm current canonical-only detection fails the new assertions.
 
-- [ ] **Step 3: Implement family rows and exact package retention**
+- [x] **Step 3: Implement family rows and exact package retention**
 
 Store the optional installed package list in `CompatibilityReport`, add `installed_package` to each family row and JSON, use catalog lookup for `game(&str)`, and make launch preflight test the requested exact package rather than the family aggregate.
 
-- [ ] **Step 4: Run focused tests green**
+- [x] **Step 4: Run focused tests green**
 
 Run `CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 cargo test -p wroid-cli compatibility::tests` and require all compatibility tests to pass.
 
@@ -79,23 +79,23 @@ Run `CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 cargo test -p wroid-cli compati
 - Consumes: catalog variant metadata, valid `LibraryProfile` values, and installed Waydroid package ids.
 - Produces: `reconcile_installed_game_variants(&Path, &[LibraryProfile], &[String]) -> VariantSyncReport` and atomic no-replace profile publication.
 
-- [ ] **Step 1: Write failing reconciliation tests**
+- [x] **Step 1: Write failing reconciliation tests**
 
 Use real temporary profile directories. Assert an installed PUBG Korea package creates the stable derived id with exact name/package and identical bindings; a second call is idempotent; any existing profile for that package suppresses creation; and a pre-existing stable-id file with unrelated bytes is preserved byte-for-byte.
 
-- [ ] **Step 2: Run focused tests red**
+- [x] **Step 2: Run focused tests red**
 
 Run `CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 cargo test -p wroid-cli hub::tests::installed_variant` and confirm the reconciliation API is missing.
 
-- [ ] **Step 3: Implement atomic no-replace reconciliation**
+- [x] **Step 3: Implement atomic no-replace reconciliation**
 
 Clone only from the valid canonical family profile, change `name` and `package_name`, validate, save to a unique same-directory temporary path, publish with `fs::hard_link` so an existing destination wins atomically, then remove the temporary link. Return created ids and bounded warnings.
 
-- [ ] **Step 4: Integrate reconciliation into Hub state**
+- [x] **Step 4: Integrate reconciliation into Hub state**
 
 After a successful running-Waydroid package query, reconcile variants and reload the library only when profiles were created. Append warnings to `libraryErrors`; derived profiles naturally use their own calibration sidecars.
 
-- [ ] **Step 5: Run Hub and CLI tests green**
+- [x] **Step 5: Run Hub and CLI tests green**
 
 Run `CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 cargo test -p wroid-cli hub::tests` and `cargo test -p wroid-cli`; require all tests to pass.
 
@@ -111,19 +111,18 @@ Run `CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 cargo test -p wroid-cli hub::te
 - Consumes: the completed catalog, compatibility, and reconciliation behavior.
 - Produces: accurate supported-edition documentation and installed release artifacts.
 
-- [ ] **Step 1: Update product documentation**
+- [x] **Step 1: Update product documentation**
 
 List supported exact package variants, explain automatic no-overwrite derived controls profiles, and document that every edition requires its own calibration.
 
-- [ ] **Step 2: Run the full quality gate**
+- [x] **Step 2: Run the full quality gate**
 
 Run workspace tests, strict workspace Clippy, formatting check, Hub/Editor JavaScript syntax checks, and `git diff --check`.
 
-- [ ] **Step 3: Build and install release artifacts**
+- [x] **Step 3: Build and install release artifacts**
 
 Build release `wroid`, `wroidd`, and `wroid-helper`; run `wroid desktop install`; verify build/install SHA-256 equality without installing the root helper.
 
-- [ ] **Step 4: Audit stopped runtime state**
+- [x] **Step 4: Audit stopped runtime state**
 
 Verify Waydroid remains stopped and no Wroid, daemon, helper, Chromium, or temporary variant-test process remains.
-

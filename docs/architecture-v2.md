@@ -55,9 +55,29 @@ wroidd (per-user runtime daemon)
 The CLI becomes another client of `wroidd`. Direct ADB and Waydroid shell
 wrappers remain available for diagnostics and compatibility mode.
 
+The current `launch-v2` path already applies the same process
+boundary without the daemon: the desktop user owns evdev/uinput and the entire
+input hot path, while a standalone root-owned typed helper owns only the
+validated LXC event-node bridge, one fixed Android input-device readiness
+probe, and crash rollback. Boot and render-property readiness remain in the
+desktop worker through Waydroid's user API. Hub requires that helper to match
+the staged release and prove effective root through a side-effect-free check.
+Mode `4750` limits execution to the `input` group and avoids per-game password
+prompts. Its Hub bootstrap uses a detached unprivileged installer,
+graphical Polkit authorization, an interprocess lease, and a write-sealed memfd
+source. The root-owned fixed `/usr/bin/install` process never reads a mutable
+staging pathname; if the detached owner disappears before the source is opened,
+installation fails instead of publishing a partial helper. The packaged
+per-user `wroidd` now exposes protocol v1 over a private Unix socket with
+peer-UID verification, bounded messages, and singleton ownership. Profile
+preparation already uses it; moving live capture and helper activation behind
+that boundary remains the next defense-in-depth stage.
+
 ## Workspace direction
 
 - `wroid-core`: serialized profile model, validation, migrations, viewport math.
+- `wroid-android`: bounded package format, archive structure, and native ABI
+  inspection before Android adapters receive an install request.
 - `wroid-runtime`: session-independent input state and binding execution.
 - `wroid-input`: keyboard, mouse, and controller capture.
 - `wroid-inject`: uinput touchscreen/gamepad and compatibility injectors.
@@ -111,6 +131,21 @@ per-game Waydroid properties, and then removes virtual devices.
 A watchdog must perform the same contact cleanup when the UI disconnects or the
 runtime crashes.
 
+The user-side `launch-v2` transaction separately records whether a desktop
+Waydroid session was running before privileged setup. It restores that state
+after success or failure. A detached, token-scoped watchdog monitors the parent
+PID and performs the same restore if the launcher process disappears before it
+can disarm the recovery ticket. A Hub launch detaches this transaction from the
+browser and writes a mode-`0600` active-session record under the user's
+mode-`0700` runtime directory. Stop revalidates UID, Linux start ticks,
+executable, and the `launch-v2` command, then signals the opened process through
+pidfd so numeric PID reuse cannot affect another process. Session output goes to
+the user's private state log instead of a terminal. On return, `launch-v2`
+atomically publishes a bounded clean/failed outcome in the private user state
+directory. The Hub child reaper writes only a missing, launch-correlated
+fallback after hard process death, preserving any report already committed by
+the session itself.
+
 ## Privilege boundary
 
 The privileged helper may perform only allow-listed operations with validated
@@ -125,12 +160,20 @@ arguments. Candidate operations are:
 Profiles, package names, APK parsing, UI rendering, network access, and telemetry
 remain outside the privileged process.
 
+The current bridge helper narrows this list further: it accepts only a virtual
+input node whose sysfs location, device name, virtual bus, vendor, and product
+identify the Wroid touchscreen. Its runtime protocol can request only a fixed
+`getevent -pl` readiness probe for that name and cleanup; it never receives a
+profile, Android command, package, property, device name, or shell text.
+
 ## Graphics policy
 
 Normal local play uses Waydroid's direct display path. Wroid may manage Android
-resolution, density, orientation, fullscreen state, and frame-rate targets, but
-must not capture and re-stream frames unless the user explicitly enters a remote
-or recording mode.
+resolution, density, orientation, and fullscreen state. Frame pacing follows
+Waydroid's compositor-advertised refresh automatically; Wroid observes that
+target and presentation-feedback state but does not write undocumented FPS
+properties. Wroid must not capture and re-stream frames unless the user
+explicitly enters a remote or recording mode.
 
 Diagnostics must record host GPU, kernel driver, EGL/Vulkan renderer, Android
 resolution, compositor, refresh rate, and software-renderer detection.
@@ -148,3 +191,8 @@ Game compatibility is evaluated across independent dimensions:
 
 Wroid reports these dimensions separately instead of presenting one opaque
 "compatible" flag.
+
+The current preflight reads the guest ABI list, Android version, native-bridge
+property, Play Store/package inventory, and exposes a separate state for PUBG
+Mobile, Free Fire, Brawl Stars, and Standoff 2. A missing known package is
+rejected before `launch-v2` tears down the desktop Waydroid session.

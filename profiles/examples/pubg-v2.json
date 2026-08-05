@@ -1,0 +1,84 @@
+{
+  "schema_version": 2,
+  "name": "PUBG Mobile — default landscape HUD",
+  "package_name": "com.tencent.ig",
+  "orientation": "landscape",
+  "bindings": [
+    {
+      "name": "movement",
+      "input": { "kind": "key_cluster", "up": "w", "left": "a", "down": "s", "right": "d" },
+      "action": {
+        "kind": "virtual_joystick",
+        "center": { "x": 0.16, "y": 0.77 },
+        "radius": 0.105,
+        "dead_zone": 0.02,
+        "mode": "hold",
+        "reaffirm_ms": 50
+      }
+    },
+    {
+      "name": "camera",
+      "input": { "kind": "mouse_move" },
+      "action": {
+        "kind": "mouse_aim",
+        "region": { "x": 0.34, "y": 0.08, "w": 0.59, "h": 0.70 },
+        "sensitivity": 1.10,
+        "toggle_key": "tab",
+        "recenter_threshold": 0.68,
+        "recenter_gap_ms": 0,
+        "ads_multiplier": 0.55,
+        "reaffirm_ms": 50
+      }
+    },
+    {
+      "name": "fire",
+      "input": { "kind": "mouse_button", "button": "left" },
+      "action": { "kind": "hold", "point": { "x": 0.91, "y": 0.48 } }
+    },
+    {
+      "name": "aim_down_sights",
+      "input": { "kind": "mouse_button", "button": "right" },
+      "action": { "kind": "tap", "point": { "x": 0.85, "y": 0.33 } }
+    },
+    {
+      "name": "loot",
+      "input": { "kind": "key", "key": "f" },
+      "action": { "kind": "tap", "point": { "x": 0.62, "y": 0.55 } }
+    },
+    {
+      "name": "reload",
+      "input": { "kind": "key", "key": "r" },
+      "action": { "kind": "tap", "point": { "x": 0.88, "y": 0.64 } }
+    },
+    {
+      "name": "map",
+      "input": { "kind": "key", "key": "m" },
+      "action": { "kind": "tap", "point": { "x": 0.94, "y": 0.10 } }
+    },
+    {
+      "name": "crouch",
+      "input": { "kind": "key", "key": "c" },
+      "action": { "kind": "tap", "point": { "x": 0.79, "y": 0.76 } }
+    },
+    {
+      "name": "prone",
+      "input": { "kind": "key", "key": "z" },
+      "action": { "kind": "tap", "point": { "x": 0.72, "y": 0.79 } }
+    },
+    {
+      "name": "lean_left",
+      "input": { "kind": "key", "key": "q" },
+      "action": { "kind": "tap", "point": { "x": 0.73, "y": 0.39 } }
+    },
+    {
+      "name": "lean_right",
+      "input": { "kind": "key", "key": "e" },
+      "action": { "kind": "tap", "point": { "x": 0.80, "y": 0.39 } }
+    },
+    {
+      "name": "jump",
+      "input": { "kind": "key", "key": "space" },
+      "action": { "kind": "tap", "point": { "x": 0.87, "y": 0.69 } }
+    }
+  ]
+}

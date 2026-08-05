@@ -72,3 +72,5 @@ sudo target/debug/wroid run-profile com.android.settings --backend waydroid-shel
 - Current input capture is terminal-focused.
 - There is no global input capture yet.
 - XAPK/APKM/OBB installation is not implemented.
+- `wroid app inspect` recognizes those containers and reports embedded APK/OBB
+  files, but deliberately does not extract or partially install them.

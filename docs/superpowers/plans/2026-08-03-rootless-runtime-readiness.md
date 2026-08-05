@@ -4,7 +4,7 @@
 
 **Goal:** Make the desktop-user production game session reach live input without invoking Waydroid's root-only shell action.
 
-**Architecture:** Android user readiness and render-property confirmation stay in `DesktopWaydroidSession` and use fresh Waydroid logs plus the user D-Bus property API. The existing setuid bridge helper gains one argument-free, fixed `getevent -pl` verification request and keeps its stdout channel for the session lifetime; all malformed input still forces stop and cleanup.
+**Architecture:** Android user readiness and render-property confirmation stay in `DesktopWaydroidSession`; it captures readiness from its owned session child's forwarded stdout and uses the user D-Bus property API. The existing setuid bridge helper gains one argument-free, fixed `getevent -pl` verification request and keeps its stdout channel for the session lifetime; all malformed input still forces stop and cleanup.
 
 **Tech Stack:** Rust 2021, `std::process`, line-delimited private pipe protocol, Waydroid CLI/D-Bus, existing `wroid-inject` unit and live tests.
 
@@ -43,7 +43,7 @@ Expected: compilation fails because `confirm_resolution_properties` does not exi
 
 - [ ] **Step 3: Implement the minimal rootless methods**
 
-Add `confirm_resolution_properties<C: WaydroidPropertyControl>` using only the two fixed `persist.waydroid.width` and `persist.waydroid.height` keys. Have `wait_until_android_ready` delegate to the existing fresh-log user-0 readiness method and `confirm_resolution` delegate to the property helper.
+Add `confirm_resolution_properties<C: WaydroidPropertyControl>` using only the two fixed `persist.waydroid.width` and `persist.waydroid.height` keys. Capture and forward the owned `waydroid session start` stdout/stderr, publish parsed user-ready events through an internal channel, and have `confirm_resolution` delegate to the property helper.
 
 - [ ] **Step 4: Run focused tests and verify GREEN**
 

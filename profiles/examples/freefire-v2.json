@@ -1,0 +1,69 @@
+{
+  "schema_version": 2,
+  "name": "Free Fire — default landscape HUD",
+  "package_name": "com.dts.freefireth",
+  "orientation": "landscape",
+  "bindings": [
+    {
+      "name": "movement",
+      "input": { "kind": "key_cluster", "up": "w", "left": "a", "down": "s", "right": "d" },
+      "action": {
+        "kind": "virtual_joystick",
+        "center": { "x": 0.16, "y": 0.76 },
+        "radius": 0.105,
+        "dead_zone": 0.02,
+        "mode": "hold",
+        "reaffirm_ms": 50
+      }
+    },
+    {
+      "name": "camera",
+      "input": { "kind": "mouse_move" },
+      "action": {
+        "kind": "mouse_aim",
+        "region": { "x": 0.35, "y": 0.08, "w": 0.58, "h": 0.70 },
+        "sensitivity": 1.12,
+        "toggle_key": "tab",
+        "recenter_threshold": 0.68,
+        "recenter_gap_ms": 0,
+        "ads_multiplier": 0.58,
+        "reaffirm_ms": 50
+      }
+    },
+    {
+      "name": "fire",
+      "input": { "kind": "mouse_button", "button": "left" },
+      "action": { "kind": "hold", "point": { "x": 0.91, "y": 0.46 } }
+    },
+    {
+      "name": "scope",
+      "input": { "kind": "mouse_button", "button": "right" },
+      "action": { "kind": "tap", "point": { "x": 0.84, "y": 0.35 } }
+    },
+    {
+      "name": "reload",
+      "input": { "kind": "key", "key": "r" },
+      "action": { "kind": "tap", "point": { "x": 0.88, "y": 0.64 } }
+    },
+    {
+      "name": "interact",
+      "input": { "kind": "key", "key": "f" },
+      "action": { "kind": "tap", "point": { "x": 0.62, "y": 0.55 } }
+    },
+    {
+      "name": "jump",
+      "input": { "kind": "key", "key": "space" },
+      "action": { "kind": "tap", "point": { "x": 0.87, "y": 0.69 } }
+    },
+    {
+      "name": "crouch",
+      "input": { "kind": "key", "key": "c" },
+      "action": { "kind": "tap", "point": { "x": 0.79, "y": 0.76 } }
+    },
+    {
+      "name": "prone",
+      "input": { "kind": "key", "key": "z" },
+      "action": { "kind": "tap", "point": { "x": 0.72, "y": 0.79 } }
+    }
+  ]
+}

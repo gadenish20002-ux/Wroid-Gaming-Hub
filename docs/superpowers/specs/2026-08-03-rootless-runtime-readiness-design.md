@@ -10,9 +10,13 @@ controls become live.
 
 ## Decision
 
-Keep Android boot and render-size checks unprivileged. The desktop worker uses
-Waydroid's user D-Bus API (`waydroid prop get`) and the existing fresh-log
-readiness cursor. It must not call `waydroid shell` in the production path.
+Keep Android boot and render-size checks unprivileged. The desktop worker
+captures and forwards the output of its owned `waydroid session start` child,
+publishes the exact Android-user-ready event through an internal channel, and
+uses Waydroid's user D-Bus API (`waydroid prop get`). It must not call
+`waydroid shell` in the production path. This is required because Waydroid's
+session action writes readiness to stdout but does not attach the container-only
+file log handler.
 
 Extend the already-running bridge helper with one fixed protocol request that
 waits until Android `getevent -pl` lists `Wroid Gaming Touchscreen`. The request
@@ -43,8 +47,8 @@ line.
 ## Production startup sequence
 
 1. Create the persistent uinput touchscreen and start the verified helper.
-2. Start Waydroid as the desktop user and wait for its fresh user-ready log
-   marker.
+2. Start Waydroid as the desktop user, forward its stdout/stderr, and wait for
+   the user-ready event captured from that owned process.
 3. Configure the render properties through the user D-Bus API. Restart once
    only if values changed, then wait for a new user-ready marker.
 4. Confirm the persisted render properties through the same rootless API.
