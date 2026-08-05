@@ -2,9 +2,11 @@
 //!
 //! This crate owns daemon-side session bookkeeping without depending on ADB,
 //! Waydroid shell commands, terminal input, GUI toolkits, or privileged helper
-//! implementation details. The first implementation is intentionally in-memory
-//! so the CLI and future UI can migrate to the typed runtime contracts before
-//! IPC and helper processes are introduced.
+//! implementation details. [`ipc`] exposes this state through a private,
+//! versioned Unix-socket protocol for the CLI and desktop UI.
+
+pub mod ipc;
+mod process;
 
 use std::collections::BTreeMap;
 
@@ -24,6 +26,8 @@ pub struct RuntimeSession {
     active_package: String,
     launch_package: bool,
     control_plan: Option<RuntimeControlPlan>,
+    process_id: Option<u32>,
+    detail: Option<String>,
 }
 
 impl RuntimeSession {
@@ -45,6 +49,14 @@ impl RuntimeSession {
 
     pub fn control_plan(&self) -> Option<&RuntimeControlPlan> {
         self.control_plan.as_ref()
+    }
+
+    pub const fn process_id(&self) -> Option<u32> {
+        self.process_id
+    }
+
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
     }
 
     fn prepared(&self) -> PreparedSession {
@@ -79,6 +91,10 @@ impl DaemonSessionManager {
         self.sessions.contains_key(session_id)
     }
 
+    pub fn sessions(&self) -> impl Iterator<Item = &RuntimeSession> {
+        self.sessions.values()
+    }
+
     pub fn prepare_profile_v2(
         &mut self,
         session_id: SessionId,
@@ -99,10 +115,91 @@ impl DaemonSessionManager {
             active_package: control_plan.package_name.clone(),
             launch_package,
             control_plan: Some(control_plan),
+            process_id: None,
+            detail: None,
         };
         let prepared = session.prepared();
         self.sessions.insert(session_id, session);
         Ok(prepared)
+    }
+
+    pub fn mark_running(&mut self, session_id: &SessionId, pid: u32) -> Result<(), DaemonError> {
+        let session = self.session_for_transition(session_id, SessionState::Running)?;
+        if session.state != SessionState::Preparing {
+            return Err(invalid_transition(session, SessionState::Running));
+        }
+        session.state = SessionState::Running;
+        session.process_id = Some(pid);
+        session.detail = None;
+        Ok(())
+    }
+
+    pub fn mark_stopping(&mut self, session_id: &SessionId) -> Result<(), DaemonError> {
+        let session = self.session_for_transition(session_id, SessionState::Stopping)?;
+        if session.state != SessionState::Running {
+            return Err(invalid_transition(session, SessionState::Stopping));
+        }
+        session.state = SessionState::Stopping;
+        Ok(())
+    }
+
+    pub fn mark_exited(
+        &mut self,
+        session_id: &SessionId,
+        success: bool,
+        detail: &str,
+    ) -> Result<(), DaemonError> {
+        let target = if success {
+            SessionState::Stopped
+        } else {
+            SessionState::Failed
+        };
+        let session = self.session_for_transition(session_id, target)?;
+        if !matches!(
+            session.state,
+            SessionState::Running | SessionState::Stopping
+        ) {
+            return Err(invalid_transition(session, target));
+        }
+        session.state = target;
+        session.process_id = None;
+        session.detail = Some(bounded_detail(detail));
+        Ok(())
+    }
+
+    pub fn mark_failed(&mut self, session_id: &SessionId, detail: &str) -> Result<(), DaemonError> {
+        let session = self.session_for_transition(session_id, SessionState::Failed)?;
+        if session.state != SessionState::Preparing {
+            return Err(invalid_transition(session, SessionState::Failed));
+        }
+        session.state = SessionState::Failed;
+        session.process_id = None;
+        session.detail = Some(bounded_detail(detail));
+        Ok(())
+    }
+
+    fn session_for_transition(
+        &mut self,
+        session_id: &SessionId,
+        _target: SessionState,
+    ) -> Result<&mut RuntimeSession, DaemonError> {
+        self.sessions
+            .get_mut(session_id)
+            .ok_or_else(|| DaemonError::SessionNotFound(session_id.as_str().to_owned()))
+    }
+}
+
+const SESSION_DETAIL_CHARS: usize = 4096;
+
+fn bounded_detail(detail: &str) -> String {
+    detail.chars().take(SESSION_DETAIL_CHARS).collect()
+}
+
+fn invalid_transition(session: &RuntimeSession, to: SessionState) -> DaemonError {
+    DaemonError::InvalidTransition {
+        session_id: session.session_id.as_str().to_owned(),
+        from: session.state,
+        to,
     }
 }
 
@@ -142,6 +239,8 @@ impl SessionLifecycle for DaemonSessionManager {
             active_package: request.profile.package_name.clone(),
             launch_package: request.launch_package,
             control_plan: None,
+            process_id: None,
+            detail: None,
         };
         let prepared = session.prepared();
         self.sessions.insert(request.session_id, session);
@@ -264,7 +363,7 @@ mod tests {
                     input: InputV2::MouseButton {
                         button: "left".to_owned(),
                     },
-                    action: ActionV2::Tap {
+                    action: ActionV2::Hold {
                         point: NormalizedPoint { x: 0.86, y: 0.50 },
                     },
                 },
@@ -326,7 +425,7 @@ mod tests {
         ));
         assert_eq!(
             &controls.control("fire").unwrap().action,
-            &RuntimeControlAction::Tap {
+            &RuntimeControlAction::Hold {
                 point: Point { x: 1650, y: 540 }
             }
         );
@@ -411,5 +510,46 @@ mod tests {
         let error = manager.prepare(valid_request("dup")).unwrap_err();
 
         assert!(matches!(error, DaemonError::SessionAlreadyExists(_)));
+    }
+
+    #[test]
+    fn managed_process_state_tracks_pid_stop_and_clean_exit() {
+        let mut manager = DaemonSessionManager::new();
+        let session_id = SessionId::new("managed-clean").unwrap();
+        manager.prepare(valid_request("managed-clean")).unwrap();
+
+        manager.mark_running(&session_id, 4242).unwrap();
+        assert_eq!(
+            manager.session(&session_id).unwrap().process_id(),
+            Some(4242)
+        );
+
+        manager.mark_stopping(&session_id).unwrap();
+        assert_eq!(manager.state(&session_id).unwrap(), SessionState::Stopping);
+
+        manager
+            .mark_exited(&session_id, true, "exit status: 0")
+            .unwrap();
+        let session = manager.session(&session_id).unwrap();
+        assert_eq!(session.state(), SessionState::Stopped);
+        assert_eq!(session.process_id(), None);
+        assert_eq!(session.detail(), Some("exit status: 0"));
+    }
+
+    #[test]
+    fn managed_process_failure_is_bounded() {
+        let mut manager = DaemonSessionManager::new();
+        let session_id = SessionId::new("managed-failed").unwrap();
+        manager.prepare(valid_request("managed-failed")).unwrap();
+        manager.mark_running(&session_id, 4343).unwrap();
+
+        manager
+            .mark_exited(&session_id, false, &"x".repeat(10_000))
+            .unwrap();
+
+        let session = manager.session(&session_id).unwrap();
+        assert_eq!(session.state(), SessionState::Failed);
+        assert_eq!(session.process_id(), None);
+        assert!(session.detail().unwrap().chars().count() <= 4096);
     }
 }
