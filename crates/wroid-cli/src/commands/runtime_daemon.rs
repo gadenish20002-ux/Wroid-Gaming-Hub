@@ -206,7 +206,7 @@ fn game_launch_request(
             keyboard: options.keyboard.clone(),
             mouse: options.mouse.clone(),
             game_mode,
-            worker_protocol_generation: wroid_inject::BRIDGE_WORKER_PROTOCOL_GENERATION,
+            worker_protocol_generation: wroid_inject::RUNTIME_WORKER_PROTOCOL_GENERATION,
             grab: options.grab,
             show_ui: options.show_ui,
             launch_package: options.launch_package,
@@ -904,7 +904,7 @@ mod tests {
         assert_eq!(launch.exit_after_millis, Some(25));
         assert_eq!(
             launch.worker_protocol_generation,
-            wroid_inject::BRIDGE_WORKER_PROTOCOL_GENERATION
+            wroid_inject::RUNTIME_WORKER_PROTOCOL_GENERATION
         );
     }
 

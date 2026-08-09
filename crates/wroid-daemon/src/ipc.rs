@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use wroid_core::profile_v2::ProfileV2;
 use wroid_core::Resolution;
-use wroid_inject::BRIDGE_WORKER_PROTOCOL_GENERATION;
+use wroid_inject::RUNTIME_WORKER_PROTOCOL_GENERATION;
 use wroid_runtime::{DisplayInfo, SessionId, SessionLifecycle, SessionState, StopReason};
 
 use crate::process::ManagedProcesses;
@@ -570,10 +570,10 @@ fn dispatch(
         }
         DaemonRequest::LaunchProfileV2 { launch } => {
             let session_id = validated_session_id(launch.session_id.clone())?;
-            if launch.worker_protocol_generation != BRIDGE_WORKER_PROTOCOL_GENERATION {
+            if launch.worker_protocol_generation != RUNTIME_WORKER_PROTOCOL_GENERATION {
                 return Err(format!(
                     "worker protocol generation {} is incompatible with daemon generation {}",
-                    launch.worker_protocol_generation, BRIDGE_WORKER_PROTOCOL_GENERATION
+                    launch.worker_protocol_generation, RUNTIME_WORKER_PROTOCOL_GENERATION
                 ));
             }
             if !(1..=8192).contains(&launch.width) || !(1..=8192).contains(&launch.height) {
@@ -1080,7 +1080,7 @@ mod tests {
                 keyboard: Some(PathBuf::from("/dev/input/event3")),
                 mouse: Some(PathBuf::from("/dev/input/event5")),
                 game_mode: true,
-                worker_protocol_generation: 1,
+                worker_protocol_generation: RUNTIME_WORKER_PROTOCOL_GENERATION,
                 grab: false,
                 show_ui: false,
                 launch_package: false,
@@ -1093,7 +1093,10 @@ mod tests {
         assert_eq!(value["method"], "launch_profile_v2");
         assert_eq!(value["params"]["launch"]["width"], 1600);
         assert_eq!(value["params"]["launch"]["gameMode"], true);
-        assert_eq!(value["params"]["launch"]["workerProtocolGeneration"], 1);
+        assert_eq!(
+            value["params"]["launch"]["workerProtocolGeneration"],
+            RUNTIME_WORKER_PROTOCOL_GENERATION
+        );
         assert_eq!(value["params"]["launch"]["grab"], false);
         assert_eq!(value["params"]["launch"]["showUi"], false);
         assert_eq!(value["params"]["launch"]["launchPackage"], false);
@@ -1144,11 +1147,11 @@ mod tests {
         for (launch, expected) in [
             (request(0, Some(20_000)), "worker protocol generation"),
             (
-                request(BRIDGE_WORKER_PROTOCOL_GENERATION, Some(0)),
+                request(RUNTIME_WORKER_PROTOCOL_GENERATION, Some(0)),
                 "diagnostic timeout",
             ),
             (
-                request(BRIDGE_WORKER_PROTOCOL_GENERATION, Some(3_600_001)),
+                request(RUNTIME_WORKER_PROTOCOL_GENERATION, Some(3_600_001)),
                 "diagnostic timeout",
             ),
         ] {
@@ -1199,7 +1202,7 @@ mod tests {
                     keyboard: None,
                     mouse: None,
                     game_mode: false,
-                    worker_protocol_generation: BRIDGE_WORKER_PROTOCOL_GENERATION,
+                    worker_protocol_generation: RUNTIME_WORKER_PROTOCOL_GENERATION,
                     grab: true,
                     show_ui: true,
                     launch_package: true,

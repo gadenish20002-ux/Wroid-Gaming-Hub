@@ -5,24 +5,26 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::Duration;
 
 use thiserror::Error;
-#[cfg(test)]
-use wroid_inject::BridgeHelperSession;
+use wroid_core::Resolution;
 use wroid_inject::{
-    serve_bridge_broker, BridgeHelperCommand, BridgeHelperFactory, ProductionBridgeHelperFactory,
-    BRIDGE_WORKER_FD, BRIDGE_WORKER_PROTOCOL_GENERATION,
+    runtime_socket_pair, RuntimeAttachmentReport, RuntimeChannelServer, RUNTIME_WORKER_FD,
+    RUNTIME_WORKER_PROTOCOL_GENERATION,
 };
 use wroid_runtime::SessionId;
 
 use crate::ipc::GameLaunchRequest;
+#[cfg(test)]
+use crate::platform::RuntimePlatformBackend;
+use crate::platform::{PersistentPlatform, PlatformAttachment, PlatformLaunch};
+use crate::production_platform::ProductionRuntimePlatform;
 
 const GAME_LOG_FILE: &str = "game-session.log";
 const GAME_MODE_WRAPPER_PATHS: [&str; 2] = ["/usr/local/bin/gamemoderun", "/usr/bin/gamemoderun"];
@@ -51,17 +53,16 @@ struct LaunchProgram {
     game_mode_active: bool,
 }
 
-#[derive(Debug)]
 struct ManagedProcess {
     child: Child,
-    broker: Option<JoinHandle<io::Result<()>>>,
+    attachment: Option<PlatformAttachment>,
     stop_requested: bool,
 }
 
 pub(crate) struct ManagedProcesses {
     children: BTreeMap<SessionId, ManagedProcess>,
     game_log_override: Option<PathBuf>,
-    bridge_factory_override: Option<Arc<dyn BridgeHelperFactory>>,
+    platform: Option<PersistentPlatform>,
 }
 
 impl ManagedProcesses {
@@ -69,16 +70,30 @@ impl ManagedProcesses {
         Self {
             children: BTreeMap::new(),
             game_log_override: None,
-            bridge_factory_override: None,
+            platform: None,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn with_game_log(path: PathBuf) -> Self {
+        Self::with_game_log_and_platform(path, no_op_test_platform())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_platform(platform: PersistentPlatform) -> Self {
+        Self {
+            children: BTreeMap::new(),
+            game_log_override: None,
+            platform: Some(platform),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_game_log_and_platform(path: PathBuf, platform: PersistentPlatform) -> Self {
         Self {
             children: BTreeMap::new(),
             game_log_override: Some(path),
-            bridge_factory_override: Some(Arc::new(TestBridgeFactory)),
+            platform: Some(platform),
         }
     }
 
@@ -92,29 +107,61 @@ impl ManagedProcesses {
         if !self.children.is_empty() {
             return Err(ProcessError::AlreadyActive);
         }
-        if request.worker_protocol_generation != BRIDGE_WORKER_PROTOCOL_GENERATION {
+        if request.worker_protocol_generation != RUNTIME_WORKER_PROTOCOL_GENERATION {
             return Err(ProcessError::UnsafeRequest(format!(
                 "worker protocol generation {} does not match {}",
-                request.worker_protocol_generation, BRIDGE_WORKER_PROTOCOL_GENERATION
+                request.worker_protocol_generation, RUNTIME_WORKER_PROTOCOL_GENERATION
             )));
         }
-        let executable = peer_executable(peer_pid, expected_uid)?;
         let profile_path = validated_profile_path(&request.profile_path, expected_uid)?;
         validate_input_path(request.keyboard.as_deref(), "keyboard")?;
         validate_input_path(request.mouse.as_deref(), "mouse")?;
-        let factory = match &self.bridge_factory_override {
-            Some(factory) => factory.clone(),
-            None => production_bridge_factory(expected_uid)?,
-        };
-        let (worker_stream, broker_stream) = UnixStream::pair()?;
-        set_close_on_exec(&worker_stream)?;
-        set_close_on_exec(&broker_stream)?;
-        let broker = thread::Builder::new()
-            .name(format!("wroid-bridge-{}", session_id.as_str()))
-            .spawn(move || serve_bridge_broker(broker_stream, factory))?;
-        let arguments = launch_arguments(&profile_path, request, std::process::id());
-        let program = launch_program(
+
+        let executable = peer_executable(peer_pid, expected_uid)?;
+        self.launch_validated_worker(
+            session_id,
+            request,
+            &profile_path,
             &executable,
+            expected_uid,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn launch_with_worker_for_test(
+        &mut self,
+        session_id: SessionId,
+        request: &GameLaunchRequest,
+        executable: &Path,
+        expected_uid: u32,
+    ) -> Result<u32, ProcessError> {
+        if !self.children.is_empty() {
+            return Err(ProcessError::AlreadyActive);
+        }
+        if request.worker_protocol_generation != RUNTIME_WORKER_PROTOCOL_GENERATION {
+            return Err(ProcessError::UnsafeRequest(format!(
+                "worker protocol generation {} does not match {}",
+                request.worker_protocol_generation, RUNTIME_WORKER_PROTOCOL_GENERATION
+            )));
+        }
+        let profile_path = validated_profile_path(&request.profile_path, expected_uid)?;
+        validate_input_path(request.keyboard.as_deref(), "keyboard")?;
+        validate_input_path(request.mouse.as_deref(), "mouse")?;
+        self.launch_validated_worker(session_id, request, &profile_path, executable, expected_uid)
+    }
+
+    fn launch_validated_worker(
+        &mut self,
+        session_id: SessionId,
+        request: &GameLaunchRequest,
+        profile_path: &Path,
+        executable: &Path,
+        expected_uid: u32,
+    ) -> Result<u32, ProcessError> {
+        let (worker_socket, daemon_socket) = runtime_socket_pair()?;
+        let arguments = launch_arguments(profile_path, request, std::process::id());
+        let program = launch_program(
+            executable,
             arguments,
             request.game_mode,
             trusted_game_mode_wrapper().as_deref(),
@@ -133,28 +180,56 @@ impl ManagedProcesses {
             .process_group(0);
         configure_worker_child(
             &mut command,
-            worker_stream.as_raw_fd(),
+            worker_socket.as_raw_fd(),
             std::process::id() as libc::pid_t,
         )?;
         let child = match command.spawn() {
             Ok(child) => child,
-            Err(spawn_error) => {
-                drop(worker_stream);
-                return match join_broker(Some(broker)) {
-                    Ok(()) => Err(ProcessError::Io(spawn_error)),
-                    Err(broker_error) => Err(ProcessError::Io(io::Error::other(format!(
-                        "worker spawn failed: {spawn_error}; bridge broker also failed: {broker_error}"
-                    )))),
-                };
+            Err(spawn_error) => return Err(ProcessError::Io(spawn_error)),
+        };
+        drop(worker_socket);
+        self.attach_spawned_worker(session_id, request, child, daemon_socket, expected_uid)
+    }
+
+    fn attach_spawned_worker(
+        &mut self,
+        session_id: SessionId,
+        request: &GameLaunchRequest,
+        mut child: Child,
+        daemon_socket: std::os::fd::OwnedFd,
+        expected_uid: u32,
+    ) -> Result<u32, ProcessError> {
+        let channel = match RuntimeChannelServer::from_owned_fd(daemon_socket) {
+            Ok(channel) => channel,
+            Err(error) => {
+                return Err(launch_error_after_spawn(
+                    "runtime channel",
+                    error,
+                    &mut child,
+                ))
             }
         };
-        drop(worker_stream);
+        let launch = platform_launch(request);
+        let attachment = match self
+            .platform
+            .get_or_insert_with(|| production_platform(expected_uid))
+            .attach(channel, launch)
+        {
+            Ok(attachment) => attachment,
+            Err(error) => {
+                return Err(launch_error_after_spawn(
+                    "runtime platform attachment",
+                    error,
+                    &mut child,
+                ));
+            }
+        };
         let pid = child.id();
         self.children.insert(
             session_id,
             ManagedProcess {
                 child,
-                broker: Some(broker),
+                attachment: Some(attachment),
                 stop_requested: false,
             },
         );
@@ -193,9 +268,9 @@ impl ManagedProcesses {
                 .children
                 .remove(&session_id)
                 .expect("exited managed process remains owned");
-            let broker_result = join_broker(process.broker.take());
+            let attachment_result = finish_attachment(process.attachment.take());
             let (success, detail) =
-                combine_reaped_detail(status, broker_result, process.stop_requested);
+                combine_reaped_detail(status, attachment_result, process.stop_requested);
             completed.push(ReapedProcess {
                 session_id,
                 success,
@@ -298,68 +373,103 @@ impl Drop for ManagedProcesses {
         }
         let children = std::mem::take(&mut self.children);
         for (_, mut process) in children {
-            wait_for_terminated_child(&mut process.child);
-            let _ = join_broker(process.broker.take());
+            let _ = wait_for_terminated_child(&mut process.child);
+            let _ = finish_attachment(process.attachment.take());
+        }
+        drop(self.platform.take());
+    }
+}
+
+fn production_platform(expected_uid: u32) -> PersistentPlatform {
+    PersistentPlatform::with_factory(Arc::new(move || {
+        Ok(Box::new(ProductionRuntimePlatform::new(expected_uid)))
+    }))
+}
+
+#[cfg(test)]
+fn no_op_test_platform() -> PersistentPlatform {
+    PersistentPlatform::with_factory(Arc::new(|| Ok(Box::new(NoopTestPlatformBackend))))
+}
+
+#[cfg(test)]
+struct NoopTestPlatformBackend;
+
+#[cfg(test)]
+impl RuntimePlatformBackend for NoopTestPlatformBackend {
+    fn prepare(&mut self, _launch: &PlatformLaunch) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn serve(
+        &mut self,
+        _channel: RuntimeChannelServer,
+        _resolution: Resolution,
+    ) -> io::Result<RuntimeAttachmentReport> {
+        Ok(empty_attachment_report())
+    }
+
+    fn shutdown(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn finish_attachment(
+    attachment: Option<PlatformAttachment>,
+) -> io::Result<RuntimeAttachmentReport> {
+    match attachment {
+        Some(attachment) => attachment.finish(),
+        None => Ok(empty_attachment_report()),
+    }
+}
+
+const fn empty_attachment_report() -> RuntimeAttachmentReport {
+    RuntimeAttachmentReport {
+        frames_submitted: 0,
+        peak_contacts: 0,
+        contacts_cancelled: 0,
+    }
+}
+
+fn launch_error_after_spawn(context: &str, error: io::Error, child: &mut Child) -> ProcessError {
+    let kind = error.kind();
+    let detail = match terminate_and_reap_child(child) {
+        Ok(status) => format!("{context} failed: {error}; worker reaped with {status}"),
+        Err(reap_error) => {
+            format!("{context} failed: {error}; worker reap also failed: {reap_error}")
+        }
+    };
+    ProcessError::Io(io::Error::new(kind, detail))
+}
+
+fn terminate_and_reap_child(child: &mut Child) -> io::Result<std::process::ExitStatus> {
+    if child.try_wait()?.is_none() {
+        if let Ok(pid) = i32::try_from(child.id()) {
+            // SAFETY: the exact unreaped Child is still owned here.
+            let result = unsafe { libc::kill(pid, libc::SIGTERM) };
+            if result != 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(error);
+                }
+            }
         }
     }
+    wait_for_terminated_child(child)
 }
 
-fn production_bridge_factory(
-    expected_uid: u32,
-) -> Result<Arc<dyn BridgeHelperFactory>, ProcessError> {
-    let executable = env::current_exe()?;
-    let release_directory = executable.parent().ok_or_else(|| {
-        ProcessError::UnsafeRequest("wroidd executable has no release directory".to_owned())
-    })?;
-    let staged = release_directory.join("wroid-helper");
-    let command = BridgeHelperCommand::production_release(&staged, expected_uid)?;
-    Ok(Arc::new(ProductionBridgeHelperFactory::new(command)))
-}
-
-fn set_close_on_exec(stream: &UnixStream) -> io::Result<()> {
-    let fd = stream.as_raw_fd();
-    // SAFETY: fcntl only inspects and updates the valid borrowed descriptor.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-fn join_broker(broker: Option<JoinHandle<io::Result<()>>>) -> io::Result<()> {
-    match broker {
-        Some(handle) => handle
-            .join()
-            .map_err(|_| io::Error::other("bridge broker thread panicked"))?,
-        None => Ok(()),
-    }
-}
-
-fn wait_for_terminated_child(child: &mut Child) {
+fn wait_for_terminated_child(child: &mut Child) -> io::Result<std::process::ExitStatus> {
     for _ in 0..100 {
         match child.try_wait() {
-            Ok(Some(_)) => return,
+            Ok(Some(status)) => return Ok(status),
             Ok(None) => thread::sleep(Duration::from_millis(10)),
-            Err(_) => return,
+            Err(error) => return Err(error),
         }
     }
     if let Ok(pid) = i32::try_from(child.id()) {
         // SAFETY: the exact unreaped Child is still owned here.
         let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
     }
-    let _ = child.wait();
-}
-
-#[cfg(test)]
-struct TestBridgeFactory;
-
-#[cfg(test)]
-impl BridgeHelperFactory for TestBridgeFactory {
-    fn start(&self, _event_node: &Path) -> io::Result<Box<dyn BridgeHelperSession>> {
-        Err(io::Error::other(
-            "test worker unexpectedly requested bridge activation",
-        ))
-    }
+    child.wait()
 }
 
 pub(crate) fn launch_arguments(
@@ -371,8 +481,8 @@ pub(crate) fn launch_arguments(
         OsString::from("launch-v2"),
         profile_path.as_os_str().to_owned(),
         OsString::from("--daemon-worker"),
-        OsString::from("--bridge-fd"),
-        OsString::from(BRIDGE_WORKER_FD.to_string()),
+        OsString::from("--runtime-fd"),
+        OsString::from(RUNTIME_WORKER_FD.to_string()),
         OsString::from("--daemon-parent-pid"),
         OsString::from(daemon_pid.to_string()),
         OsString::from("--width"),
@@ -425,7 +535,7 @@ fn configure_worker_child(
                     "Wroid daemon parent changed before worker exec",
                 ));
             }
-            if source_fd == BRIDGE_WORKER_FD {
+            if source_fd == RUNTIME_WORKER_FD {
                 let flags = libc::fcntl(source_fd, libc::F_GETFD);
                 if flags < 0
                     || libc::fcntl(source_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) != 0
@@ -433,7 +543,7 @@ fn configure_worker_child(
                     return Err(io::Error::last_os_error());
                 }
             } else {
-                if libc::dup3(source_fd, BRIDGE_WORKER_FD, 0) < 0 {
+                if libc::dup3(source_fd, RUNTIME_WORKER_FD, 0) < 0 {
                     return Err(io::Error::last_os_error());
                 }
                 libc::close(source_fd);
@@ -441,12 +551,12 @@ fn configure_worker_child(
             if libc::syscall(
                 libc::SYS_close_range,
                 libc::STDERR_FILENO + 1,
-                BRIDGE_WORKER_FD - 1,
+                RUNTIME_WORKER_FD - 1,
                 libc::CLOSE_RANGE_CLOEXEC,
             ) != 0
                 || libc::syscall(
                     libc::SYS_close_range,
-                    BRIDGE_WORKER_FD + 1,
+                    RUNTIME_WORKER_FD + 1,
                     u32::MAX,
                     libc::CLOSE_RANGE_CLOEXEC,
                 ) != 0
@@ -459,9 +569,21 @@ fn configure_worker_child(
     Ok(())
 }
 
+fn platform_launch(request: &GameLaunchRequest) -> PlatformLaunch {
+    PlatformLaunch {
+        package_name: request.profile.package_name.clone(),
+        resolution: Resolution {
+            width: request.width,
+            height: request.height,
+        },
+        show_ui: request.show_ui,
+        launch_package: request.launch_package,
+    }
+}
+
 fn combine_reaped_detail(
     status: std::process::ExitStatus,
-    broker_result: io::Result<()>,
+    attachment_result: io::Result<RuntimeAttachmentReport>,
     stop_requested: bool,
 ) -> (bool, String) {
     let detail = match status.signal() {
@@ -469,11 +591,17 @@ fn combine_reaped_detail(
         None => format!("game worker exited with {status}"),
     };
     let expected_stop = stop_requested && status.signal() == Some(libc::SIGTERM);
-    match broker_result {
-        Ok(()) => (status.success() || expected_stop, detail),
+    match attachment_result {
+        Ok(report) => (
+            status.success() || expected_stop,
+            format!(
+                "{detail}; runtime attachment finished: {} frame(s), peak {} contact(s), cancelled {} contact(s)",
+                report.frames_submitted, report.peak_contacts, report.contacts_cancelled
+            ),
+        ),
         Err(error) => (
             false,
-            format!("{detail}; bridge broker cleanup failed: {error}"),
+            format!("{detail}; runtime attachment failed: {error}"),
         ),
     }
 }
@@ -588,9 +716,113 @@ mod tests {
     use super::*;
     use std::ffi::OsStr;
     use std::os::fd::AsRawFd;
-    use std::os::unix::net::UnixStream;
+    use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
+
+    use wroid_core::Resolution;
+    use wroid_inject::{
+        runtime_socket_pair, RuntimeAttachmentReport, RuntimeChannelServer,
+        RUNTIME_WORKER_PROTOCOL_GENERATION,
+    };
+
+    use crate::platform::{PersistentPlatform, PlatformLaunch, RuntimePlatformBackend};
+
+    type PlatformCalls = Arc<Mutex<Vec<String>>>;
+    static PANIC_HOOK_LOCK: Mutex<()> = Mutex::new(());
+
+    struct RecordingBackend {
+        calls: PlatformCalls,
+        serve_error: Option<&'static str>,
+    }
+
+    impl RuntimePlatformBackend for RecordingBackend {
+        fn prepare(&mut self, launch: &PlatformLaunch) -> io::Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("prepare:{}", launch.package_name));
+            Ok(())
+        }
+
+        fn serve(
+            &mut self,
+            _channel: RuntimeChannelServer,
+            _resolution: Resolution,
+        ) -> io::Result<RuntimeAttachmentReport> {
+            self.calls.lock().unwrap().push("serve".to_owned());
+            if let Some(error) = self.serve_error.take() {
+                return Err(io::Error::other(error));
+            }
+            Ok(RuntimeAttachmentReport {
+                frames_submitted: 7,
+                peak_contacts: 3,
+                contacts_cancelled: 2,
+            })
+        }
+
+        fn shutdown(&mut self) -> io::Result<()> {
+            self.calls.lock().unwrap().push("shutdown".to_owned());
+            Ok(())
+        }
+    }
+
+    fn shared_platform_calls() -> PlatformCalls {
+        Arc::new(Mutex::new(Vec::new()))
+    }
+
+    fn fake_platform(calls: PlatformCalls) -> PersistentPlatform {
+        fake_platform_with_serve_error(calls, None)
+    }
+
+    fn fake_platform_with_serve_error(
+        calls: PlatformCalls,
+        serve_error: Option<&'static str>,
+    ) -> PersistentPlatform {
+        let factory: Arc<
+            dyn Fn() -> io::Result<Box<dyn RuntimePlatformBackend>> + Send + Sync + 'static,
+        > = Arc::new(move || {
+            calls.lock().unwrap().push("factory".to_owned());
+            Ok(Box::new(RecordingBackend {
+                calls: calls.clone(),
+                serve_error,
+            }))
+        });
+        PersistentPlatform::with_factory(factory)
+    }
+
+    fn dead_platform() -> PersistentPlatform {
+        let _guard = PANIC_HOOK_LOCK.lock().unwrap();
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let factory: Arc<
+            dyn Fn() -> io::Result<Box<dyn RuntimePlatformBackend>> + Send + Sync + 'static,
+        > = Arc::new(|| panic!("test platform thread stopped"));
+        let platform = PersistentPlatform::with_factory(factory);
+        let attachment = platform
+            .attach(runtime_server(), platform_launch("com.example.dead"))
+            .unwrap();
+        let _ = attachment.finish();
+        std::panic::set_hook(previous_hook);
+        platform
+    }
+
+    fn platform_launch(package_name: &str) -> PlatformLaunch {
+        PlatformLaunch {
+            package_name: package_name.to_owned(),
+            resolution: Resolution {
+                width: 1600,
+                height: 900,
+            },
+            show_ui: true,
+            launch_package: true,
+        }
+    }
+
+    fn runtime_server() -> RuntimeChannelServer {
+        let (_client, server) = runtime_socket_pair().unwrap();
+        RuntimeChannelServer::from_owned_fd(server).unwrap()
+    }
 
     fn launch_request() -> GameLaunchRequest {
         GameLaunchRequest {
@@ -610,7 +842,7 @@ mod tests {
             keyboard: None,
             mouse: None,
             game_mode: false,
-            worker_protocol_generation: BRIDGE_WORKER_PROTOCOL_GENERATION,
+            worker_protocol_generation: RUNTIME_WORKER_PROTOCOL_GENERATION,
             grab: true,
             show_ui: true,
             launch_package: true,
@@ -622,13 +854,37 @@ mod tests {
     fn test_process(child: Child) -> ManagedProcess {
         ManagedProcess {
             child,
-            broker: None,
+            attachment: None,
             stop_requested: false,
         }
     }
 
+    fn write_profile(directory: &Path) -> PathBuf {
+        let profile_path = directory.join("profile.json");
+        fs::write(
+            &profile_path,
+            serde_json::to_vec(&launch_request().profile).unwrap(),
+        )
+        .unwrap();
+        profile_path
+    }
+
+    fn request_for_profile(profile_path: &Path, session_id: &str) -> GameLaunchRequest {
+        let mut request = launch_request();
+        request.session_id = session_id.to_owned();
+        request.profile_path = profile_path.to_path_buf();
+        request
+    }
+
+    fn sleeping_worker(directory: &Path) -> PathBuf {
+        let worker = directory.join("sleep-worker.sh");
+        fs::write(&worker, b"#!/bin/sh\nexec sleep 30\n").unwrap();
+        fs::set_permissions(&worker, fs::Permissions::from_mode(0o755)).unwrap();
+        worker
+    }
+
     #[test]
-    fn launch_arguments_are_fixed_and_typed() {
+    fn worker_arguments_carry_only_runtime_capability() {
         let mut request = launch_request();
         request.keyboard = Some(PathBuf::from("/dev/input/event3"));
         request.mouse = Some(PathBuf::from("/dev/input/event5"));
@@ -643,7 +899,7 @@ mod tests {
                 "launch-v2",
                 "/profiles/pubg-v2.json",
                 "--daemon-worker",
-                "--bridge-fd",
+                "--runtime-fd",
                 "198",
                 "--daemon-parent-pid",
                 "4242",
@@ -664,6 +920,16 @@ mod tests {
             ]
             .map(OsString::from)
         );
+        assert!(
+            launch_arguments(Path::new("/profiles/pubg-v2.json"), &request, 4242)
+                .windows(2)
+                .any(|pair| pair == ["--runtime-fd", "198"].map(OsString::from))
+        );
+        assert!(
+            !launch_arguments(Path::new("/profiles/pubg-v2.json"), &request, 4242)
+                .iter()
+                .any(|arg| arg == "--bridge-fd")
+        );
     }
 
     #[test]
@@ -675,10 +941,10 @@ mod tests {
     }
 
     #[test]
-    fn configured_worker_inherits_the_fixed_bridge_socket() {
-        let (worker_stream, broker_stream) = UnixStream::pair().unwrap();
-        let (leaked_stream, leaked_peer) = UnixStream::pair().unwrap();
-        let leaked_fd = leaked_stream.as_raw_fd();
+    fn configured_worker_inherits_only_the_fixed_runtime_socket() {
+        let (worker_socket, _daemon_socket) = runtime_socket_pair().unwrap();
+        let (leaked_socket, leaked_peer) = runtime_socket_pair().unwrap();
+        let leaked_fd = leaked_socket.as_raw_fd();
         // SAFETY: the valid test descriptor is deliberately made inheritable
         // to prove worker setup closes capabilities it did not select.
         let flags = unsafe { libc::fcntl(leaked_fd, libc::F_GETFD) };
@@ -694,7 +960,7 @@ mod tests {
         ]);
         configure_worker_child(
             &mut command,
-            worker_stream.as_raw_fd(),
+            worker_socket.as_raw_fd(),
             std::process::id() as libc::pid_t,
         )
         .unwrap();
@@ -702,43 +968,46 @@ mod tests {
         let status = command.status().unwrap();
 
         assert!(status.success());
-        drop(worker_stream);
-        drop(broker_stream);
-        drop(leaked_stream);
+        drop(worker_socket);
+        drop(leaked_socket);
         drop(leaked_peer);
     }
 
     #[test]
-    fn reaped_detail_preserves_worker_and_broker_failures() {
+    fn reaped_detail_preserves_worker_and_attachment_failures() {
         let status = Command::new("/usr/bin/sh")
             .args(["-c", "exit 7"])
             .status()
             .unwrap();
         let (success, detail) = combine_reaped_detail(
             status,
-            Err(io::Error::other("bridge cleanup failed")),
+            Err(io::Error::other("runtime attachment cleanup failed")),
             false,
         );
 
         assert!(!success);
         assert!(detail.contains("exit status: 7"));
-        assert!(detail.contains("bridge cleanup failed"));
+        assert!(detail.contains("runtime attachment cleanup failed"));
     }
 
     #[test]
-    fn managed_reaper_joins_the_owned_broker() {
-        let session_id = SessionId::new("broker-reap").unwrap();
+    fn managed_reaper_finishes_the_owned_runtime_attachment() {
+        let session_id = SessionId::new("attachment-reap").unwrap();
         let child = Command::new("/usr/bin/sh")
             .args(["-c", "exit 0"])
             .spawn()
             .unwrap();
-        let broker = thread::spawn(|| Err(io::Error::other("owned broker failed")));
+        let calls = shared_platform_calls();
+        let platform = fake_platform_with_serve_error(calls, Some("owned attachment failed"));
+        let attachment = platform
+            .attach(runtime_server(), platform_launch("com.example.reap"))
+            .unwrap();
         let mut processes = ManagedProcesses::new();
         processes.children.insert(
             session_id.clone(),
             ManagedProcess {
                 child,
-                broker: Some(broker),
+                attachment: Some(attachment),
                 stop_requested: false,
             },
         );
@@ -757,7 +1026,129 @@ mod tests {
 
         assert_eq!(completed[0].session_id, session_id);
         assert!(!completed[0].success);
-        assert!(completed[0].detail.contains("owned broker failed"));
+        assert!(completed[0].detail.contains("owned attachment failed"));
+        drop(platform);
+    }
+
+    #[test]
+    fn stale_worker_generations_are_rejected_before_spawn_or_platform_attach() {
+        let calls = shared_platform_calls();
+        let mut processes = ManagedProcesses::with_platform(fake_platform(calls.clone()));
+
+        for generation in [0, 1] {
+            let mut request = launch_request();
+            request.worker_protocol_generation = generation;
+            let error = processes
+                .launch(
+                    SessionId::new(format!("stale-generation-{generation}")).unwrap(),
+                    &request,
+                    std::process::id() as libc::pid_t,
+                    // SAFETY: geteuid takes no arguments and has no preconditions.
+                    unsafe { libc::geteuid() },
+                )
+                .unwrap_err();
+
+            assert!(matches!(error, ProcessError::UnsafeRequest(_)));
+        }
+
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn spawn_failure_does_not_initialize_platform() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile_path = write_profile(directory.path());
+        let calls = shared_platform_calls();
+        let mut processes = ManagedProcesses::with_game_log_and_platform(
+            directory.path().join("state/wroid/game-session.log"),
+            fake_platform(calls.clone()),
+        );
+
+        let error = processes
+            .launch_with_worker_for_test(
+                SessionId::new("missing-worker").unwrap(),
+                &request_for_profile(&profile_path, "missing-worker"),
+                &directory.path().join("missing-worker"),
+                // SAFETY: geteuid takes no arguments and has no preconditions.
+                unsafe { libc::geteuid() },
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, ProcessError::Io(_)));
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(processes.children.is_empty());
+    }
+
+    #[test]
+    fn attach_failure_terminates_and_reaps_spawned_worker() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile_path = write_profile(directory.path());
+        let worker = sleeping_worker(directory.path());
+        let mut processes = ManagedProcesses::with_game_log_and_platform(
+            directory.path().join("state/wroid/game-session.log"),
+            dead_platform(),
+        );
+
+        let error = processes
+            .launch_with_worker_for_test(
+                SessionId::new("attach-fails").unwrap(),
+                &request_for_profile(&profile_path, "attach-fails"),
+                &worker,
+                // SAFETY: geteuid takes no arguments and has no preconditions.
+                unsafe { libc::geteuid() },
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, ProcessError::Io(_)));
+        assert!(processes.children.is_empty());
+    }
+
+    #[test]
+    fn same_persistent_platform_is_reused_across_reaped_workers() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile_path = write_profile(directory.path());
+        let calls = shared_platform_calls();
+        let mut processes = ManagedProcesses::with_game_log_and_platform(
+            directory.path().join("state/wroid/game-session.log"),
+            fake_platform(calls.clone()),
+        );
+        let uid = {
+            // SAFETY: geteuid takes no arguments and has no preconditions.
+            unsafe { libc::geteuid() }
+        };
+
+        for session in ["first-worker", "second-worker"] {
+            processes
+                .launch_with_worker_for_test(
+                    SessionId::new(session).unwrap(),
+                    &request_for_profile(&profile_path, session),
+                    &env::current_exe().unwrap(),
+                    uid,
+                )
+                .unwrap();
+            (0..100)
+                .find_map(|_| {
+                    let completed = processes.reap().unwrap();
+                    if completed.is_empty() {
+                        std::thread::sleep(Duration::from_millis(5));
+                        None
+                    } else {
+                        Some(completed)
+                    }
+                })
+                .expect("managed worker was not reaped");
+        }
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                "factory",
+                "prepare:com.example.process",
+                "serve",
+                "prepare:com.example.process",
+                "serve"
+            ]
+        );
     }
 
     #[test]
