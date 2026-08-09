@@ -3,11 +3,12 @@
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -421,11 +422,52 @@ pub struct DaemonClient {
     expected_uid: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct AuthenticatedDaemonPeer {
     pub pid: libc::pid_t,
     pub uid: u32,
+    pidfd: Arc<OwnedFd>,
 }
+
+impl AuthenticatedDaemonPeer {
+    /// Binds a stable process handle to a PID. Socket authentication remains
+    /// the responsibility of [`DaemonClient::request_with_peer`].
+    pub fn bind_process(pid: libc::pid_t, uid: u32) -> Result<Self, IpcError> {
+        if pid <= 0 {
+            return Err(IpcError::Protocol(
+                "daemon peer credentials did not include a valid PID".to_owned(),
+            ));
+        }
+        // SAFETY: pidfd_open takes a positive PID and flags zero.
+        let raw_fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        if raw_fd < 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let raw_fd = i32::try_from(raw_fd).map_err(|_| {
+            IpcError::Protocol("daemon peer pidfd is outside the descriptor range".to_owned())
+        })?;
+        // SAFETY: pidfd_open returned a new descriptor transferred exactly
+        // once into OwnedFd.
+        let pidfd = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+        Ok(Self {
+            pid,
+            uid,
+            pidfd: Arc::new(pidfd),
+        })
+    }
+
+    pub fn pidfd(&self) -> RawFd {
+        self.pidfd.as_raw_fd()
+    }
+}
+
+impl PartialEq for AuthenticatedDaemonPeer {
+    fn eq(&self, other: &Self) -> bool {
+        self.pid == other.pid && self.uid == other.uid
+    }
+}
+
+impl Eq for AuthenticatedDaemonPeer {}
 
 impl DaemonClient {
     pub fn connect_default() -> Result<Self, IpcError> {
@@ -456,10 +498,9 @@ impl DaemonClient {
     ) -> Result<(DaemonResult, AuthenticatedDaemonPeer), IpcError> {
         let mut stream = UnixStream::connect(&self.socket)?;
         let credentials = peer_credentials(&stream, self.expected_uid)?;
-        let peer = AuthenticatedDaemonPeer {
-            pid: credentials.pid,
-            uid: self.expected_uid,
-        };
+        // Open the pidfd while this PID is still bound to the authenticated
+        // Unix-socket peer, before any response can race with PID reuse.
+        let peer = AuthenticatedDaemonPeer::bind_process(credentials.pid, self.expected_uid)?;
         stream.set_read_timeout(Some(IO_TIMEOUT))?;
         stream.set_write_timeout(Some(IO_TIMEOUT))?;
         serde_json::to_writer(&mut stream, &ProtocolRequest::new(request))

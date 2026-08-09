@@ -93,6 +93,7 @@ fn launch_v2_worker(
 ) -> Result<GameSessionReport> {
     let actual_parent = u32::try_from(unsafe { libc::getppid() }).unwrap_or(0);
     validate_daemon_worker_parent(invocation.daemon_parent_pid, actual_parent)?;
+    super::runtime_daemon::validate_daemon_worker_parent_executable(actual_parent)?;
     if invocation.bridge_fd != BRIDGE_WORKER_FD {
         bail!(
             "daemon worker bridge descriptor must be {BRIDGE_WORKER_FD}, got {}",
@@ -102,8 +103,12 @@ fn launch_v2_worker(
     // SAFETY: clap accepted a non-standard descriptor, the daemon contract
     // assigns its sole ownership to this worker, and this is the only adoption.
     let owned_fd = unsafe { OwnedFd::from_raw_fd(invocation.bridge_fd) };
-    let bridge_broker = BridgeBrokerClient::from_owned_fd(owned_fd)
-        .context("failed to adopt the daemon-owned bridge channel")?;
+    let bridge_broker = BridgeBrokerClient::from_owned_fd_for_peer(
+        owned_fd,
+        i32::try_from(actual_parent).context("daemon parent PID is out of range")?,
+        effective_uid_from_proc().unwrap_or(u32::MAX),
+    )
+    .context("failed to adopt the daemon-owned bridge channel")?;
     launch_v2_worker_inner(profile_path, options, bridge_broker)
 }
 
@@ -221,6 +226,17 @@ fn managed_stop_request(session_id: &str) -> DaemonRequest {
     }
 }
 
+fn managed_terminal_result(session: &SessionSnapshot) -> Result<()> {
+    match session.state {
+        SessionStateWire::Stopped => Ok(()),
+        SessionStateWire::Failed => bail!(
+            "managed game session failed: {}",
+            session.detail.as_deref().unwrap_or("worker failure")
+        ),
+        _ => bail!("managed game session has not reached a terminal state"),
+    }
+}
+
 fn wait_for_managed_session(session_id: &str) -> Result<()> {
     let mut log = open_private_game_session_log()?;
     let mut stop_sent = false;
@@ -240,15 +256,7 @@ fn wait_for_managed_session(session_id: &str) -> Result<()> {
         let session = super::runtime_daemon::managed_session_state(session_id)?;
         if managed_session_finished(&session) {
             copy_available_log(&mut log)?;
-            return match session.state {
-                SessionStateWire::Stopped => Ok(()),
-                SessionStateWire::Failed if stop_sent => Ok(()),
-                SessionStateWire::Failed => bail!(
-                    "managed game session failed: {}",
-                    session.detail.as_deref().unwrap_or("worker failure")
-                ),
-                _ => unreachable!("terminal state checked above"),
-            };
+            return managed_terminal_result(&session);
         }
         thread::sleep(MANAGED_POLL_INTERVAL);
     }
@@ -418,6 +426,7 @@ mod daemon_worker_contract_tests {
         assert!(managed_session_finished(&snapshot(
             SessionStateWire::Failed
         )));
+        assert!(managed_terminal_result(&snapshot(SessionStateWire::Failed)).is_err());
     }
 
     #[test]

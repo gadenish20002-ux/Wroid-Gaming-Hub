@@ -1,6 +1,6 @@
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::fd::RawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -312,6 +312,19 @@ fn daemon_file_identity(path: &Path) -> Result<(u64, u64)> {
     Ok((metadata.dev(), metadata.ino()))
 }
 
+pub(crate) fn validate_daemon_worker_parent_executable(parent_pid: u32) -> Result<()> {
+    let desired = daemon_executable()?;
+    let parent = PathBuf::from(format!("/proc/{parent_pid}/exe"));
+    validate_daemon_worker_parent_identity(&desired, &parent)
+}
+
+fn validate_daemon_worker_parent_identity(desired: &Path, parent: &Path) -> Result<()> {
+    if daemon_file_identity(desired)? != daemon_file_identity(parent)? {
+        bail!("daemon worker parent executable does not match the selected wroidd release");
+    }
+    Ok(())
+}
+
 fn sessions_block_upgrade(sessions: &[SessionSnapshot]) -> bool {
     sessions.iter().any(|session| {
         session.process_id.is_some()
@@ -332,52 +345,122 @@ fn stop_authenticated_idle_daemon(
         bail!("refusing to stop an unauthenticated wroidd peer");
     }
     let executable = PathBuf::from(format!("/proc/{}/exe", peer.pid));
-    if daemon_file_identity(&executable)? != expected_identity {
-        bail!("authenticated wroidd PID changed before pidfd acquisition");
-    }
-    let pidfd = open_pidfd(peer.pid)?;
     match daemon_file_identity(&executable) {
         Ok(identity) if identity == expected_identity => {}
-        Ok(_) => bail!("authenticated wroidd PID was reused before replacement"),
+        Ok(_) => bail!("authenticated wroidd executable changed before replacement"),
         Err(_error) if process_is_gone(peer.pid) => return Ok(()),
         Err(error) => return Err(error),
     }
-    // SAFETY: pidfd_send_signal targets the task referenced by the owned
-    // pidfd; null siginfo and flags zero are valid for SIGTERM.
+    if pidfd_has_exited(peer.pidfd())? {
+        return Ok(());
+    }
+
+    pidfd_send_signal(peer.pidfd(), libc::SIGSTOP)
+        .context("failed to freeze the authenticated stale wroidd")?;
+    let mut resume = ContinueGuard::new(peer.pidfd());
+    if !wait_for_process_stopped(peer.pid, RELEASE_STOP_TIMEOUT)? {
+        return Ok(());
+    }
+    if process_has_children(peer.pid)? {
+        bail!("stale wroidd acquired a child process while upgrade safety was being checked");
+    }
+    pidfd_send_signal(peer.pidfd(), libc::SIGTERM)
+        .context("failed to stop the authenticated stale wroidd")?;
+    resume.resume()?;
+    wait_for_pidfd_exit(peer.pidfd(), RELEASE_STOP_TIMEOUT)
+}
+
+fn pidfd_send_signal(pidfd: RawFd, signal: libc::c_int) -> Result<()> {
+    // SAFETY: pidfd_send_signal targets the task referenced by pidfd; null
+    // siginfo and flags zero are valid for standard signals.
     let result = unsafe {
         libc::syscall(
             libc::SYS_pidfd_send_signal,
-            std::os::fd::AsRawFd::as_raw_fd(&pidfd),
-            libc::SIGTERM,
+            pidfd,
+            signal,
             std::ptr::null::<libc::siginfo_t>(),
             0,
         )
     };
-    if result != 0 {
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::ESRCH) {
-            return Err(error).context("failed to stop the authenticated stale wroidd");
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(error.into())
+}
+
+struct ContinueGuard {
+    pidfd: RawFd,
+    armed: bool,
+}
+
+impl ContinueGuard {
+    fn new(pidfd: RawFd) -> Self {
+        Self { pidfd, armed: true }
+    }
+
+    fn resume(&mut self) -> Result<()> {
+        pidfd_send_signal(self.pidfd, libc::SIGCONT)?;
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for ContinueGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = pidfd_send_signal(self.pidfd, libc::SIGCONT);
         }
     }
-    wait_for_pidfd_exit(&pidfd, RELEASE_STOP_TIMEOUT)
 }
 
-fn open_pidfd(pid: libc::pid_t) -> Result<OwnedFd> {
-    if pid <= 0 {
-        bail!("cannot open a pidfd for an invalid PID");
+fn wait_for_process_stopped(pid: libc::pid_t, timeout: Duration) -> Result<bool> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match fs::read_to_string(format!("/proc/{pid}/status")) {
+            Ok(status) => {
+                if status.lines().any(|line| {
+                    line.strip_prefix("State:")
+                        .is_some_and(|value| value.trim_start().starts_with(['T', 't']))
+                }) {
+                    return Ok(true);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error).context("failed to inspect frozen stale wroidd"),
+        }
+        if Instant::now() >= deadline {
+            bail!("stale wroidd did not stop for atomic upgrade inspection");
+        }
+        thread::sleep(Duration::from_millis(5));
     }
-    // SAFETY: pidfd_open takes a positive PID and flags zero.
-    let raw_fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
-    if raw_fd < 0 {
-        return Err(std::io::Error::last_os_error()).context("failed to open wroidd pidfd");
-    }
-    let raw_fd = i32::try_from(raw_fd).context("wroidd pidfd is out of range")?;
-    // SAFETY: pidfd_open returned a new descriptor whose sole ownership is
-    // transferred into OwnedFd exactly once.
-    Ok(unsafe { OwnedFd::from_raw_fd(raw_fd) })
 }
 
-fn wait_for_pidfd_exit(pidfd: &OwnedFd, timeout: Duration) -> Result<()> {
+fn process_has_children(pid: libc::pid_t) -> Result<bool> {
+    let children = fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+        .context("failed to inspect stale wroidd children")?;
+    Ok(!children.trim().is_empty())
+}
+
+fn pidfd_has_exited(pidfd: RawFd) -> Result<bool> {
+    let mut descriptor = libc::pollfd {
+        fd: pidfd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: descriptor points to one initialized pollfd and zero performs a
+    // non-blocking readiness check.
+    let result = unsafe { libc::poll(&mut descriptor, 1, 0) };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error()).context("failed to inspect wroidd pidfd");
+    }
+    Ok(result > 0 && descriptor.revents & (libc::POLLIN | libc::POLLHUP) != 0)
+}
+
+fn wait_for_pidfd_exit(pidfd: RawFd, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -389,7 +472,7 @@ fn wait_for_pidfd_exit(pidfd: &OwnedFd, timeout: Duration) -> Result<()> {
         }
         let timeout_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
         let mut descriptor = libc::pollfd {
-            fd: std::os::fd::AsRawFd::as_raw_fd(pidfd),
+            fd: pidfd,
             events: libc::POLLIN,
             revents: 0,
         };
@@ -669,6 +752,20 @@ mod tests {
     }
 
     #[test]
+    fn daemon_worker_parent_executable_must_match_selected_release() {
+        let directory = tempfile::tempdir().unwrap();
+        let desired = directory.path().join("wroidd");
+        let same = directory.path().join("same-wroidd");
+        let wrapper = directory.path().join("wrapper");
+        fs::write(&desired, b"daemon").unwrap();
+        fs::hard_link(&desired, &same).unwrap();
+        fs::write(&wrapper, b"wrapper").unwrap();
+
+        validate_daemon_worker_parent_identity(&desired, &same).unwrap();
+        assert!(validate_daemon_worker_parent_identity(&desired, &wrapper).is_err());
+    }
+
+    #[test]
     fn only_process_bearing_live_states_block_daemon_release() {
         assert!(!sessions_block_upgrade(&[snapshot(
             SessionStateWire::Stopped,
@@ -699,10 +796,9 @@ mod tests {
     #[test]
     fn daemon_release_rejects_changed_pid_identity_without_signalling() {
         let mut child = Command::new("sleep").arg("30").spawn().unwrap();
-        let peer = AuthenticatedDaemonPeer {
-            pid: child.id() as libc::pid_t,
-            uid: effective_uid(),
-        };
+        let peer =
+            AuthenticatedDaemonPeer::bind_process(child.id() as libc::pid_t, effective_uid())
+                .unwrap();
         let unrelated = daemon_file_identity(&env::current_exe().unwrap()).unwrap();
 
         assert!(stop_authenticated_idle_daemon(peer, unrelated).is_err());
@@ -714,10 +810,9 @@ mod tests {
     #[test]
     fn daemon_release_signals_the_authenticated_pidfd() {
         let mut child = Command::new("sleep").arg("30").spawn().unwrap();
-        let peer = AuthenticatedDaemonPeer {
-            pid: child.id() as libc::pid_t,
-            uid: effective_uid(),
-        };
+        let peer =
+            AuthenticatedDaemonPeer::bind_process(child.id() as libc::pid_t, effective_uid())
+                .unwrap();
         let identity =
             daemon_file_identity(Path::new(&format!("/proc/{}/exe", child.id()))).unwrap();
 
@@ -727,11 +822,42 @@ mod tests {
     }
 
     #[test]
+    fn daemon_release_resumes_and_refuses_a_peer_with_a_new_child() {
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 30 & wait"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id() as libc::pid_t;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !process_has_children(pid).unwrap() {
+            assert!(Instant::now() < deadline, "shell child was not published");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let peer = AuthenticatedDaemonPeer::bind_process(pid, effective_uid()).unwrap();
+        let identity = daemon_file_identity(Path::new(&format!("/proc/{pid}/exe"))).unwrap();
+
+        assert!(stop_authenticated_idle_daemon(peer, identity).is_err());
+        assert!(child.try_wait().unwrap().is_none());
+        let state = fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+        assert!(!state.lines().any(|line| {
+            line.strip_prefix("State:")
+                .is_some_and(|value| value.trim_start().starts_with(['T', 't']))
+        }));
+
+        // SAFETY: the test created an isolated process group whose id is pid.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+        child.wait().unwrap();
+    }
+
+    #[test]
     fn daemon_release_pidfd_wait_is_bounded() {
         let mut child = Command::new("sleep").arg("30").spawn().unwrap();
-        let pidfd = open_pidfd(child.id() as libc::pid_t).unwrap();
+        let peer =
+            AuthenticatedDaemonPeer::bind_process(child.id() as libc::pid_t, effective_uid())
+                .unwrap();
 
-        assert!(wait_for_pidfd_exit(&pidfd, Duration::from_millis(10)).is_err());
+        assert!(wait_for_pidfd_exit(peer.pidfd(), Duration::from_millis(10)).is_err());
 
         child.kill().unwrap();
         child.wait().unwrap();

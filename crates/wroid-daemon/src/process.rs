@@ -438,6 +438,21 @@ fn configure_worker_child(
                 }
                 libc::close(source_fd);
             }
+            if libc::syscall(
+                libc::SYS_close_range,
+                libc::STDERR_FILENO + 1,
+                BRIDGE_WORKER_FD - 1,
+                libc::CLOSE_RANGE_CLOEXEC,
+            ) != 0
+                || libc::syscall(
+                    libc::SYS_close_range,
+                    BRIDGE_WORKER_FD + 1,
+                    u32::MAX,
+                    libc::CLOSE_RANGE_CLOEXEC,
+                ) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
             Ok(())
         });
     }
@@ -662,8 +677,21 @@ mod tests {
     #[test]
     fn configured_worker_inherits_the_fixed_bridge_socket() {
         let (worker_stream, broker_stream) = UnixStream::pair().unwrap();
+        let (leaked_stream, leaked_peer) = UnixStream::pair().unwrap();
+        let leaked_fd = leaked_stream.as_raw_fd();
+        // SAFETY: the valid test descriptor is deliberately made inheritable
+        // to prove worker setup closes capabilities it did not select.
+        let flags = unsafe { libc::fcntl(leaked_fd, libc::F_GETFD) };
+        assert!(flags >= 0);
+        assert_eq!(
+            unsafe { libc::fcntl(leaked_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) },
+            0
+        );
         let mut command = Command::new("/usr/bin/sh");
-        command.args(["-c", "test -S /proc/self/fd/198"]);
+        command.args([
+            "-c",
+            &format!("test -S /proc/self/fd/198 && test ! -e /proc/self/fd/{leaked_fd}"),
+        ]);
         configure_worker_child(
             &mut command,
             worker_stream.as_raw_fd(),
@@ -676,6 +704,8 @@ mod tests {
         assert!(status.success());
         drop(worker_stream);
         drop(broker_stream);
+        drop(leaked_stream);
+        drop(leaked_peer);
     }
 
     #[test]

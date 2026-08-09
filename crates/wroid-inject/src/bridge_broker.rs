@@ -1,9 +1,9 @@
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
@@ -112,37 +112,51 @@ pub struct BridgeBrokerClient {
 
 impl BridgeBrokerClient {
     pub fn from_owned_fd(fd: OwnedFd) -> io::Result<Self> {
+        validate_owned_socket(&fd)?;
+        Self::from_stream(UnixStream::from(fd))
+    }
+
+    pub fn from_owned_fd_for_peer(
+        fd: OwnedFd,
+        expected_pid: libc::pid_t,
+        expected_uid: u32,
+    ) -> io::Result<Self> {
+        validate_owned_socket(&fd)?;
         let raw_fd = fd.as_raw_fd();
-        if raw_fd <= libc::STDERR_FILENO {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "bridge channel cannot use a standard I/O descriptor",
-            ));
-        }
-        // SAFETY: stat is valid writable storage and raw_fd remains owned for
-        // the duration of both fstat and fcntl calls.
-        let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
-        if unsafe { libc::fstat(raw_fd, &mut stat) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if stat.st_mode & libc::S_IFMT != libc::S_IFSOCK {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "inherited bridge descriptor is not a Unix socket",
-            ));
-        }
-        // SAFETY: F_GETFD/F_SETFD only inspect and update this owned fd.
-        let flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFD) };
-        if flags < 0 || unsafe { libc::fcntl(raw_fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } != 0
+        let mut credentials = libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
+        let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: credentials and length are valid SO_PEERCRED output buffers
+        // and raw_fd is the owned Unix socket validated above.
+        if unsafe {
+            libc::getsockopt(
+                raw_fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                std::ptr::addr_of_mut!(credentials).cast(),
+                &mut length,
+            )
+        } != 0
         {
             return Err(io::Error::last_os_error());
+        }
+        if length as usize != std::mem::size_of::<libc::ucred>()
+            || credentials.pid != expected_pid
+            || credentials.uid != expected_uid
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "inherited bridge socket peer is not the expected Wroid daemon",
+            ));
         }
         Self::from_stream(UnixStream::from(fd))
     }
 
     fn from_stream(stream: UnixStream) -> io::Result<Self> {
         stream.set_write_timeout(Some(FRAME_WRITE_TIMEOUT))?;
-        stream.set_read_timeout(Some(CLIENT_RESPONSE_TIMEOUT))?;
         let reader = BufReader::new(stream.try_clone()?);
         Ok(Self {
             reader,
@@ -195,7 +209,10 @@ impl BridgeBrokerClient {
                 request,
             },
         )?;
-        let response: ResponseFrame = read_required_frame(&mut self.reader)?;
+        let response: ResponseFrame = read_required_frame_until(
+            &mut self.reader,
+            Some(Instant::now() + CLIENT_RESPONSE_TIMEOUT),
+        )?;
         if response.protocol_version != BRIDGE_PROTOCOL_VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -220,6 +237,34 @@ impl BridgeBrokerClient {
     }
 }
 
+fn validate_owned_socket(fd: &OwnedFd) -> io::Result<()> {
+    let raw_fd = fd.as_raw_fd();
+    if raw_fd <= libc::STDERR_FILENO {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "bridge channel cannot use a standard I/O descriptor",
+        ));
+    }
+    // SAFETY: stat is valid writable storage and raw_fd remains owned for the
+    // duration of both fstat and fcntl calls.
+    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    if unsafe { libc::fstat(raw_fd, &mut stat) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if stat.st_mode & libc::S_IFMT != libc::S_IFSOCK {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "inherited bridge descriptor is not a Unix socket",
+        ));
+    }
+    // SAFETY: F_GETFD/F_SETFD only inspect and update this owned fd.
+    let flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFD) };
+    if flags < 0 || unsafe { libc::fcntl(raw_fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ExpectedResponse {
     Opened,
@@ -236,15 +281,10 @@ pub fn serve_bridge_broker(
     let mut writer = stream;
     let mut state = ServerState::Initial;
     let mut helper: Option<Box<dyn BridgeHelperSession>> = None;
+    let mut state_deadline = Some(Instant::now() + INITIAL_OPEN_TIMEOUT);
 
     loop {
-        let read_timeout = match state {
-            ServerState::Initial => Some(INITIAL_OPEN_TIMEOUT),
-            ServerState::Opened => Some(VERIFY_REQUEST_TIMEOUT),
-            ServerState::Verified => None,
-        };
-        reader.get_ref().set_read_timeout(read_timeout)?;
-        let frame = match read_frame::<RequestFrame>(&mut reader) {
+        let frame = match read_frame_until::<RequestFrame>(&mut reader, state_deadline) {
             Ok(Some(frame)) => frame,
             Ok(None) => return Ok(()),
             Err(error) => {
@@ -280,6 +320,7 @@ pub fn serve_bridge_broker(
                 }
                 write_response(&mut writer, BridgeResponse::Opened)?;
                 state = ServerState::Opened;
+                state_deadline = Some(Instant::now() + VERIFY_REQUEST_TIMEOUT);
             }
             (ServerState::Opened, BridgeRequest::VerifyAndroidInput) => {
                 let result = helper
@@ -292,6 +333,7 @@ pub fn serve_bridge_broker(
                 }
                 write_response(&mut writer, BridgeResponse::AndroidInputReady)?;
                 state = ServerState::Verified;
+                state_deadline = None;
             }
             (ServerState::Verified, BridgeRequest::Finish { waydroid_stopped }) => {
                 let result = helper
@@ -376,8 +418,11 @@ fn write_frame<T: Serialize>(writer: &mut UnixStream, frame: &T) -> io::Result<(
     writer.flush()
 }
 
-fn read_required_frame<T: DeserializeOwned>(reader: &mut BufReader<UnixStream>) -> io::Result<T> {
-    read_frame(reader)?.ok_or_else(|| {
+fn read_required_frame_until<T: DeserializeOwned>(
+    reader: &mut BufReader<UnixStream>,
+    deadline: Option<Instant>,
+) -> io::Result<T> {
+    read_frame_until(reader, deadline)?.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::UnexpectedEof,
             "bridge protocol peer closed before replying",
@@ -385,11 +430,31 @@ fn read_required_frame<T: DeserializeOwned>(reader: &mut BufReader<UnixStream>) 
     })
 }
 
-fn read_frame<T: DeserializeOwned>(reader: &mut BufReader<UnixStream>) -> io::Result<Option<T>> {
+fn read_frame_until<T: DeserializeOwned>(
+    reader: &mut BufReader<UnixStream>,
+    deadline: Option<Instant>,
+) -> io::Result<Option<T>> {
     let mut bytes = Vec::new();
-    reader
-        .take((MAX_BRIDGE_FRAME_BYTES + 1) as u64)
-        .read_until(b'\n', &mut bytes)?;
+    loop {
+        let read_timeout = match deadline {
+            Some(deadline) => Some(deadline.checked_duration_since(Instant::now()).ok_or_else(
+                || io::Error::new(io::ErrorKind::TimedOut, "bridge protocol deadline expired"),
+            )?),
+            None => None,
+        };
+        reader.get_ref().set_read_timeout(read_timeout)?;
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            break;
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let count = newline.map_or(available.len(), |position| position + 1);
+        bytes.extend_from_slice(&available[..count]);
+        reader.consume(count);
+        if bytes.len() > MAX_BRIDGE_FRAME_BYTES || newline.is_some() {
+            break;
+        }
+    }
     if bytes.is_empty() {
         return Ok(None);
     }
@@ -414,6 +479,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
     use std::thread;
+    use std::time::{Duration, Instant};
 
     #[derive(Clone)]
     struct FakeFactory {
@@ -578,6 +644,29 @@ mod tests {
         assert_ne!(flags & libc::FD_CLOEXEC, 0);
         drop(client);
         drop(peer);
+
+        let (stream, peer) = UnixStream::pair().unwrap();
+        let owned: OwnedFd = stream.into();
+        let client = BridgeBrokerClient::from_owned_fd_for_peer(
+            owned,
+            std::process::id() as libc::pid_t,
+            // SAFETY: geteuid has no preconditions.
+            unsafe { libc::geteuid() },
+        )
+        .unwrap();
+        drop(client);
+        drop(peer);
+
+        let (stream, peer) = UnixStream::pair().unwrap();
+        let owned: OwnedFd = stream.into();
+        assert!(BridgeBrokerClient::from_owned_fd_for_peer(
+            owned,
+            std::process::id() as libc::pid_t + 1,
+            // SAFETY: geteuid has no preconditions.
+            unsafe { libc::geteuid() },
+        )
+        .is_err());
+        drop(peer);
     }
 
     #[test]
@@ -600,6 +689,29 @@ mod tests {
             assert!(broker.join().unwrap().is_err());
             assert!(calls.lock().unwrap().is_empty());
         }
+    }
+
+    #[test]
+    fn partial_frame_bytes_cannot_extend_the_total_state_deadline() {
+        let (mut sender, receiver) = UnixStream::pair().unwrap();
+        let writer = thread::spawn(move || {
+            for _ in 0..20 {
+                if sender.write_all(b"{").is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let mut reader = BufReader::new(receiver);
+        let started = Instant::now();
+
+        assert!(read_frame_until::<RequestFrame>(
+            &mut reader,
+            Some(started + Duration::from_millis(25))
+        )
+        .is_err());
+        assert!(started.elapsed() < Duration::from_millis(80));
+        writer.join().unwrap();
     }
 
     #[test]
