@@ -110,8 +110,10 @@ contacts, invalid contact transitions, or frames beyond 10 active contacts fail
 closed.
 
 The daemon scales logical coordinates to `0..=65535` with endpoint-preserving
-integer rounding immediately before injection. Both directions of the socket
-have bounded I/O deadlines. Normal gameplay uses preallocated packet and event
+integer rounding immediately before injection. Client startup/acknowledgment
+waits and all writes have bounded I/O deadlines. The daemon polls the socket at
+250 ms while idle so it can detect helper death without imposing a total
+gameplay or idle timeout. Normal gameplay uses preallocated packet and event
 buffers and performs no process spawn, shell call, JSON parse, or heap
 allocation per frame.
 
