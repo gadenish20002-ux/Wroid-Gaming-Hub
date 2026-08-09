@@ -180,6 +180,7 @@ fn helper_metadata_is_safe(
 
 pub fn run_privileged_bridge_helper(event_node: PathBuf) -> io::Result<()> {
     ensure_root("Wroid privileged input bridge helper")?;
+    assume_full_root_identity()?;
     // SAFETY: changing this process-local umask has no memory-safety
     // preconditions and keeps privileged bridge artifacts deterministic.
     unsafe {
@@ -221,7 +222,25 @@ pub fn run_privileged_bridge_helper(event_node: PathBuf) -> io::Result<()> {
 
 pub fn run_privileged_bridge_helper_check() -> io::Result<()> {
     ensure_root("Wroid privileged input bridge helper")?;
+    assume_full_root_identity()?;
     println!("{CHECK_LINE}");
+    Ok(())
+}
+
+fn assume_full_root_identity() -> io::Result<()> {
+    // A setuid launch starts with effective UID 0 but retains the caller as
+    // its real UID. LXC's command-line tools reject that mixed identity even
+    // though the helper itself has already proved effective root.
+    // SAFETY: the helper is already effective root; these calls affect only
+    // this short-lived process and use fixed root IDs with no user input.
+    unsafe {
+        if libc::setgroups(0, std::ptr::null()) != 0
+            || libc::setresgid(0, 0, 0) != 0
+            || libc::setresuid(0, 0, 0) != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
     Ok(())
 }
 

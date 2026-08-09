@@ -55,8 +55,9 @@ virtual touchscreen and runs physical-input/profile dispatch, but it cannot
 choose a helper executable or reuse bridge authority outside that one session.
 Worker exit, Stop, daemon shutdown, protocol failure, and helper failure all
 close the broker and converge on helper cleanup. A daemon release with an
-active worker is not replaced; an idle stale daemon is authenticated and
-terminated through a revalidated pidfd before the new release starts.
+active worker is not replaced. An idle stale daemon is bound to a pidfd at
+socket authentication, frozen and rechecked for worker children, then
+terminated; a detached watchdog resumes it if the upgrader disappears.
 
 ## Build
 

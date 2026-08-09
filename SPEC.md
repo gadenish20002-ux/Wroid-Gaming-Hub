@@ -34,8 +34,9 @@ The project currently supports:
 - Daemon-owned privileged bridge activation over a private versioned worker
   channel. The daemon validates an exact paired helper release, owns helper
   readiness and cleanup, refuses active stale-daemon replacement, and replaces
-  idle stale releases only through authenticated pidfd signalling. Profile and
-  physical-input dispatch remain in the unprivileged worker.
+  idle stale releases only after pidfd-bound freeze/revalidation with an
+  independent resume watchdog. Profile and physical-input dispatch remain in
+  the unprivileged worker.
 - Concurrent virtual joysticks, keyboard/mouse taps, sustained hold controls
   for automatic fire, and toggle mouse aim.
 - Profile v2 Hold/Toggle layers and modifier chords, with deterministic

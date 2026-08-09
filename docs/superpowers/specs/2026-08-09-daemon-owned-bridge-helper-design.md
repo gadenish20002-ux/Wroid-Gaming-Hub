@@ -171,12 +171,15 @@ If identities match, the existing daemon is reused. If they differ, the client
 uses the compatible `List` request and may replace the daemon only when no
 session has a managed process in Preparing, Running, or Stopping state. Stopped,
 failed, and metadata-only prepared records do not hold runtime resources and do
-not block replacement. The client sends `SIGTERM` through a pidfd opened for the
-authenticated peer, waits for the private socket and lease to disappear, then
-starts the current daemon. An active managed session makes launch refuse with an
-explicit instruction to stop it first. Wroid never replaces a daemon during an
-active game and never signals a PID that has not been authenticated through the
-private socket and revalidated through pidfd.
+not block replacement. The client binds a pidfd when it reads the authenticated
+socket peer, freezes an idle stale daemon, and rechecks that no worker child
+appeared after `List` before queuing `SIGTERM` and resuming it. A detached
+watchdog holds the same pidfd and sends `SIGCONT` if the upgrading client dies
+while the daemon is frozen. The client then waits for the private socket and
+lease to disappear before starting the current daemon. An active managed
+session makes launch refuse with an explicit instruction to stop it first.
+Wroid never replaces a daemon during an active game and never signals a PID
+that was not authenticated through the private socket and bound to that pidfd.
 
 This release check prevents an old daemon from constructing the legacy direct-
 helper worker command after `wroid desktop install` publishes new binaries.

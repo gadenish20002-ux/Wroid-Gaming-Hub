@@ -1,9 +1,13 @@
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::os::fd::RawFd;
+use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+#[cfg(not(test))]
+use std::process::Child;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -21,6 +25,9 @@ use super::play_v2::PlayV2Options;
 const START_ATTEMPTS: usize = 40;
 const START_POLL: Duration = Duration::from_millis(50);
 const RELEASE_STOP_TIMEOUT: Duration = Duration::from_secs(2);
+const RESUME_WATCHDOG_PIDFD: RawFd = 199;
+const RESUME_WATCHDOG_CONTROL_FD: RawFd = 200;
+const WATCHDOG_SOURCE_FD_MIN: RawFd = 201;
 static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn start() -> Result<()> {
@@ -355,9 +362,9 @@ fn stop_authenticated_idle_daemon(
         return Ok(());
     }
 
+    let mut resume = ContinueGuard::new(peer.pidfd())?;
     pidfd_send_signal(peer.pidfd(), libc::SIGSTOP)
         .context("failed to freeze the authenticated stale wroidd")?;
-    let mut resume = ContinueGuard::new(peer.pidfd());
     if !wait_for_process_stopped(peer.pid, RELEASE_STOP_TIMEOUT)? {
         return Ok(());
     }
@@ -395,24 +402,194 @@ fn pidfd_send_signal(pidfd: RawFd, signal: libc::c_int) -> Result<()> {
 struct ContinueGuard {
     pidfd: RawFd,
     armed: bool,
+    control: Option<UnixStream>,
+    watchdog: Option<ResumeWatchdog>,
 }
 
 impl ContinueGuard {
-    fn new(pidfd: RawFd) -> Self {
-        Self { pidfd, armed: true }
+    fn new(pidfd: RawFd) -> Result<Self> {
+        let (control, watchdog) = spawn_resume_watchdog(pidfd)?;
+        Ok(Self {
+            pidfd,
+            armed: true,
+            control: Some(control),
+            watchdog: Some(watchdog),
+        })
     }
 
     fn resume(&mut self) -> Result<()> {
         pidfd_send_signal(self.pidfd, libc::SIGCONT)?;
         self.armed = false;
-        Ok(())
+        self.disarm_watchdog()
     }
+
+    fn disarm_watchdog(&mut self) -> Result<()> {
+        if let Some(mut control) = self.control.take() {
+            control
+                .write_all(b"D")
+                .context("failed to disarm the stale-daemon resume watchdog")?;
+        }
+        let Some(watchdog) = self.watchdog.take() else {
+            return Ok(());
+        };
+        match watchdog {
+            #[cfg(not(test))]
+            ResumeWatchdog::Process(mut watchdog) => {
+                let deadline = Instant::now() + Duration::from_secs(1);
+                loop {
+                    if let Some(status) = watchdog
+                        .try_wait()
+                        .context("failed to inspect the stale-daemon resume watchdog")?
+                    {
+                        if status.success() {
+                            return Ok(());
+                        }
+                        bail!("stale-daemon resume watchdog exited with {status}");
+                    }
+                    if Instant::now() >= deadline {
+                        let _ = watchdog.kill();
+                        let _ = watchdog.wait();
+                        bail!("stale-daemon resume watchdog did not exit after disarm");
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
+            #[cfg(test)]
+            ResumeWatchdog::Thread(watchdog) => watchdog
+                .join()
+                .map_err(|_| anyhow::anyhow!("stale-daemon resume watchdog thread panicked"))?,
+        }
+    }
+}
+
+enum ResumeWatchdog {
+    #[cfg(not(test))]
+    Process(Child),
+    #[cfg(test)]
+    Thread(thread::JoinHandle<Result<()>>),
+}
+
+#[cfg(test)]
+fn spawn_resume_watchdog(pidfd: RawFd) -> Result<(UnixStream, ResumeWatchdog)> {
+    let pidfd = duplicate_owned_fd(pidfd)?;
+    let (control, watchdog_control) =
+        UnixStream::pair().context("failed to create the stale-daemon watchdog control channel")?;
+    let watchdog = thread::spawn(move || watch_stopped_daemon(pidfd, watchdog_control));
+    Ok((control, ResumeWatchdog::Thread(watchdog)))
+}
+
+#[cfg(not(test))]
+fn spawn_resume_watchdog(pidfd: RawFd) -> Result<(UnixStream, ResumeWatchdog)> {
+    spawn_resume_watchdog_process(pidfd)
+        .map(|(control, child)| (control, ResumeWatchdog::Process(child)))
+}
+
+#[cfg(not(test))]
+fn spawn_resume_watchdog_process(pidfd: RawFd) -> Result<(UnixStream, Child)> {
+    let inherited_pidfd = duplicate_owned_fd(pidfd)?;
+    let (control, child_control) =
+        UnixStream::pair().context("failed to create the stale-daemon watchdog control channel")?;
+    let inherited_control = duplicate_owned_fd(child_control.as_raw_fd())?;
+    drop(child_control);
+    let pidfd_source = inherited_pidfd.as_raw_fd();
+    let control_source = inherited_control.as_raw_fd();
+    let executable = env::current_exe().context("failed to locate the Wroid executable")?;
+    let mut command = Command::new(executable);
+    command
+        .arg("resume-stale-daemon")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    // SAFETY: the closure uses only async-signal-safe descriptor syscalls
+    // between fork and exec. Source descriptors stay owned until spawn returns.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::dup3(pidfd_source, RESUME_WATCHDOG_PIDFD, 0) < 0
+                || libc::dup3(control_source, RESUME_WATCHDOG_CONTROL_FD, 0) < 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::syscall(
+                libc::SYS_close_range,
+                libc::STDERR_FILENO + 1,
+                RESUME_WATCHDOG_PIDFD - 1,
+                libc::CLOSE_RANGE_CLOEXEC,
+            ) != 0
+                || libc::syscall(
+                    libc::SYS_close_range,
+                    RESUME_WATCHDOG_CONTROL_FD + 1,
+                    u32::MAX,
+                    libc::CLOSE_RANGE_CLOEXEC,
+                ) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let watchdog = command
+        .spawn()
+        .context("failed to start the stale-daemon resume watchdog")?;
+    Ok((control, watchdog))
 }
 
 impl Drop for ContinueGuard {
     fn drop(&mut self) {
         if self.armed {
             let _ = pidfd_send_signal(self.pidfd, libc::SIGCONT);
+            self.armed = false;
+        }
+        let _ = self.disarm_watchdog();
+    }
+}
+
+fn duplicate_owned_fd(source: RawFd) -> Result<OwnedFd> {
+    // SAFETY: F_DUPFD_CLOEXEC duplicates a valid borrowed descriptor into a
+    // fresh descriptor at or above the requested minimum.
+    let duplicate = unsafe { libc::fcntl(source, libc::F_DUPFD_CLOEXEC, WATCHDOG_SOURCE_FD_MIN) };
+    if duplicate < 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("failed to duplicate a stale-daemon watchdog descriptor");
+    }
+    // SAFETY: fcntl returned a fresh descriptor transferred exactly once.
+    Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
+}
+
+pub(crate) fn resume_stale_daemon() -> Result<()> {
+    for fd in [RESUME_WATCHDOG_PIDFD, RESUME_WATCHDOG_CONTROL_FD] {
+        // SAFETY: F_GETFD validates the inherited descriptor without changing it.
+        if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+            bail!("stale-daemon resume watchdog is missing inherited descriptor {fd}");
+        }
+    }
+    // SAFETY: this hidden command is the sole adopter of both descriptors
+    // assigned by spawn_resume_watchdog.
+    let pidfd = unsafe { OwnedFd::from_raw_fd(RESUME_WATCHDOG_PIDFD) };
+    // SAFETY: the inherited control descriptor is one endpoint of a Unix pair.
+    let control_fd = unsafe { OwnedFd::from_raw_fd(RESUME_WATCHDOG_CONTROL_FD) };
+    watch_stopped_daemon(pidfd, UnixStream::from(control_fd))
+}
+
+fn watch_stopped_daemon(pidfd: OwnedFd, mut control: UnixStream) -> Result<()> {
+    let mut command = [0_u8; 1];
+    match control.read(&mut command) {
+        Ok(1) if command[0] == b'D' => Ok(()),
+        Ok(1) => {
+            pidfd_send_signal(pidfd.as_raw_fd(), libc::SIGCONT)?;
+            bail!("stale-daemon watchdog received an invalid control command")
+        }
+        Ok(0) => pidfd_send_signal(pidfd.as_raw_fd(), libc::SIGCONT)
+            .context("failed to resume stale wroidd after upgrader exit"),
+        Ok(_) => unreachable!("one-byte read returned an oversized result"),
+        Err(error) => {
+            let resume = pidfd_send_signal(pidfd.as_raw_fd(), libc::SIGCONT);
+            match resume {
+                Ok(()) => Err(error).context("stale-daemon watchdog control failed"),
+                Err(resume_error) => Err(anyhow::anyhow!(
+                    "stale-daemon watchdog control failed: {error}; resume failed: {resume_error}"
+                )),
+            }
         }
     }
 }
@@ -800,8 +977,13 @@ mod tests {
             AuthenticatedDaemonPeer::bind_process(child.id() as libc::pid_t, effective_uid())
                 .unwrap();
         let unrelated = daemon_file_identity(&env::current_exe().unwrap()).unwrap();
+        let child_identity =
+            daemon_file_identity(Path::new(&format!("/proc/{}/exe", child.id()))).unwrap();
+        assert_ne!(child_identity, unrelated);
+        assert!(child.try_wait().unwrap().is_none());
 
-        assert!(stop_authenticated_idle_daemon(peer, unrelated).is_err());
+        let result = stop_authenticated_idle_daemon(peer, unrelated);
+        assert!(result.is_err(), "mismatched identity returned {result:?}");
         assert!(child.try_wait().unwrap().is_none());
         child.kill().unwrap();
         child.wait().unwrap();
@@ -847,6 +1029,32 @@ mod tests {
 
         // SAFETY: the test created an isolated process group whose id is pid.
         unsafe { libc::kill(-pid, libc::SIGKILL) };
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn resume_watchdog_continues_a_daemon_when_its_control_peer_disappears() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let peer =
+            AuthenticatedDaemonPeer::bind_process(child.id() as libc::pid_t, effective_uid())
+                .unwrap();
+        let (control, watchdog_control) = std::os::unix::net::UnixStream::pair().unwrap();
+        let pidfd = duplicate_owned_fd(peer.pidfd()).unwrap();
+        pidfd_send_signal(peer.pidfd(), libc::SIGSTOP).unwrap();
+        assert!(
+            wait_for_process_stopped(child.id() as libc::pid_t, Duration::from_secs(1)).unwrap()
+        );
+        let watchdog = thread::spawn(move || watch_stopped_daemon(pidfd, watchdog_control));
+
+        drop(control);
+        watchdog.join().unwrap().unwrap();
+        let state = fs::read_to_string(format!("/proc/{}/status", child.id())).unwrap();
+        assert!(!state.lines().any(|line| {
+            line.strip_prefix("State:")
+                .is_some_and(|value| value.trim_start().starts_with(['T', 't']))
+        }));
+
+        child.kill().unwrap();
         child.wait().unwrap();
     }
 

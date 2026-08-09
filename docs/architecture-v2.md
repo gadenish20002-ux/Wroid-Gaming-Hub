@@ -71,10 +71,11 @@ graphical Polkit authorization, an interprocess lease, and a write-sealed memfd
 source. The root-owned fixed `/usr/bin/install` process never reads a mutable
 staging pathname; if the detached owner disappears before the source is opened,
 installation fails instead of publishing a partial helper. Daemon reuse is
-bound to authenticated peer credentials and exact executable identity; only an
-idle stale release may be replaced, through a revalidated pidfd. Moving profile
-evaluation, capture, injection, and lifecycle cleanup into daemon-native
-components remains a later migration.
+bound to authenticated peer credentials, a pidfd opened at authentication, and
+exact executable identity. Only an idle stale release may be frozen, checked
+again for worker children, and replaced; a detached watchdog guarantees resume
+if the upgrader dies. Moving profile evaluation, capture, injection, and
+lifecycle cleanup into daemon-native components remains a later migration.
 
 ## Workspace direction
 

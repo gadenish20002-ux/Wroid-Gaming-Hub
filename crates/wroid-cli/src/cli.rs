@@ -204,6 +204,9 @@ pub(crate) enum Commands {
         #[arg(long)]
         ticket: String,
     },
+    /// Internal fail-safe that resumes a frozen stale daemon if its upgrader dies.
+    #[command(hide = true)]
+    ResumeStaleDaemon,
     Run {
         profile_path: PathBuf,
         #[arg(long, value_enum, default_value_t = InputBackend::Auto)]
@@ -1100,6 +1103,13 @@ mod tests {
         assert_eq!(bridge_fd, Some(198));
         assert_eq!(daemon_parent_pid, Some(42));
         assert_eq!(exit_after_ms, Some(25));
+    }
+
+    #[test]
+    fn hidden_stale_daemon_resume_watchdog_has_no_caller_supplied_target() {
+        let cli = Cli::try_parse_from(["wroid", "resume-stale-daemon"]).unwrap();
+        assert!(matches!(cli.command, Commands::ResumeStaleDaemon));
+        assert!(Cli::try_parse_from(["wroid", "resume-stale-daemon", "--pid", "42"]).is_err());
     }
 
     #[test]

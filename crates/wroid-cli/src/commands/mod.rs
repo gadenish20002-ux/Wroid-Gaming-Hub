@@ -324,6 +324,7 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
         Commands::RestoreDesktopSession { parent_pid, ticket } => {
             launch_v2::restore_desktop_session(parent_pid, &ticket)
         }
+        Commands::ResumeStaleDaemon => runtime_daemon::resume_stale_daemon(),
         Commands::Run {
             profile_path,
             backend,

@@ -555,8 +555,10 @@ Input capture, profile evaluation, touch injection, and Waydroid lifecycle
 remain inside the supervised desktop-user worker.
 
 Before reuse, the client compares the authenticated daemon executable with the
-selected `wroidd` by device and inode. An idle stale release is replaced through
-a revalidated pidfd; an older daemon with an active managed worker is never
+selected `wroidd` by device and inode. An idle stale release is atomically
+frozen, rechecked for a newly started worker, and replaced through the pidfd
+bound at socket authentication. A detached watchdog resumes it if the upgrading
+client dies mid-handoff. An older daemon with an active managed worker is never
 replaced until that game is stopped.
 
 ```sh
