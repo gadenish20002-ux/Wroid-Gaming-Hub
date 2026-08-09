@@ -14,6 +14,7 @@ mod injector;
 mod live_keyboard;
 mod live_mouse_aim;
 mod privileged_bridge;
+mod runtime_channel;
 mod sink;
 mod state;
 mod transition;
@@ -54,6 +55,11 @@ pub use privileged_bridge::{
     run_privileged_bridge_helper, run_privileged_bridge_helper_check,
     validate_installed_bridge_helper, BridgeHelperCommand, PrivilegedBridgeHelper,
     DEFAULT_PRIVILEGED_BRIDGE_HELPER,
+};
+pub use runtime_channel::{
+    runtime_socket_pair, serve_runtime_attachment, RuntimeAttachmentReport, RuntimeChannelClient,
+    RuntimeChannelServer, RUNTIME_PROTOCOL_VERSION, RUNTIME_WORKER_FD,
+    RUNTIME_WORKER_PROTOCOL_GENERATION,
 };
 pub use sink::EvdevEventSink;
 pub use waydroid_bridge::{
