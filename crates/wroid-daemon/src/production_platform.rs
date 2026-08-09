@@ -188,6 +188,13 @@ impl LinuxPlatformDriver {
             }
         }
     }
+
+    fn record_resolution_configuration(&mut self, result: io::Result<()>) -> io::Result<()> {
+        if result.is_err() {
+            self.waydroid_stop_unverified = true;
+        }
+        result
+    }
 }
 
 impl PlatformDriver for LinuxPlatformDriver {
@@ -219,16 +226,15 @@ impl PlatformDriver for LinuxPlatformDriver {
         self.helper = Some(helper_factory.start(&event_node)?);
         let waydroid = DesktopWaydroidSession::start(desktop_user);
         self.store_waydroid_start(waydroid)?;
-        self.configure_resolution(resolution)?;
+        let configured = self.configure_resolution(resolution);
+        self.record_resolution_configuration(configured)?;
         self.helper_mut()?.verify_android_input()
     }
 
     fn change_resolution(&mut self, resolution: Resolution) -> io::Result<()> {
         self.helper_mut()?.check_health()?;
-        if let Err(error) = self.configure_resolution(resolution) {
-            self.waydroid_stop_unverified = true;
-            return Err(error);
-        }
+        let configured = self.configure_resolution(resolution);
+        self.record_resolution_configuration(configured)?;
         self.helper_mut()?.verify_android_input()
     }
 
@@ -439,6 +445,7 @@ mod tests {
     struct RecordingPlatformDriver {
         calls: Calls,
         fail_initializations: usize,
+        fail_initial_resolution_configurations: usize,
         fail_resolution_changes: usize,
         fail_health_checks: usize,
         fail_shutdowns: usize,
@@ -531,6 +538,12 @@ mod tests {
                 "waydroid:start:{}x{}",
                 resolution.width, resolution.height
             ));
+            if self.fail_initial_resolution_configurations > 0 {
+                self.fail_initial_resolution_configurations -= 1;
+                self.waydroid_open = false;
+                self.waydroid_stop_unverified = true;
+                return Err(io::Error::other("initial resolution restart failed"));
+            }
             Ok(())
         }
 
@@ -608,6 +621,7 @@ mod tests {
         ProductionRuntimePlatform::with_driver(Box::new(RecordingPlatformDriver {
             calls,
             fail_initializations,
+            fail_initial_resolution_configurations: 0,
             fail_resolution_changes: 0,
             fail_health_checks,
             fail_shutdowns,
@@ -623,7 +637,24 @@ mod tests {
         ProductionRuntimePlatform::with_driver(Box::new(RecordingPlatformDriver {
             calls,
             fail_initializations: 0,
+            fail_initial_resolution_configurations: 0,
             fail_resolution_changes: 1,
+            fail_health_checks: 0,
+            fail_shutdowns: 0,
+            fail_cleanup_steps: false,
+            uinput_open: false,
+            helper_open: false,
+            waydroid_open: false,
+            waydroid_stop_unverified: false,
+        }))
+    }
+
+    fn backend_with_initial_resolution_failure(calls: Calls) -> ProductionRuntimePlatform {
+        ProductionRuntimePlatform::with_driver(Box::new(RecordingPlatformDriver {
+            calls,
+            fail_initializations: 0,
+            fail_initial_resolution_configurations: 1,
+            fail_resolution_changes: 0,
             fail_health_checks: 0,
             fail_shutdowns: 0,
             fail_cleanup_steps: false,
@@ -819,6 +850,7 @@ mod tests {
         let mut driver = RecordingPlatformDriver {
             calls: calls.clone(),
             fail_initializations: 0,
+            fail_initial_resolution_configurations: 0,
             fail_resolution_changes: 0,
             fail_health_checks: 0,
             fail_shutdowns: 0,
@@ -868,6 +900,53 @@ mod tests {
         assert_eq!(*finish_arguments.lock().unwrap(), [false]);
         assert!(error.to_string().contains("stop is unverified"));
         assert!(error.to_string().contains("helper cleanup failed"));
+    }
+
+    #[test]
+    fn initial_resolution_restart_failure_forces_helper_recovery() {
+        let finish_arguments = Arc::new(Mutex::new(Vec::new()));
+        let mut driver = LinuxPlatformDriver::new(1000);
+        driver.helper = Some(Box::new(RecordingHelper {
+            finish_arguments: finish_arguments.clone(),
+            fail_finish: false,
+        }));
+        let configure_error: io::Result<()> =
+            Err(io::Error::other("initial resolution restart failed"));
+
+        assert_eq!(
+            driver
+                .record_resolution_configuration(configure_error)
+                .unwrap_err()
+                .to_string(),
+            "initial resolution restart failed"
+        );
+        let error = shutdown_platform_resources(&mut driver).unwrap_err();
+
+        assert_eq!(*finish_arguments.lock().unwrap(), [false]);
+        assert!(error.to_string().contains("stop is unverified"));
+    }
+
+    #[test]
+    fn failed_initial_resolution_restart_recreates_every_resource_on_retry() {
+        let calls = shared_calls();
+        let mut backend = backend_with_initial_resolution_failure(calls.clone());
+
+        let error = backend
+            .prepare(&platform_launch("com.example.fail", 1920, 1080))
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("initial resolution restart failed"));
+        assert!(error.to_string().contains("stop unverified"));
+        backend
+            .prepare(&platform_launch("com.example.retry", 1920, 1080))
+            .unwrap();
+
+        assert_eq!(count(&calls, "uinput:create"), 2);
+        assert_eq!(count(&calls, "helper:start"), 2);
+        assert_eq!(count(&calls, "waydroid:start:1920x1080"), 2);
+        assert_eq!(count(&calls, "helper:finish:false"), 1);
+        assert_eq!(packages(&calls), ["com.example.retry"]);
     }
 
     #[test]
