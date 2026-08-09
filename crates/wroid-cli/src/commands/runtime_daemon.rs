@@ -972,13 +972,18 @@ mod tests {
 
     #[test]
     fn daemon_release_rejects_changed_pid_identity_without_signalling() {
-        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let sleep = Path::new("/usr/bin/sleep");
+        let expected_sleep = daemon_file_identity(sleep).unwrap();
+        let mut child = Command::new(sleep).arg("30").spawn().unwrap();
         let peer =
             AuthenticatedDaemonPeer::bind_process(child.id() as libc::pid_t, effective_uid())
                 .unwrap();
         let unrelated = daemon_file_identity(&env::current_exe().unwrap()).unwrap();
-        let child_identity =
-            daemon_file_identity(Path::new(&format!("/proc/{}/exe", child.id()))).unwrap();
+        let child_identity = wait_for_test_process_identity(
+            child.id() as libc::pid_t,
+            expected_sleep,
+            Duration::from_secs(1),
+        );
         assert_ne!(child_identity, unrelated);
         assert!(child.try_wait().unwrap().is_none());
 
@@ -991,12 +996,17 @@ mod tests {
 
     #[test]
     fn daemon_release_signals_the_authenticated_pidfd() {
-        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let sleep = Path::new("/usr/bin/sleep");
+        let expected_sleep = daemon_file_identity(sleep).unwrap();
+        let mut child = Command::new(sleep).arg("30").spawn().unwrap();
         let peer =
             AuthenticatedDaemonPeer::bind_process(child.id() as libc::pid_t, effective_uid())
                 .unwrap();
-        let identity =
-            daemon_file_identity(Path::new(&format!("/proc/{}/exe", child.id()))).unwrap();
+        let identity = wait_for_test_process_identity(
+            child.id() as libc::pid_t,
+            expected_sleep,
+            Duration::from_secs(1),
+        );
 
         stop_authenticated_idle_daemon(peer, identity).unwrap();
         let status = child.wait().unwrap();
@@ -1080,6 +1090,25 @@ mod tests {
             control_count: 0,
             process_id,
             detail: None,
+        }
+    }
+
+    fn wait_for_test_process_identity(
+        pid: libc::pid_t,
+        expected: (u64, u64),
+        timeout: Duration,
+    ) -> (u64, u64) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let identity = daemon_file_identity(Path::new(&format!("/proc/{pid}/exe"))).unwrap();
+            if identity == expected {
+                return identity;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "spawned process did not exec the expected binary"
+            );
+            thread::sleep(Duration::from_millis(1));
         }
     }
 }
