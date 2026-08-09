@@ -6,8 +6,11 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use crate::bounded_process::{
+    output_with_timeout, read_child_line_with_timeout, wait_child_with_timeout,
+};
 use crate::{
     ensure_root, remove_default_bridge, validate_wroid_touchscreen_node, InputDeviceNode,
     InstalledWaydroidBridge, WaydroidBridgeLease, WROID_TOUCHSCREEN_NAME,
@@ -21,6 +24,11 @@ const ANDROID_INPUT_READY_LINE: &str = "WROID_ANDROID_INPUT_READY 1";
 const MAX_HELPER_COMMAND_BYTES: u64 = 64;
 const ANDROID_INPUT_ATTEMPTS: usize = 60;
 const ANDROID_INPUT_INTERVAL: Duration = Duration::from_millis(500);
+const ANDROID_INPUT_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
+const PRIVILEGED_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const HELPER_READY_TIMEOUT: Duration = Duration::from_secs(30);
+const HELPER_REPLY_TIMEOUT: Duration = ANDROID_INPUT_TOTAL_TIMEOUT;
+const HELPER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const LXC_PATH: &str = "/var/lib/waydroid/lxc";
 const WAYDROID_CONTAINER_NAME: &str = "waydroid";
 const SAFE_SYSTEM_PATH: &str = "/usr/sbin:/usr/bin";
@@ -322,7 +330,11 @@ fn force_stop_waydroid_container() -> io::Result<()> {
     if ensure_container_stopped_privileged().is_ok() {
         return Ok(());
     }
-    let output = lxc_stop_command().output()?;
+    let output = run_privileged_command(
+        lxc_stop_command(),
+        PRIVILEGED_COMMAND_TIMEOUT,
+        "lxc-stop waydroid",
+    )?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
             "privileged Waydroid recovery stop failed\n{}",
@@ -333,7 +345,11 @@ fn force_stop_waydroid_container() -> io::Result<()> {
 }
 
 fn ensure_container_stopped_privileged() -> io::Result<()> {
-    let output = lxc_status_command().output()?;
+    let output = run_privileged_command(
+        lxc_status_command(),
+        PRIVILEGED_COMMAND_TIMEOUT,
+        "lxc-info waydroid status",
+    )?;
     if !output.status.success() {
         return Err(io::Error::other(format!(
             "privileged Waydroid LXC status failed\n{}",
@@ -399,12 +415,60 @@ fn lxc_stop_command() -> Command {
     )
 }
 
+fn run_privileged_command(
+    mut command: Command,
+    timeout: Duration,
+    context: &str,
+) -> io::Result<Output> {
+    output_with_timeout(&mut command, timeout, context)
+}
+
+fn run_privileged_command_before(
+    command: Command,
+    deadline: Instant,
+    context: &str,
+) -> io::Result<Output> {
+    let timeout = remaining_before(deadline, context)?;
+    run_privileged_command(command, timeout.min(PRIVILEGED_COMMAND_TIMEOUT), context)
+}
+
+fn deadline_after(timeout: Duration, context: &str) -> io::Result<Instant> {
+    Instant::now().checked_add(timeout).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{context}: timeout is too large for a monotonic deadline"),
+        )
+    })
+}
+
+fn remaining_before(deadline: Instant, context: &str) -> io::Result<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("{context}: timed out before the operation could start"),
+        ));
+    }
+    Ok(remaining)
+}
+
+fn sleep_before(deadline: Instant, interval: Duration) {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if !remaining.is_zero() {
+        sleep(interval.min(remaining));
+    }
+}
+
 fn waydroid_status_is_frozen(status: &str) -> bool {
     status.trim() == "FROZEN"
 }
 
-fn unfreeze_waydroid_for_input_probe() -> io::Result<()> {
-    let status = lxc_status_command().output()?;
+fn unfreeze_waydroid_for_input_probe(deadline: Instant) -> io::Result<()> {
+    let status = run_privileged_command_before(
+        lxc_status_command(),
+        deadline,
+        "lxc-info waydroid status before Android input probe",
+    )?;
     if !status.status.success() {
         return Err(io::Error::other(format!(
             "privileged Waydroid status failed before Android input probe\n{}",
@@ -415,7 +479,11 @@ fn unfreeze_waydroid_for_input_probe() -> io::Result<()> {
         return Ok(());
     }
 
-    let output = android_input_unfreeze_command().output()?;
+    let output = run_privileged_command_before(
+        android_input_unfreeze_command(),
+        deadline,
+        "lxc-unfreeze waydroid before Android input probe",
+    )?;
     if output.status.success() {
         return Ok(());
     }
@@ -427,14 +495,22 @@ fn unfreeze_waydroid_for_input_probe() -> io::Result<()> {
 
 fn wait_for_android_input_privileged() -> io::Result<()> {
     let mut last_output = String::new();
+    let deadline = deadline_after(
+        ANDROID_INPUT_TOTAL_TIMEOUT,
+        "Android input privileged probe",
+    )?;
     for _ in 0..ANDROID_INPUT_ATTEMPTS {
-        unfreeze_waydroid_for_input_probe()?;
-        let output = android_input_probe_command().output()?;
+        unfreeze_waydroid_for_input_probe(deadline)?;
+        let output = run_privileged_command_before(
+            android_input_probe_command(),
+            deadline,
+            "lxc-attach getevent Android input probe",
+        )?;
         last_output = combined_output(&output);
         if output.status.success() && last_output.contains(WROID_TOUCHSCREEN_NAME) {
             return Ok(());
         }
-        sleep(ANDROID_INPUT_INTERVAL);
+        sleep_before(deadline, ANDROID_INPUT_INTERVAL);
     }
     Err(io::Error::new(
         io::ErrorKind::NotFound,
@@ -444,17 +520,25 @@ fn wait_for_android_input_privileged() -> io::Result<()> {
     ))
 }
 
-fn request_android_input_verification<W: Write, R: BufRead>(
+fn request_android_input_verification_from_child<W: Write>(
     writer: &mut W,
-    reader: &mut R,
+    child: &mut Child,
+    reader: &mut BufReader<ChildStdout>,
 ) -> io::Result<()> {
     writer.write_all(VERIFY_ANDROID_INPUT_COMMAND)?;
     writer.flush()?;
-    let mut reply = Vec::new();
-    reader
-        .take(MAX_HELPER_COMMAND_BYTES + 1)
-        .read_until(b'\n', &mut reply)?;
-    if reply.as_slice() == format!("{ANDROID_INPUT_READY_LINE}\n").as_bytes() {
+    let reply = read_child_line_with_timeout(
+        child,
+        reader,
+        HELPER_REPLY_TIMEOUT,
+        MAX_HELPER_COMMAND_BYTES as usize,
+        "privileged bridge helper Android input verification reply",
+    )?;
+    validate_android_input_reply(&reply)
+}
+
+fn validate_android_input_reply(reply: &[u8]) -> io::Result<()> {
+    if reply == format!("{ANDROID_INPUT_READY_LINE}\n").as_bytes() {
         return Ok(());
     }
     Err(io::Error::new(
@@ -470,17 +554,19 @@ fn combined_output(output: &Output) -> String {
 }
 
 fn probe_privileged_bridge_helper(path: &Path) -> io::Result<()> {
-    let output = Command::new(path)
-        .arg("--check")
-        .env_clear()
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("failed to execute Wroid bridge helper check: {error}"),
-            )
-        })?;
+    let mut command = Command::new(path);
+    command.arg("--check").env_clear().stdin(Stdio::null());
+    let output = output_with_timeout(
+        &mut command,
+        PRIVILEGED_COMMAND_TIMEOUT,
+        "Wroid bridge helper check",
+    )
+    .map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("failed to execute Wroid bridge helper check: {error}"),
+        )
+    })?;
     if output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == CHECK_LINE {
         return Ok(());
     }
@@ -540,16 +626,31 @@ impl PrivilegedBridgeHelper {
             .take()
             .ok_or_else(|| io::Error::other("bridge helper stdout pipe is unavailable"))?;
         let mut reader = BufReader::new(stdout);
-        let mut ready = String::new();
-        let read_result = reader.read_line(&mut ready);
-        if let Err(error) = read_result {
+        let ready = match read_child_line_with_timeout(
+            &mut child,
+            &mut reader,
+            HELPER_READY_TIMEOUT,
+            MAX_HELPER_COMMAND_BYTES as usize,
+            "privileged bridge helper READY line",
+        ) {
+            Ok(ready) => ready,
+            Err(error) => {
+                drop(stdin);
+                let _ = wait_child_with_timeout(
+                    &mut child,
+                    HELPER_SHUTDOWN_TIMEOUT,
+                    "privileged bridge helper startup cleanup",
+                );
+                return Err(error);
+            }
+        };
+        if String::from_utf8_lossy(&ready).trim_end() != READY_LINE {
             drop(stdin);
-            let _ = child.wait();
-            return Err(error);
-        }
-        if ready.trim_end() != READY_LINE {
-            drop(stdin);
-            let status = child.wait()?;
+            let status = wait_child_with_timeout(
+                &mut child,
+                HELPER_SHUTDOWN_TIMEOUT,
+                "privileged bridge helper readiness failure cleanup",
+            )?;
             return Err(io::Error::other(format!(
                 "privileged bridge helper did not become ready (exit {status})"
             )));
@@ -569,7 +670,7 @@ impl PrivilegedBridgeHelper {
                 "bridge helper stdin pipe is unavailable",
             )
         })?;
-        request_android_input_verification(stdin, &mut self.stdout)
+        request_android_input_verification_from_child(stdin, &mut self.child, &mut self.stdout)
     }
 
     pub fn check_health(&mut self) -> io::Result<()> {
@@ -586,21 +687,42 @@ impl PrivilegedBridgeHelper {
     }
 
     pub fn finish(mut self, waydroid_stopped: bool) -> io::Result<()> {
-        if waydroid_stopped {
+        let cleanup_command = if waydroid_stopped {
             if let Some(stdin) = self.stdin.as_mut() {
-                stdin.write_all(CLEANUP_COMMAND)?;
-                stdin.flush()?;
+                stdin
+                    .write_all(CLEANUP_COMMAND)
+                    .and_then(|()| stdin.flush())
+            } else {
+                Ok(())
             }
-        }
-        self.stdin.take();
-        let status = self.child.wait()?;
-        self.active = false;
-        if status.success() {
-            Ok(())
         } else {
-            Err(io::Error::other(format!(
+            Ok(())
+        };
+        self.stdin.take();
+        let status = wait_child_with_timeout(
+            &mut self.child,
+            HELPER_SHUTDOWN_TIMEOUT,
+            "privileged bridge helper shutdown",
+        );
+        self.active = false;
+        match (cleanup_command, status) {
+            (Ok(()), Ok(status)) if status.success() => Ok(()),
+            (Ok(()), Ok(status)) => Err(io::Error::other(format!(
                 "privileged bridge helper exited with {status}"
-            )))
+            ))),
+            (Err(command_error), Ok(status)) => Err(io::Error::new(
+                command_error.kind(),
+                format!(
+                    "failed to send privileged bridge helper cleanup command: {command_error}; helper exited with {status}"
+                ),
+            )),
+            (Ok(()), Err(wait_error)) => Err(wait_error),
+            (Err(command_error), Err(wait_error)) => Err(io::Error::new(
+                command_error.kind(),
+                format!(
+                    "failed to send privileged bridge helper cleanup command: {command_error}; helper wait also failed: {wait_error}"
+                ),
+            )),
         }
     }
 }
@@ -630,7 +752,12 @@ impl Drop for PrivilegedBridgeHelper {
     fn drop(&mut self) {
         if self.active {
             self.stdin.take();
-            let _ = self.child.wait();
+            let _ = wait_child_with_timeout(
+                &mut self.child,
+                HELPER_SHUTDOWN_TIMEOUT,
+                "privileged bridge helper drop",
+            );
+            self.active = false;
         }
     }
 }
@@ -784,15 +911,10 @@ mod tests {
 
     #[test]
     fn helper_protocol_client_requires_exact_android_ready_reply() {
-        let mut request = Vec::new();
-        let mut ready = Cursor::new(b"WROID_ANDROID_INPUT_READY 1\n");
-        request_android_input_verification(&mut request, &mut ready).unwrap();
-        assert_eq!(request, b"VERIFY_ANDROID_INPUT\n");
+        validate_android_input_reply(b"WROID_ANDROID_INPUT_READY 1\n").unwrap();
 
-        let mut rejected_request = Vec::new();
-        let mut malformed = Cursor::new(b"READY MAYBE\n");
         assert_eq!(
-            request_android_input_verification(&mut rejected_request, &mut malformed)
+            validate_android_input_reply(b"READY MAYBE\n")
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidData

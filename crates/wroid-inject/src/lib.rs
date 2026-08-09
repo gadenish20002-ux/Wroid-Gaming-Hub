@@ -4,6 +4,7 @@
 //! validated touch frames into multitouch protocol Type-B event batches.
 //! No subprocess is spawned per event or per frame.
 
+mod bounded_process;
 mod config;
 mod error;
 mod event;

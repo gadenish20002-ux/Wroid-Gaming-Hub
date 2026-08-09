@@ -7,11 +7,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, sleep, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-const STATUS_ATTEMPTS: usize = 60;
-const USER_READY_ATTEMPTS: usize = 240;
+use crate::bounded_process::{output_with_timeout, wait_child_with_timeout};
+
 const STATUS_INTERVAL: Duration = Duration::from_millis(500);
+const WAYDROID_PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
+const WAYDROID_STATE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+const ANDROID_USER_READY_TIMEOUT: Duration = Duration::from_secs(120);
+const WAYDROID_CHILD_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_ANDROID_USER_ID: u32 = 0;
 const WAYDROID_WIDTH_PROPERTY: &str = "persist.waydroid.width";
 const WAYDROID_HEIGHT_PROPERTY: &str = "persist.waydroid.height";
@@ -195,8 +199,22 @@ impl DesktopUser {
         self.output(arguments).map(|_| ())
     }
 
+    fn run_with_timeout(&self, arguments: &[&str], timeout: Duration) -> io::Result<()> {
+        self.output_with_timeout(arguments, timeout).map(|_| ())
+    }
+
     fn output(&self, arguments: &[&str]) -> io::Result<Output> {
-        let output = self.command(arguments).output()?;
+        self.output_with_timeout(arguments, WAYDROID_PROCESS_TIMEOUT)
+    }
+
+    fn output_with_timeout(&self, arguments: &[&str], timeout: Duration) -> io::Result<Output> {
+        let mut command = self.command(arguments);
+        let context = format!(
+            "waydroid {} as desktop user {}",
+            arguments.join(" "),
+            self.name
+        );
+        let output = output_with_timeout(&mut command, timeout, &context)?;
         if output.status.success() {
             return Ok(output);
         }
@@ -250,7 +268,11 @@ impl DesktopWaydroidSession {
             Ok(capture) => capture,
             Err(error) => {
                 let _ = child.kill();
-                let _ = child.wait();
+                let _ = wait_child_with_timeout(
+                    &mut child,
+                    WAYDROID_CHILD_WAIT_TIMEOUT,
+                    "Waydroid session start cleanup",
+                );
                 return Err(error);
             }
         };
@@ -321,14 +343,19 @@ impl DesktopWaydroidSession {
             return Ok(());
         }
 
-        for _ in 0..USER_READY_ATTEMPTS {
+        let deadline =
+            lifecycle_deadline(ANDROID_USER_READY_TIMEOUT, "Android user readiness wait")?;
+        while Instant::now() < deadline {
             if let Some(status) = self.child.try_wait()? {
                 return Err(io::Error::other(format!(
                     "Waydroid user session exited before Android user {user_id} became ready: {status}"
                 )));
             }
 
-            match self.readiness.recv_timeout(STATUS_INTERVAL) {
+            match self.readiness.recv_timeout(
+                remaining_lifecycle_timeout(deadline, "Android user readiness wait")?
+                    .min(STATUS_INTERVAL),
+            ) {
                 Ok(ready_user) => {
                     if !self.ready_users.contains(&ready_user) {
                         self.ready_users.push(ready_user);
@@ -363,17 +390,36 @@ impl DesktopWaydroidSession {
             return Ok(());
         }
 
-        let output = self.user.command(&["session", "stop"]).output()?;
-        let user_stop_error = (!output.status.success()).then(|| {
-            io::Error::other(format!(
-                "waydroid session stop failed\n{}",
-                combined_output(&output)
-            ))
-        });
+        let user_stop_error = {
+            let mut command = self.user.command(&["session", "stop"]);
+            match output_with_timeout(
+                &mut command,
+                WAYDROID_PROCESS_TIMEOUT,
+                "waydroid session stop",
+            ) {
+                Ok(output) => (!output.status.success()).then(|| {
+                    io::Error::other(format!(
+                        "waydroid session stop failed\n{}",
+                        combined_output(&output)
+                    ))
+                }),
+                Err(error) => Some(error),
+            }
+        };
 
         let mut last_status = String::new();
-        for _ in 0..STATUS_ATTEMPTS {
-            last_status = waydroid_status()?;
+        let deadline = lifecycle_deadline(WAYDROID_STATE_WAIT_TIMEOUT, "Waydroid stop wait")?;
+        while Instant::now() < deadline {
+            match waydroid_status_with_timeout(
+                remaining_lifecycle_timeout(deadline, "Waydroid stop status")?
+                    .min(WAYDROID_PROCESS_TIMEOUT),
+            ) {
+                Ok(status) => last_status = status,
+                Err(error) => {
+                    last_status = format!("waydroid status failed while stopping: {error}");
+                    break;
+                }
+            }
             if waydroid_is_stopped(&last_status) {
                 self.active = false;
                 self.reap_child_and_output();
@@ -382,7 +428,7 @@ impl DesktopWaydroidSession {
                     None => Ok(()),
                 };
             }
-            sleep(STATUS_INTERVAL);
+            sleep_until(deadline, STATUS_INTERVAL);
         }
 
         let fallback = run_waydroid(&["container", "stop"]);
@@ -398,14 +444,18 @@ impl DesktopWaydroidSession {
 
     fn wait_until_running(&mut self) -> io::Result<()> {
         let mut last_status = String::new();
-        for _ in 0..STATUS_ATTEMPTS {
+        let deadline = lifecycle_deadline(WAYDROID_STATE_WAIT_TIMEOUT, "Waydroid running wait")?;
+        while Instant::now() < deadline {
             if let Some(status) = self.child.try_wait()? {
                 return Err(io::Error::other(format!(
                     "Waydroid user session exited before the container started: {status}\n{last_status}"
                 )));
             }
 
-            last_status = waydroid_status()?;
+            last_status = waydroid_status_with_timeout(
+                remaining_lifecycle_timeout(deadline, "Waydroid running status")?
+                    .min(WAYDROID_PROCESS_TIMEOUT),
+            )?;
             if waydroid_container_started(&last_status) {
                 println!(
                     "Waydroid container is {}.",
@@ -413,7 +463,7 @@ impl DesktopWaydroidSession {
                 );
                 return Ok(());
             }
-            sleep(STATUS_INTERVAL);
+            sleep_until(deadline, STATUS_INTERVAL);
         }
 
         Err(io::Error::new(
@@ -423,7 +473,11 @@ impl DesktopWaydroidSession {
     }
 
     fn reap_child_and_output(&mut self) {
-        let _ = self.child.wait();
+        let _ = wait_child_with_timeout(
+            &mut self.child,
+            WAYDROID_CHILD_WAIT_TIMEOUT,
+            "Waydroid session child",
+        );
         for output_thread in self.output_threads.drain(..) {
             let _ = output_thread.join();
         }
@@ -455,35 +509,40 @@ pub fn ensure_container_stopped() -> io::Result<()> {
 
 pub fn stop_existing_waydroid_session(user: &DesktopUser) -> io::Result<()> {
     stop_existing_waydroid_session_using(
-        || {
-            user.output(&["status"])
+        |timeout| {
+            user.output_with_timeout(&["status"], timeout)
                 .map(|output| combined_output(&output))
         },
-        || user.run(&["session", "stop"]),
+        |timeout| user.run_with_timeout(&["session", "stop"], timeout),
         sleep,
     )
 }
 
 fn stop_existing_waydroid_session_using(
-    mut status: impl FnMut() -> io::Result<String>,
-    mut stop: impl FnMut() -> io::Result<()>,
+    mut status: impl FnMut(Duration) -> io::Result<String>,
+    mut stop: impl FnMut(Duration) -> io::Result<()>,
     mut wait: impl FnMut(Duration),
 ) -> io::Result<()> {
-    let initial_status = status()?;
+    let initial_status = status(WAYDROID_PROCESS_TIMEOUT)?;
     if !waydroid_is_active(&initial_status) {
         return Ok(());
     }
 
-    stop()?;
+    stop(WAYDROID_PROCESS_TIMEOUT)?;
     let mut last_status = initial_status;
-    for attempt in 0..STATUS_ATTEMPTS {
-        last_status = status()?;
+    let deadline = lifecycle_deadline(WAYDROID_STATE_WAIT_TIMEOUT, "existing Waydroid stop wait")?;
+    while Instant::now() < deadline {
+        last_status = status(
+            remaining_lifecycle_timeout(deadline, "existing Waydroid stop status")?
+                .min(WAYDROID_PROCESS_TIMEOUT),
+        )?;
         if waydroid_is_stopped(&last_status) {
             return Ok(());
         }
-        if attempt + 1 < STATUS_ATTEMPTS {
-            wait(STATUS_INTERVAL);
-        }
+        wait(
+            remaining_lifecycle_timeout(deadline, "existing Waydroid stop sleep")?
+                .min(STATUS_INTERVAL),
+        );
     }
 
     Err(io::Error::new(
@@ -510,15 +569,21 @@ pub(crate) fn ensure_container_stopped_status(status: &str) -> io::Result<()> {
 
 pub fn wait_for_android_boot_completed() -> io::Result<()> {
     let mut last_output = String::new();
-    for _ in 0..STATUS_ATTEMPTS {
-        let output =
-            waydroid_command(&["shell", "--", "getprop", "sys.boot_completed"]).output()?;
+    let deadline = lifecycle_deadline(WAYDROID_STATE_WAIT_TIMEOUT, "Android boot_completed wait")?;
+    while Instant::now() < deadline {
+        let mut command = waydroid_command(&["shell", "--", "getprop", "sys.boot_completed"]);
+        let output = output_with_timeout(
+            &mut command,
+            remaining_lifecycle_timeout(deadline, "Android boot_completed probe")?
+                .min(WAYDROID_PROCESS_TIMEOUT),
+            "waydroid shell getprop sys.boot_completed",
+        )?;
         last_output = combined_output(&output);
         if output.status.success() && last_output.trim() == "1" {
             println!("Android boot_completed=1.");
             return Ok(());
         }
-        sleep(STATUS_INTERVAL);
+        sleep_until(deadline, STATUS_INTERVAL);
     }
 
     Err(io::Error::new(
@@ -529,8 +594,15 @@ pub fn wait_for_android_boot_completed() -> io::Result<()> {
 
 pub fn wait_for_android_display_size(width: u32, height: u32) -> io::Result<()> {
     let mut last_output = String::new();
-    for _ in 0..STATUS_ATTEMPTS {
-        let output = waydroid_command(&["shell", "--", "wm", "size"]).output()?;
+    let deadline = lifecycle_deadline(WAYDROID_STATE_WAIT_TIMEOUT, "Android display-size wait")?;
+    while Instant::now() < deadline {
+        let mut command = waydroid_command(&["shell", "--", "wm", "size"]);
+        let output = output_with_timeout(
+            &mut command,
+            remaining_lifecycle_timeout(deadline, "Android display-size probe")?
+                .min(WAYDROID_PROCESS_TIMEOUT),
+            "waydroid shell wm size",
+        )?;
         last_output = combined_output(&output);
         if output.status.success()
             && parse_android_display_size(&last_output) == Some((width, height))
@@ -538,7 +610,7 @@ pub fn wait_for_android_display_size(width: u32, height: u32) -> io::Result<()> 
             println!("Android display size confirmed at {width}x{height}.");
             return Ok(());
         }
-        sleep(STATUS_INTERVAL);
+        sleep_until(deadline, STATUS_INTERVAL);
     }
 
     Err(io::Error::new(
@@ -549,13 +621,20 @@ pub fn wait_for_android_display_size(width: u32, height: u32) -> io::Result<()> 
 
 pub fn wait_for_android_input_device(device_name: &str) -> io::Result<()> {
     let mut last_output = String::new();
-    for _ in 0..STATUS_ATTEMPTS {
-        let output = waydroid_command(&["shell", "--", "getevent", "-pl"]).output()?;
+    let deadline = lifecycle_deadline(WAYDROID_STATE_WAIT_TIMEOUT, "Android input-device wait")?;
+    while Instant::now() < deadline {
+        let mut command = waydroid_command(&["shell", "--", "getevent", "-pl"]);
+        let output = output_with_timeout(
+            &mut command,
+            remaining_lifecycle_timeout(deadline, "Android input-device probe")?
+                .min(WAYDROID_PROCESS_TIMEOUT),
+            "waydroid shell getevent -pl",
+        )?;
         last_output = combined_output(&output);
         if output.status.success() && last_output.contains(device_name) {
             return Ok(());
         }
-        sleep(STATUS_INTERVAL);
+        sleep_until(deadline, STATUS_INTERVAL);
     }
 
     Err(io::Error::new(
@@ -582,7 +661,7 @@ pub fn stop_child(child: &mut Child) -> io::Result<()> {
     if child.try_wait()?.is_none() {
         child.kill()?;
     }
-    child.wait()?;
+    wait_child_with_timeout(child, WAYDROID_CHILD_WAIT_TIMEOUT, "child shutdown")?;
     Ok(())
 }
 
@@ -645,8 +724,40 @@ where
     }
 }
 
+fn lifecycle_deadline(timeout: Duration, context: &str) -> io::Result<Instant> {
+    Instant::now().checked_add(timeout).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{context}: timeout is too large for a monotonic deadline"),
+        )
+    })
+}
+
+fn remaining_lifecycle_timeout(deadline: Instant, context: &str) -> io::Result<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("{context}: timed out before the operation could start"),
+        ));
+    }
+    Ok(remaining)
+}
+
+fn sleep_until(deadline: Instant, interval: Duration) {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if !remaining.is_zero() {
+        sleep(interval.min(remaining));
+    }
+}
+
 fn waydroid_status() -> io::Result<String> {
-    let output = waydroid_command(&["status"]).output()?;
+    waydroid_status_with_timeout(WAYDROID_PROCESS_TIMEOUT)
+}
+
+fn waydroid_status_with_timeout(timeout: Duration) -> io::Result<String> {
+    let mut command = waydroid_command(&["status"]);
+    let output = output_with_timeout(&mut command, timeout, "waydroid status")?;
     Ok(combined_output(&output))
 }
 
@@ -684,7 +795,9 @@ fn waydroid_is_stopped(status: &str) -> bool {
 }
 
 fn run_waydroid(arguments: &[&str]) -> io::Result<()> {
-    let output = waydroid_command(arguments).output()?;
+    let mut command = waydroid_command(arguments);
+    let context = format!("waydroid {}", arguments.join(" "));
+    let output = output_with_timeout(&mut command, WAYDROID_PROCESS_TIMEOUT, &context)?;
     if output.status.success() {
         return Ok(());
     }
@@ -949,11 +1062,11 @@ mod tests {
         let calls = RefCell::new(Vec::new());
 
         stop_existing_waydroid_session_using(
-            || {
+            |_| {
                 calls.borrow_mut().push("status");
                 Ok(statuses.borrow_mut().pop_front().unwrap())
             },
-            || {
+            |_| {
                 calls.borrow_mut().push("stop");
                 Ok(())
             },
@@ -973,11 +1086,11 @@ mod tests {
         let calls = RefCell::new(Vec::new());
 
         stop_existing_waydroid_session_using(
-            || {
+            |_| {
                 calls.borrow_mut().push("status");
                 Ok(statuses.borrow_mut().pop_front().unwrap())
             },
-            || {
+            |_| {
                 calls.borrow_mut().push("stop");
                 Ok(())
             },
