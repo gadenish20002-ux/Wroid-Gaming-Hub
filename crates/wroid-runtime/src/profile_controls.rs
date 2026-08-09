@@ -95,56 +95,60 @@ pub enum HostKeyName {
 }
 
 impl HostKeyName {
+    const PROFILE_NAMES: [(&'static str, Self); 46] = [
+        ("0", Self::Num0),
+        ("1", Self::Num1),
+        ("2", Self::Num2),
+        ("3", Self::Num3),
+        ("4", Self::Num4),
+        ("5", Self::Num5),
+        ("6", Self::Num6),
+        ("7", Self::Num7),
+        ("8", Self::Num8),
+        ("9", Self::Num9),
+        ("a", Self::A),
+        ("b", Self::B),
+        ("c", Self::C),
+        ("d", Self::D),
+        ("e", Self::E),
+        ("f", Self::F),
+        ("g", Self::G),
+        ("h", Self::H),
+        ("i", Self::I),
+        ("j", Self::J),
+        ("k", Self::K),
+        ("l", Self::L),
+        ("m", Self::M),
+        ("n", Self::N),
+        ("o", Self::O),
+        ("p", Self::P),
+        ("q", Self::Q),
+        ("r", Self::R),
+        ("s", Self::S),
+        ("t", Self::T),
+        ("u", Self::U),
+        ("v", Self::V),
+        ("w", Self::W),
+        ("x", Self::X),
+        ("y", Self::Y),
+        ("z", Self::Z),
+        ("space", Self::Space),
+        ("tab", Self::Tab),
+        ("shift", Self::Shift),
+        ("ctrl", Self::Ctrl),
+        ("alt", Self::Alt),
+        ("up", Self::Up),
+        ("left", Self::Left),
+        ("down", Self::Down),
+        ("right", Self::Right),
+        ("esc", Self::Esc),
+    ];
+
     pub fn parse(value: &str) -> Option<Self> {
-        Some(match value.trim().to_ascii_lowercase().as_str() {
-            "0" => Self::Num0,
-            "1" => Self::Num1,
-            "2" => Self::Num2,
-            "3" => Self::Num3,
-            "4" => Self::Num4,
-            "5" => Self::Num5,
-            "6" => Self::Num6,
-            "7" => Self::Num7,
-            "8" => Self::Num8,
-            "9" => Self::Num9,
-            "a" => Self::A,
-            "b" => Self::B,
-            "c" => Self::C,
-            "d" => Self::D,
-            "e" => Self::E,
-            "f" => Self::F,
-            "g" => Self::G,
-            "h" => Self::H,
-            "i" => Self::I,
-            "j" => Self::J,
-            "k" => Self::K,
-            "l" => Self::L,
-            "m" => Self::M,
-            "n" => Self::N,
-            "o" => Self::O,
-            "p" => Self::P,
-            "q" => Self::Q,
-            "r" => Self::R,
-            "s" => Self::S,
-            "t" => Self::T,
-            "u" => Self::U,
-            "v" => Self::V,
-            "w" => Self::W,
-            "x" => Self::X,
-            "y" => Self::Y,
-            "z" => Self::Z,
-            "space" => Self::Space,
-            "tab" => Self::Tab,
-            "shift" => Self::Shift,
-            "ctrl" => Self::Ctrl,
-            "alt" => Self::Alt,
-            "up" => Self::Up,
-            "left" => Self::Left,
-            "down" => Self::Down,
-            "right" => Self::Right,
-            "esc" => Self::Esc,
-            _ => return None,
-        })
+        let value = value.trim();
+        Self::PROFILE_NAMES
+            .iter()
+            .find_map(|(name, key)| value.eq_ignore_ascii_case(name).then_some(*key))
     }
 
     pub const fn index(self) -> u8 {
@@ -195,14 +199,16 @@ pub enum HostMouseButton {
 
 impl HostMouseButton {
     fn parse(value: &str) -> Option<Self> {
-        Some(match value.trim().to_ascii_lowercase().as_str() {
-            "left" => Self::Left,
-            "right" => Self::Right,
-            "middle" => Self::Middle,
-            "side" => Self::Side,
-            "extra" => Self::Extra,
-            _ => return None,
-        })
+        let value = value.trim();
+        [
+            ("left", Self::Left),
+            ("right", Self::Right),
+            ("middle", Self::Middle),
+            ("side", Self::Side),
+            ("extra", Self::Extra),
+        ]
+        .into_iter()
+        .find_map(|(name, button)| value.eq_ignore_ascii_case(name).then_some(button))
     }
 }
 
@@ -899,7 +905,7 @@ mod tests {
     }
 
     #[test]
-    fn resolved_host_keys_are_case_insensitive_stable_bits_and_exclude_f12() {
+    fn resolved_input_names_trim_and_match_ascii_case_insensitively() {
         let known_names = [
             "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f", "g",
             "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x",
@@ -914,6 +920,11 @@ mod tests {
         assert_eq!(HostKeyName::parse("sHiFt"), Some(HostKeyName::Shift));
         assert_ne!(HostKeyName::R.bit(), HostKeyName::Shift.bit());
         assert_eq!(HostKeyName::parse("f12"), None);
+        assert_eq!(
+            HostMouseButton::parse(" LeFt "),
+            Some(HostMouseButton::Left)
+        );
+        assert_eq!(HostMouseButton::parse("SIDE"), Some(HostMouseButton::Side));
     }
 
     #[test]
