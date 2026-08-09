@@ -1263,43 +1263,48 @@ impl<I: TouchInjector> UnifiedRuntime<I> {
 
         let mut submitted = false;
         for index in 0..self.plan.controls.len() {
-            match &self.plan.controls[index].action {
-                RuntimeControlAction::Hold { point }
-                    if self.active_bindings[index] && !self.desired_bindings[index] =>
-                {
-                    let contact_id = point_contact(self.point_contacts[index])?;
-                    submitted |= set_hold_binding(
-                        &mut self.engine,
-                        contact_id,
-                        &self.plan.controls[index].name,
-                        *point,
-                        false,
-                        self.trace_input,
-                    )?;
-                    self.active_bindings[index] = false;
-                }
-                RuntimeControlAction::VirtualJoystick { joystick, .. }
-                    if self.directions[index] != self.desired_directions[index]
-                        && self.directions[index] != DirectionalInput::default() =>
-                {
-                    let desired = self.desired_directions[index];
-                    let frame_submitted = joystick.apply(&mut self.engine, desired)?;
-                    submitted |= frame_submitted;
-                    if frame_submitted {
-                        self.last_joystick_frame[index] = Some(now);
-                    }
-                    self.directions[index] = desired;
-                    self.active_bindings[index] = desired != DirectionalInput::default();
-                    trace_joystick(
-                        self.trace_input,
-                        &self.plan.controls[index].name,
-                        joystick,
-                        desired,
-                        frame_submitted,
-                        &self.engine,
-                    );
-                }
-                _ => {}
+            let RuntimeControlAction::VirtualJoystick { joystick, .. } =
+                &self.plan.controls[index].action
+            else {
+                continue;
+            };
+            let retained =
+                direction_intersection(self.directions[index], self.desired_directions[index]);
+            if self.directions[index] == retained {
+                continue;
+            }
+            let frame_submitted = joystick.apply(&mut self.engine, retained)?;
+            submitted |= frame_submitted;
+            if frame_submitted {
+                self.last_joystick_frame[index] = Some(now);
+            }
+            self.directions[index] = retained;
+            self.active_bindings[index] = retained != DirectionalInput::default();
+            trace_joystick(
+                self.trace_input,
+                &self.plan.controls[index].name,
+                joystick,
+                retained,
+                frame_submitted,
+                &self.engine,
+            );
+        }
+
+        for index in 0..self.plan.controls.len() {
+            let RuntimeControlAction::Hold { point } = &self.plan.controls[index].action else {
+                continue;
+            };
+            if self.active_bindings[index] && !self.desired_bindings[index] {
+                let contact_id = point_contact(self.point_contacts[index])?;
+                submitted |= set_hold_binding(
+                    &mut self.engine,
+                    contact_id,
+                    &self.plan.controls[index].name,
+                    *point,
+                    false,
+                    self.trace_input,
+                )?;
+                self.active_bindings[index] = false;
             }
         }
 
@@ -1320,8 +1325,7 @@ impl<I: TouchInjector> UnifiedRuntime<I> {
                     self.active_bindings[index] = true;
                 }
                 RuntimeControlAction::VirtualJoystick { joystick, .. }
-                    if self.directions[index] == DirectionalInput::default()
-                        && self.desired_directions[index] != DirectionalInput::default() =>
+                    if self.directions[index] != self.desired_directions[index] =>
                 {
                     let desired = self.desired_directions[index];
                     let frame_submitted = joystick.apply(&mut self.engine, desired)?;
@@ -1330,7 +1334,7 @@ impl<I: TouchInjector> UnifiedRuntime<I> {
                         self.last_joystick_frame[index] = Some(now);
                     }
                     self.directions[index] = desired;
-                    self.active_bindings[index] = true;
+                    self.active_bindings[index] = desired != DirectionalInput::default();
                     trace_joystick(
                         self.trace_input,
                         &self.plan.controls[index].name,
@@ -1358,7 +1362,6 @@ impl<I: TouchInjector> UnifiedRuntime<I> {
                     control,
                     RuntimePhysicalInput::Key(key),
                     self.active_layers,
-                    self.held_modifiers,
                 ),
                 ResolvedControlInput::KeyCluster {
                     up,
@@ -1372,7 +1375,6 @@ impl<I: TouchInjector> UnifiedRuntime<I> {
                             control,
                             RuntimePhysicalInput::Key(key),
                             self.active_layers,
-                            self.held_modifiers,
                         );
                     }
                 }
@@ -1381,7 +1383,6 @@ impl<I: TouchInjector> UnifiedRuntime<I> {
                     control,
                     RuntimePhysicalInput::MouseButton(button),
                     self.active_layers,
-                    self.held_modifiers,
                 ),
                 ResolvedControlInput::MouseMove => {}
             }
@@ -1695,6 +1696,18 @@ fn point_contact(contact_id: Option<ContactId>) -> GameSessionResult<ContactId> 
     contact_id.ok_or_else(|| io::Error::other("point binding is missing its contact id").into())
 }
 
+fn direction_intersection(
+    current: DirectionalInput,
+    desired: DirectionalInput,
+) -> DirectionalInput {
+    DirectionalInput {
+        up: current.up && desired.up,
+        left: current.left && desired.left,
+        down: current.down && desired.down,
+        right: current.right && desired.right,
+    }
+}
+
 fn binding_available(
     control: &RuntimeControlBinding,
     input: RuntimePhysicalInput,
@@ -1730,9 +1743,8 @@ fn select_input_layer(
     control: &RuntimeControlBinding,
     input: RuntimePhysicalInput,
     active_layers: u64,
-    held_modifiers: ModifierMask,
 ) {
-    if !binding_condition_available(control, input, active_layers, held_modifiers) {
+    if layer_mask_bit(control.layer).is_none_or(|mask| active_layers & mask == 0) {
         return;
     }
     let selected = &mut selected_input_layers[physical_input_index(input)];
@@ -2802,6 +2814,45 @@ mod tests {
     }
 
     #[test]
+    fn active_layer_owns_input_even_when_its_modifier_is_not_held() {
+        let mut runtime = test_runtime(
+            vec![hold_layer("combat", "tab")],
+            vec![
+                key_hold_binding("base", "r", None, None, 0.2),
+                key_hold_binding("layer-shift", "r", Some("combat"), Some("shift"), 0.8),
+            ],
+        );
+
+        assert!(!send_key(
+            &mut runtime,
+            HostKey::Tab,
+            KeyTransition::Pressed
+        ));
+        assert!(!send_key(&mut runtime, HostKey::R, KeyTransition::Pressed));
+        assert!(runtime.engine.injector().frames.is_empty());
+
+        assert!(send_key(
+            &mut runtime,
+            HostKey::LeftShift,
+            KeyTransition::Pressed
+        ));
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+        assert_eq!(last_touch_event(&runtime).position.x, 799);
+
+        assert!(send_key(
+            &mut runtime,
+            HostKey::Tab,
+            KeyTransition::Released
+        ));
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+        assert_eq!(last_touch_event(&runtime).position.x, 200);
+        assert_eq!(
+            emitted_phases(&runtime),
+            [TouchPhase::Down, TouchPhase::Up, TouchPhase::Down]
+        );
+    }
+
+    #[test]
     fn highest_active_layer_id_wins_when_named_layers_share_an_input() {
         let mut runtime = test_runtime(
             vec![hold_layer("lower", "tab"), hold_layer("higher", "alt")],
@@ -3161,6 +3212,16 @@ mod tests {
     }
 
     #[test]
+    fn modifier_release_reconciles_joystick_owners_before_base_addition() {
+        assert_modifier_joystick_handoff_order(false);
+    }
+
+    #[test]
+    fn modifier_release_reconciles_joystick_owners_before_base_addition_when_reversed() {
+        assert_modifier_joystick_handoff_order(true);
+    }
+
+    #[test]
     fn mouse_button_obeys_layer_modifier_press_gating_and_release_cleanup() {
         let mut runtime = test_runtime(
             vec![hold_layer("combat", "tab")],
@@ -3490,6 +3551,56 @@ mod tests {
                 reaffirm_ms: Some(50),
             },
         }
+    }
+
+    fn assert_modifier_joystick_handoff_order(specific_first: bool) {
+        let base = joystick_binding("movement", "w", "a", "s", "d", 0.2);
+        let mut specific = joystick_binding("shift-movement", "w", "up", "down", "right", 0.8);
+        specific.modifier = Some("shift".to_owned());
+        let bindings = if specific_first {
+            vec![specific, base]
+        } else {
+            vec![base, specific]
+        };
+        let mut runtime = test_runtime(Vec::new(), bindings);
+
+        send_key(&mut runtime, HostKey::A, KeyTransition::Pressed);
+        send_key(&mut runtime, HostKey::LeftShift, KeyTransition::Pressed);
+        send_key(&mut runtime, HostKey::W, KeyTransition::Pressed);
+        let base_contact = joystick_contact(&runtime, "movement");
+        let specific_contact = joystick_contact(&runtime, "shift-movement");
+        assert_eq!(
+            runtime.engine.state().position(base_contact),
+            Some(Point { x: 100, y: 799 })
+        );
+        assert_eq!(
+            runtime.engine.state().position(specific_contact),
+            Some(Point { x: 799, y: 699 })
+        );
+        let frames_before_release = runtime.engine.injector().frames.len();
+
+        assert!(send_key(
+            &mut runtime,
+            HostKey::LeftShift,
+            KeyTransition::Released
+        ));
+
+        let events: Vec<_> = runtime.engine.injector().frames[frames_before_release..]
+            .iter()
+            .flat_map(|frame| frame.events().iter().copied())
+            .collect();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].contact_id, specific_contact);
+        assert_eq!(events[0].phase, TouchPhase::Up);
+        assert_eq!(events[1].contact_id, base_contact);
+        assert_eq!(events[1].phase, TouchPhase::Move);
+        assert_eq!(events[1].position, Point { x: 129, y: 728 });
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+        assert_eq!(
+            runtime.engine.state().position(base_contact),
+            Some(Point { x: 129, y: 728 })
+        );
+        assert_eq!(runtime.engine.state().position(specific_contact), None);
     }
 
     fn peak_contacts(frames: &[TouchFrame]) -> usize {
