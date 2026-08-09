@@ -4,6 +4,7 @@
 //! validated touch frames into multitouch protocol Type-B event batches.
 //! No subprocess is spawned per event or per frame.
 
+mod bridge_broker;
 mod config;
 mod error;
 mod event;
@@ -20,6 +21,11 @@ mod translate;
 mod waydroid_bridge;
 mod waydroid_session;
 
+pub use bridge_broker::{
+    serve_bridge_broker, BridgeBrokerClient, BridgeHelperFactory, BridgeHelperSession,
+    ProductionBridgeHelperFactory, BRIDGE_PROTOCOL_VERSION, BRIDGE_WORKER_FD,
+    BRIDGE_WORKER_PROTOCOL_GENERATION,
+};
 pub use config::{
     DeviceConfig, DeviceConfigError, DEFAULT_SLOT_COUNT, MAX_SLOT_COUNT, WROID_TOUCHSCREEN_NAME,
     WROID_TOUCHSCREEN_PRODUCT, WROID_TOUCHSCREEN_VENDOR,

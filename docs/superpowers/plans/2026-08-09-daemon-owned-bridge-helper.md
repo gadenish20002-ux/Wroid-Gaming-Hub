@@ -98,7 +98,9 @@ git commit -m "Inject: validate daemon helper release pairing"
 
 **Files:**
 - Create: `crates/wroid-inject/src/bridge_broker.rs`
+- Modify: `crates/wroid-inject/Cargo.toml`
 - Modify: `crates/wroid-inject/src/lib.rs`
+- Modify: `Cargo.lock`
 
 **Interfaces:**
 - Consumes: `BridgeHelperCommand` and `PrivilegedBridgeHelper`.
@@ -167,7 +169,7 @@ CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 cargo test -p wroid-inject privilege
 - [ ] **Step 5: Commit Task 2**
 
 ```bash
-git add crates/wroid-inject/src/bridge_broker.rs crates/wroid-inject/src/lib.rs
+git add Cargo.lock crates/wroid-inject/Cargo.toml crates/wroid-inject/src/bridge_broker.rs crates/wroid-inject/src/lib.rs docs/superpowers/plans/2026-08-09-daemon-owned-bridge-helper.md
 git commit -m "Inject: add private bridge broker protocol"
 ```
 

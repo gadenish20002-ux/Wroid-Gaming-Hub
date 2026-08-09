@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 evdev.workspace = true
 libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 wroid-core = { path = "../wroid-core" }
 wroid-input = { path = "../wroid-input" }
