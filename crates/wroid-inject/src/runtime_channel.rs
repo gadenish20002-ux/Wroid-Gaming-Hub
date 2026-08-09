@@ -131,9 +131,12 @@ mod tests {
             encode_request(0, &empty).unwrap_err().kind(),
             io::ErrorKind::InvalidInput
         );
-        let mut eleven = header(REQUEST_FRAME, 0, 11);
+        let header = header(REQUEST_FRAME, 0, 11);
+        let mut eleven = [0; HEADER_BYTES + 11 * EVENT_BYTES];
+        eleven[..HEADER_BYTES].copy_from_slice(&header);
         for id in 1..=11 {
-            eleven.extend_from_slice(&encode_event(down(id, 1, 1)));
+            let offset = HEADER_BYTES + (id as usize - 1) * EVENT_BYTES;
+            eleven[offset..offset + EVENT_BYTES].copy_from_slice(&encode_event(down(id, 1, 1)));
         }
         assert_eq!(
             decode_request(
@@ -363,8 +366,187 @@ mod tests {
             .iter()
             .all(|event| event.phase == TouchPhase::Cancel));
     }
+
+    #[test]
+    fn startup_responses_require_sequence_zero() {
+        for response in [header(RESPONSE_READY, 1, 0), {
+            let mut bytes = header(RESPONSE_ERROR, 1, 4);
+            bytes.extend_from_slice(b"nope");
+            bytes
+        }] {
+            let (mut client, server) = connected_runtime_pair();
+            send_raw_packet(server.socket.as_raw_fd(), &response).unwrap();
+            assert_eq!(
+                client.wait_until_ready().unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_resolution_cancels_existing_contacts() {
+        let recording = SharedRecordingInjector::default();
+        let mut engine = TouchEngine::new(recording.clone());
+        engine.submit(frame([down(1, 10, 20)])).unwrap();
+        let (_client, server) = connected_runtime_pair();
+        let error = serve_runtime_attachment(
+            server,
+            Resolution {
+                width: 0,
+                height: 1080,
+            },
+            &mut engine,
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(recording
+            .last_frame()
+            .events()
+            .iter()
+            .all(|event| event.phase == TouchPhase::Cancel));
+    }
+
+    #[test]
+    fn finish_cancels_contacts_and_reports_them() {
+        let recording = SharedRecordingInjector::default();
+        let (mut client, server) = connected_runtime_pair();
+        let join = spawn_attachment(
+            server,
+            Resolution {
+                width: 1920,
+                height: 1080,
+            },
+            recording.clone(),
+        );
+        client.wait_until_ready().unwrap();
+        client.inject(&ten_contact_down_frame()).unwrap();
+        client.finish().unwrap();
+        let report = join.join().unwrap().unwrap();
+        assert_eq!(report.frames_submitted, 1);
+        assert_eq!(report.contacts_cancelled, 10);
+        assert!(recording
+            .last_frame()
+            .events()
+            .iter()
+            .all(|event| event.phase == TouchPhase::Cancel));
+    }
+
+    #[test]
+    fn protocol_error_cancels_existing_contacts() {
+        let recording = SharedRecordingInjector::default();
+        let (mut client, server) = connected_runtime_pair();
+        let client_fd = client.socket.as_raw_fd();
+        let join = spawn_attachment(
+            server,
+            Resolution {
+                width: 1920,
+                height: 1080,
+            },
+            recording.clone(),
+        );
+        client.wait_until_ready().unwrap();
+        client.inject(&ten_contact_down_frame()).unwrap();
+        send_raw_packet(client_fd, &[0xff; HEADER_BYTES]).unwrap();
+        assert!(join.join().unwrap().is_err());
+        assert!(recording
+            .last_frame()
+            .events()
+            .iter()
+            .all(|event| event.phase == TouchPhase::Cancel));
+    }
+
+    #[test]
+    fn failed_health_check_cancels_existing_contacts() {
+        let recording = SharedRecordingInjector::default();
+        let (mut client, server) = connected_runtime_pair();
+        let join = thread::spawn({
+            let recording = recording.clone();
+            move || {
+                let mut engine = TouchEngine::new(recording);
+                serve_runtime_attachment(
+                    server,
+                    Resolution {
+                        width: 1920,
+                        height: 1080,
+                    },
+                    &mut engine,
+                    || Err(io::Error::other("health failed")),
+                )
+            }
+        });
+        client.wait_until_ready().unwrap();
+        client.inject(&ten_contact_down_frame()).unwrap();
+        assert!(join
+            .join()
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("health failed"));
+        assert!(recording
+            .last_frame()
+            .events()
+            .iter()
+            .all(|event| event.phase == TouchPhase::Cancel));
+    }
+
+    #[test]
+    fn failed_ack_write_cancels_submitted_contacts() {
+        let recording = SharedRecordingInjector::default();
+        let (mut client, server) = connected_runtime_pair();
+        let client_fd = client.socket.as_raw_fd();
+        let join = spawn_attachment(
+            server,
+            Resolution {
+                width: 1920,
+                height: 1080,
+            },
+            recording.clone(),
+        );
+        client.wait_until_ready().unwrap();
+        send_raw_packet(
+            client_fd,
+            &encode_frame_request(0, &ten_contact_down_frame()).unwrap(),
+        )
+        .unwrap();
+        // SAFETY: client_fd is owned by client for the duration of this test.
+        assert_eq!(unsafe { libc::shutdown(client_fd, libc::SHUT_RDWR) }, 0);
+        assert!(join.join().unwrap().is_err());
+        assert!(recording
+            .last_frame()
+            .events()
+            .iter()
+            .all(|event| event.phase == TouchPhase::Cancel));
+    }
+
+    #[test]
+    fn saturated_seqpacket_write_obeys_deadline() {
+        let (client, _server) = runtime_socket_pair().unwrap();
+        let packet = [0_u8; MAX_PACKET_BYTES];
+        loop {
+            // SAFETY: packet is a valid read-only buffer for the send call.
+            let result = unsafe {
+                libc::send(
+                    client.as_raw_fd(),
+                    packet.as_ptr().cast(),
+                    packet.len(),
+                    libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT,
+                )
+            };
+            if result < 0 {
+                assert_eq!(io::Error::last_os_error().kind(), io::ErrorKind::WouldBlock);
+                break;
+            }
+        }
+        let started = Instant::now();
+        let error =
+            send_packet(client.as_raw_fd(), &packet, Duration::from_millis(20)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_millis(250));
+    }
 }
 use std::io;
+use std::ops::{Deref, DerefMut};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::time::{Duration, Instant};
 
@@ -407,6 +589,45 @@ enum RuntimeResponse {
     Ready,
     Ack { sequence: u64 },
     Error { sequence: u64, detail: String },
+}
+
+#[derive(Debug)]
+struct Packet {
+    bytes: [u8; MAX_PACKET_BYTES],
+    len: usize,
+}
+
+impl Packet {
+    fn new() -> Self {
+        Self {
+            bytes: [0; MAX_PACKET_BYTES],
+            len: 0,
+        }
+    }
+
+    fn extend_from_slice(&mut self, source: &[u8]) {
+        let end = self.len + source.len();
+        assert!(
+            end <= MAX_PACKET_BYTES,
+            "runtime packet exceeds fixed capacity"
+        );
+        self.bytes[self.len..end].copy_from_slice(source);
+        self.len = end;
+    }
+}
+
+impl Deref for Packet {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.bytes[..self.len]
+    }
+}
+
+impl DerefMut for Packet {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.bytes[..self.len]
+    }
 }
 
 pub fn runtime_socket_pair() -> io::Result<(OwnedFd, OwnedFd)> {
@@ -494,7 +715,14 @@ impl RuntimeChannelClient {
                 self.ready = true;
                 Ok(())
             }
-            RuntimeResponse::Error { detail, .. } => Err(io::Error::other(detail)),
+            RuntimeResponse::Error {
+                sequence: 0,
+                detail,
+            } => Err(io::Error::other(detail)),
+            RuntimeResponse::Error { .. } => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "runtime startup error has a non-zero sequence",
+            )),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "runtime channel did not send ready",
@@ -503,10 +731,13 @@ impl RuntimeChannelClient {
     }
 
     pub fn finish(&mut self) -> io::Result<()> {
-        self.exchange(RuntimeRequest::Finish)
+        self.exchange_packet(encode_finish_request)
     }
 
-    fn exchange(&mut self, request: RuntimeRequest) -> io::Result<()> {
+    fn exchange_packet(
+        &mut self,
+        encode: impl FnOnce(u64) -> io::Result<Packet>,
+    ) -> io::Result<()> {
         if !self.ready {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -514,7 +745,7 @@ impl RuntimeChannelClient {
             ));
         }
         let sequence = self.next_sequence;
-        let packet = encode_request(sequence, &request)?;
+        let packet = encode(sequence)?;
         send_packet(self.socket.as_raw_fd(), &packet, FRAME_RESPONSE_TIMEOUT)?;
         match receive_response(self.socket.as_raw_fd(), FRAME_RESPONSE_TIMEOUT)? {
             RuntimeResponse::Ack {
@@ -550,7 +781,7 @@ impl RuntimeChannelClient {
 
 impl TouchInjector for RuntimeChannelClient {
     fn inject(&mut self, frame: &TouchFrame) -> Result<(), TouchInjectionError> {
-        self.exchange(RuntimeRequest::Frame(frame.clone()))
+        self.exchange_packet(|sequence| encode_frame_request(sequence, frame))
             .map_err(|error| TouchInjectionError::new(error.to_string()))
     }
 }
@@ -632,7 +863,12 @@ pub fn serve_runtime_attachment<I: TouchInjector>(
             "runtime logical resolution must be non-zero",
         );
         let _ = server.send_startup_error(&error.to_string());
-        return Err(error);
+        let mut report = RuntimeAttachmentReport {
+            frames_submitted: 0,
+            peak_contacts: engine.state().active_contact_count(),
+            contacts_cancelled: 0,
+        };
+        return cancel_and_return(engine, &mut report, Err(error));
     }
     if let Err(error) = server.send_ready() {
         let _ = engine.cancel_all();
@@ -730,18 +966,16 @@ fn to_io_error(error: impl std::fmt::Display) -> io::Error {
 }
 
 fn scale_frame(frame: TouchFrame, resolution: Resolution) -> io::Result<TouchFrame> {
-    frame
-        .events()
-        .iter()
-        .map(|event| {
-            Ok(TouchEvent::new(
-                event.contact_id,
-                event.phase,
-                scale_point(event.position, resolution)?,
-            ))
-        })
-        .collect::<io::Result<Vec<_>>>()
-        .map(TouchFrame::new)
+    let events = frame.events();
+    let mut scaled = [empty_event(); MAX_FRAME_EVENTS];
+    for (index, event) in events.iter().enumerate() {
+        scaled[index] = TouchEvent::new(
+            event.contact_id,
+            event.phase,
+            scale_point(event.position, resolution)?,
+        );
+    }
+    Ok(TouchFrame::new(scaled.into_iter().take(events.len())))
 }
 
 fn scale_point(point: Point, resolution: Resolution) -> io::Result<Point> {
@@ -765,18 +999,27 @@ fn scale_axis(value: u32, logical_extent: u32) -> io::Result<u32> {
     Ok(((u64::from(value) * 65535 + denominator / 2) / denominator) as u32)
 }
 
-fn encode_request(sequence: u64, request: &RuntimeRequest) -> io::Result<Vec<u8>> {
-    let (opcode, events) = match request {
-        RuntimeRequest::Frame(frame) => (REQUEST_FRAME, frame.events()),
-        RuntimeRequest::Finish => (REQUEST_FINISH, &[][..]),
-    };
-    if opcode == REQUEST_FRAME && (events.is_empty() || events.len() > MAX_FRAME_EVENTS) {
+#[cfg(test)]
+fn encode_request(sequence: u64, request: &RuntimeRequest) -> io::Result<Packet> {
+    match request {
+        RuntimeRequest::Frame(frame) => encode_frame_request(sequence, frame),
+        RuntimeRequest::Finish => encode_finish_request(sequence),
+    }
+}
+
+fn encode_finish_request(sequence: u64) -> io::Result<Packet> {
+    Ok(header(REQUEST_FINISH, sequence, 0))
+}
+
+fn encode_frame_request(sequence: u64, frame: &TouchFrame) -> io::Result<Packet> {
+    let events = frame.events();
+    if events.is_empty() || events.len() > MAX_FRAME_EVENTS {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "runtime touch frame must contain one through ten events",
         ));
     }
-    let mut bytes = header(opcode, sequence, events.len() as u16);
+    let mut bytes = header(REQUEST_FRAME, sequence, events.len() as u16);
     for event in events {
         bytes.extend_from_slice(&encode_event(*event));
     }
@@ -784,15 +1027,12 @@ fn encode_request(sequence: u64, request: &RuntimeRequest) -> io::Result<Vec<u8>
 }
 
 fn encode_event(event: TouchEvent) -> [u8; EVENT_BYTES] {
-    let mut bytes = Vec::with_capacity(EVENT_BYTES);
-    put_u16(&mut bytes, event.contact_id.get());
-    bytes.push(phase_to_byte(event.phase));
-    bytes.push(0);
-    put_u32(&mut bytes, event.position.x);
-    put_u32(&mut bytes, event.position.y);
+    let mut bytes = [0; EVENT_BYTES];
+    bytes[0..2].copy_from_slice(&event.contact_id.get().to_le_bytes());
+    bytes[2] = phase_to_byte(event.phase);
+    bytes[4..8].copy_from_slice(&event.position.x.to_le_bytes());
+    bytes[8..12].copy_from_slice(&event.position.y.to_le_bytes());
     bytes
-        .try_into()
-        .expect("runtime event encoding has fixed length")
 }
 
 fn decode_request(bytes: &[u8], resolution: Resolution) -> io::Result<DecodedRequest> {
@@ -828,7 +1068,7 @@ fn decode_request(bytes: &[u8], resolution: Resolution) -> io::Result<DecodedReq
                     "runtime touch frame has an invalid event count or length",
                 ));
             }
-            let mut events = Vec::with_capacity(count);
+            let mut events = [empty_event(); MAX_FRAME_EVENTS];
             for index in 0..count {
                 let offset = HEADER_BYTES + index * EVENT_BYTES;
                 let event = TouchEvent::new(
@@ -840,7 +1080,7 @@ fn decode_request(bytes: &[u8], resolution: Resolution) -> io::Result<DecodedReq
                     },
                 );
                 scale_point(event.position, resolution)?;
-                if events
+                if events[..index]
                     .iter()
                     .any(|previous: &TouchEvent| previous.contact_id == event.contact_id)
                 {
@@ -849,11 +1089,11 @@ fn decode_request(bytes: &[u8], resolution: Resolution) -> io::Result<DecodedReq
                         "runtime touch frame contains duplicate contact ids",
                     ));
                 }
-                events.push(event);
+                events[index] = event;
             }
             Ok(DecodedRequest {
                 sequence,
-                request: RuntimeRequest::Frame(TouchFrame::new(events)),
+                request: RuntimeRequest::Frame(TouchFrame::new(events.into_iter().take(count))),
             })
         }
         REQUEST_FINISH if count == 0 && bytes.len() == HEADER_BYTES => Ok(DecodedRequest {
@@ -871,7 +1111,7 @@ fn decode_request(bytes: &[u8], resolution: Resolution) -> io::Result<DecodedReq
     }
 }
 
-fn encode_response(response: &RuntimeResponse) -> io::Result<Vec<u8>> {
+fn encode_response(response: &RuntimeResponse) -> io::Result<Packet> {
     match response {
         RuntimeResponse::Ready => Ok(header(RESPONSE_READY, 0, 0)),
         RuntimeResponse::Ack { sequence } => Ok(header(RESPONSE_ACK, *sequence, 0)),
@@ -900,7 +1140,9 @@ fn receive_response(fd: RawFd, timeout: Duration) -> io::Result<RuntimeResponse>
     let sequence = read_u64(&bytes, 8);
     let count = usize::from(read_u16(&bytes, 16));
     match opcode {
-        RESPONSE_READY if count == 0 && bytes.len() == HEADER_BYTES => Ok(RuntimeResponse::Ready),
+        RESPONSE_READY if sequence == 0 && count == 0 && bytes.len() == HEADER_BYTES => {
+            Ok(RuntimeResponse::Ready)
+        }
         RESPONSE_ACK if count == 0 && bytes.len() == HEADER_BYTES => {
             Ok(RuntimeResponse::Ack { sequence })
         }
@@ -915,25 +1157,19 @@ fn receive_response(fd: RawFd, timeout: Duration) -> io::Result<RuntimeResponse>
     }
 }
 
-fn header(opcode: u16, sequence: u64, count: u16) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(HEADER_BYTES + usize::from(count) * EVENT_BYTES);
-    put_u16(&mut bytes, RUNTIME_PROTOCOL_VERSION);
-    put_u16(&mut bytes, opcode);
-    put_u32(&mut bytes, RUNTIME_WORKER_PROTOCOL_GENERATION);
-    put_u64(&mut bytes, sequence);
-    put_u16(&mut bytes, count);
-    put_u16(&mut bytes, 0);
+fn header(opcode: u16, sequence: u64, count: u16) -> Packet {
+    let mut bytes = Packet::new();
+    bytes.len = HEADER_BYTES;
+    bytes.bytes[0..2].copy_from_slice(&RUNTIME_PROTOCOL_VERSION.to_le_bytes());
+    bytes.bytes[2..4].copy_from_slice(&opcode.to_le_bytes());
+    bytes.bytes[4..8].copy_from_slice(&RUNTIME_WORKER_PROTOCOL_GENERATION.to_le_bytes());
+    bytes.bytes[8..16].copy_from_slice(&sequence.to_le_bytes());
+    bytes.bytes[16..18].copy_from_slice(&count.to_le_bytes());
     bytes
 }
 
-fn put_u16(bytes: &mut Vec<u8>, value: u16) {
-    bytes.extend_from_slice(&value.to_le_bytes());
-}
-fn put_u32(bytes: &mut Vec<u8>, value: u32) {
-    bytes.extend_from_slice(&value.to_le_bytes());
-}
-fn put_u64(bytes: &mut Vec<u8>, value: u64) {
-    bytes.extend_from_slice(&value.to_le_bytes());
+fn empty_event() -> TouchEvent {
+    TouchEvent::new(ContactId::new(0), TouchPhase::Cancel, Point { x: 0, y: 0 })
 }
 fn read_u16(bytes: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap())
@@ -967,7 +1203,14 @@ fn byte_to_phase(value: u8) -> io::Result<TouchPhase> {
 
 fn send_raw_packet(fd: RawFd, bytes: &[u8]) -> io::Result<()> {
     // SAFETY: bytes is a valid read-only buffer for the duration of send.
-    let written = unsafe { libc::send(fd, bytes.as_ptr().cast(), bytes.len(), libc::MSG_NOSIGNAL) };
+    let written = unsafe {
+        libc::send(
+            fd,
+            bytes.as_ptr().cast(),
+            bytes.len(),
+            libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT,
+        )
+    };
     if written < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -981,16 +1224,27 @@ fn send_raw_packet(fd: RawFd, bytes: &[u8]) -> io::Result<()> {
 }
 
 fn send_packet(fd: RawFd, bytes: &[u8], timeout: Duration) -> io::Result<()> {
-    wait_for_fd(fd, libc::POLLOUT, Some(timeout))?;
-    send_raw_packet(fd, bytes)
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::TimedOut, "runtime channel deadline expired")
+            })?;
+        wait_for_fd(fd, libc::POLLOUT, Some(remaining))?;
+        match send_raw_packet(fd, bytes) {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+            result => return result,
+        }
+    }
 }
 
-fn receive_packet(fd: RawFd, timeout: Option<Duration>) -> io::Result<Vec<u8>> {
+fn receive_packet(fd: RawFd, timeout: Option<Duration>) -> io::Result<Packet> {
     wait_for_fd(fd, libc::POLLIN, timeout)?;
-    let mut bytes = [0_u8; MAX_PACKET_BYTES];
+    let mut packet = Packet::new();
     let mut iov = libc::iovec {
-        iov_base: bytes.as_mut_ptr().cast(),
-        iov_len: bytes.len(),
+        iov_base: packet.bytes.as_mut_ptr().cast(),
+        iov_len: packet.bytes.len(),
     };
     // SAFETY: zeroed msghdr is initialized below with a valid iovec.
     let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
@@ -1013,7 +1267,8 @@ fn receive_packet(fd: RawFd, timeout: Option<Duration>) -> io::Result<Vec<u8>> {
             "oversized runtime packet was truncated",
         ));
     }
-    Ok(bytes[..received as usize].to_vec())
+    packet.len = received as usize;
+    Ok(packet)
 }
 
 fn wait_for_fd(fd: RawFd, events: i16, timeout: Option<Duration>) -> io::Result<()> {

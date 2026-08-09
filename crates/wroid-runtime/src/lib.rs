@@ -68,7 +68,7 @@ impl TouchEvent {
     }
 }
 
-const INLINE_TOUCH_EVENT_CAPACITY: usize = 4;
+const INLINE_TOUCH_EVENT_CAPACITY: usize = 10;
 const EMPTY_TOUCH_EVENT: TouchEvent =
     TouchEvent::new(ContactId::new(0), TouchPhase::Cancel, Point { x: 0, y: 0 });
 
@@ -83,9 +83,8 @@ enum TouchFrameEvents {
 
 /// Contact transitions that must be submitted to Android as one synchronized frame.
 ///
-/// Normal gameplay frames (one movement/contact update, or the two-event mouse
-/// recenter) stay inline and do not allocate. Larger cleanup frames spill to a
-/// vector.
+/// Runtime protocol frames (up to ten contacts) stay inline and do not allocate.
+/// Larger cleanup frames spill to a vector.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TouchFrame {
     events: TouchFrameEvents,
@@ -427,13 +426,13 @@ mod tests {
     }
 
     #[test]
-    fn large_touch_frames_preserve_every_event_in_heap_fallback() {
+    fn protocol_sized_touch_frames_stay_in_inline_storage() {
         let frame = TouchFrame::new(
-            (1..=5).map(|id| TouchEvent::new(ContactId::new(id), TouchPhase::Down, point(10, 20))),
+            (1..=10).map(|id| TouchEvent::new(ContactId::new(id), TouchPhase::Down, point(10, 20))),
         );
 
-        assert!(matches!(frame.events, TouchFrameEvents::Heap(_)));
-        assert_eq!(frame.events().len(), 5);
+        assert!(matches!(frame.events, TouchFrameEvents::Inline { .. }));
+        assert_eq!(frame.events().len(), 10);
     }
 
     #[test]
