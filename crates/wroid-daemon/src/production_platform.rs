@@ -57,36 +57,50 @@ impl ProductionRuntimePlatform {
             resolution: None,
         }
     }
+
+    fn poison_and_cleanup(
+        &mut self,
+        primary_context: &str,
+        primary: io::Error,
+        cleanup_context: &str,
+    ) -> io::Error {
+        self.ready = false;
+        self.resolution = None;
+        combine_primary_and_cleanup(
+            primary_context,
+            primary,
+            cleanup_context,
+            self.driver.shutdown(),
+        )
+    }
 }
 
 impl RuntimePlatformBackend for ProductionRuntimePlatform {
     fn prepare(&mut self, launch: &PlatformLaunch) -> io::Result<()> {
         if !self.ready {
             if let Err(initialization_error) = self.driver.initialize(launch.resolution) {
-                let rollback_result = self.driver.shutdown();
-                self.ready = false;
-                self.resolution = None;
-                return Err(combine_primary_and_cleanup(
+                return Err(self.poison_and_cleanup(
                     "platform initialization",
                     initialization_error,
                     "rollback",
-                    rollback_result,
                 ));
             }
             self.ready = true;
             self.resolution = Some(launch.resolution);
         } else if self.resolution == Some(launch.resolution) {
-            self.driver.verify_health()?;
+            if let Err(health_error) = self.driver.verify_health() {
+                return Err(self.poison_and_cleanup(
+                    "platform health check",
+                    health_error,
+                    "cleanup",
+                ));
+            }
         } else {
             if let Err(resolution_error) = self.driver.change_resolution(launch.resolution) {
-                let rollback_result = self.driver.shutdown();
-                self.ready = false;
-                self.resolution = None;
-                return Err(combine_primary_and_cleanup(
+                return Err(self.poison_and_cleanup(
                     "platform resolution change",
                     resolution_error,
                     "rollback",
-                    rollback_result,
                 ));
             }
             self.resolution = Some(launch.resolution);
@@ -112,7 +126,10 @@ impl RuntimePlatformBackend for ProductionRuntimePlatform {
                 "runtime attachment does not match the prepared platform resolution",
             ));
         }
-        self.driver.serve(channel, resolution)
+        match self.driver.serve(channel, resolution) {
+            Ok(report) => Ok(report),
+            Err(error) => Err(self.poison_and_cleanup("runtime attachment", error, "cleanup")),
+        }
     }
 
     fn shutdown(&mut self) -> io::Result<()> {
@@ -448,6 +465,7 @@ mod tests {
         fail_initial_resolution_configurations: usize,
         fail_resolution_changes: usize,
         fail_health_checks: usize,
+        fail_serves: usize,
         fail_shutdowns: usize,
         fail_cleanup_steps: bool,
         uinput_open: bool,
@@ -592,6 +610,13 @@ mod tests {
             _resolution: Resolution,
         ) -> io::Result<RuntimeAttachmentReport> {
             self.calls.lock().unwrap().push("serve".to_owned());
+            if self.fail_serves > 0 {
+                self.fail_serves -= 1;
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "runtime protocol failure",
+                ));
+            }
             Ok(RuntimeAttachmentReport {
                 frames_submitted: 0,
                 peak_contacts: 0,
@@ -624,6 +649,7 @@ mod tests {
             fail_initial_resolution_configurations: 0,
             fail_resolution_changes: 0,
             fail_health_checks,
+            fail_serves: 0,
             fail_shutdowns,
             fail_cleanup_steps: false,
             uinput_open: false,
@@ -640,6 +666,7 @@ mod tests {
             fail_initial_resolution_configurations: 0,
             fail_resolution_changes: 1,
             fail_health_checks: 0,
+            fail_serves: 0,
             fail_shutdowns: 0,
             fail_cleanup_steps: false,
             uinput_open: false,
@@ -656,6 +683,24 @@ mod tests {
             fail_initial_resolution_configurations: 1,
             fail_resolution_changes: 0,
             fail_health_checks: 0,
+            fail_serves: 0,
+            fail_shutdowns: 0,
+            fail_cleanup_steps: false,
+            uinput_open: false,
+            helper_open: false,
+            waydroid_open: false,
+            waydroid_stop_unverified: false,
+        }))
+    }
+
+    fn backend_with_runtime_attachment_failure(calls: Calls) -> ProductionRuntimePlatform {
+        ProductionRuntimePlatform::with_driver(Box::new(RecordingPlatformDriver {
+            calls,
+            fail_initializations: 0,
+            fail_initial_resolution_configurations: 0,
+            fail_resolution_changes: 0,
+            fail_health_checks: 0,
+            fail_serves: 1,
             fail_shutdowns: 0,
             fail_cleanup_steps: false,
             uinput_open: false,
@@ -783,7 +828,15 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.to_string(), "helper exited");
-        assert_eq!(packages(&calls), ["com.example.one"]);
+        backend
+            .prepare(&platform_launch("com.example.retry", 1920, 1080))
+            .unwrap();
+
+        assert_eq!(count(&calls, "uinput:create"), 2);
+        assert_eq!(count(&calls, "helper:start"), 2);
+        assert_eq!(count(&calls, "waydroid:start:1920x1080"), 2);
+        assert_eq!(count(&calls, "helper:finish:true"), 1);
+        assert_eq!(packages(&calls), ["com.example.one", "com.example.retry"]);
     }
 
     #[test]
@@ -823,6 +876,64 @@ mod tests {
     }
 
     #[test]
+    fn runtime_attachment_failure_shuts_down_backend_before_retry() {
+        let calls = shared_calls();
+        let mut backend = backend_with_runtime_attachment_failure(calls.clone());
+        backend
+            .prepare(&platform_launch("com.example.one", 1920, 1080))
+            .unwrap();
+
+        let error = backend
+            .serve(
+                attachment_server(),
+                Resolution {
+                    width: 1920,
+                    height: 1080,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("runtime protocol failure"));
+        backend
+            .prepare(&platform_launch("com.example.retry", 1920, 1080))
+            .unwrap();
+
+        assert_eq!(count(&calls, "uinput:create"), 2);
+        assert_eq!(count(&calls, "helper:start"), 2);
+        assert_eq!(count(&calls, "waydroid:start:1920x1080"), 2);
+        assert_eq!(count(&calls, "helper:finish:true"), 1);
+        assert_eq!(packages(&calls), ["com.example.one", "com.example.retry"]);
+    }
+
+    #[test]
+    fn successful_runtime_attachment_keeps_backend_ready() {
+        let calls = shared_calls();
+        let mut backend = fixture_backend(calls.clone());
+        backend
+            .prepare(&platform_launch("com.example.one", 1920, 1080))
+            .unwrap();
+
+        backend
+            .serve(
+                attachment_server(),
+                Resolution {
+                    width: 1920,
+                    height: 1080,
+                },
+            )
+            .unwrap();
+        backend
+            .prepare(&platform_launch("com.example.two", 1920, 1080))
+            .unwrap();
+
+        assert_eq!(count(&calls, "uinput:create"), 1);
+        assert_eq!(count(&calls, "helper:start"), 1);
+        assert_eq!(count(&calls, "waydroid:start:1920x1080"), 1);
+        assert_eq!(count(&calls, "helper:health"), 1);
+        assert_eq!(packages(&calls), ["com.example.one", "com.example.two"]);
+    }
+
+    #[test]
     fn shutdown_orders_all_cleanup_before_uinput_drop() {
         let calls = shared_calls();
         let mut backend = fixture_backend(calls.clone());
@@ -853,6 +964,7 @@ mod tests {
             fail_initial_resolution_configurations: 0,
             fail_resolution_changes: 0,
             fail_health_checks: 0,
+            fail_serves: 0,
             fail_shutdowns: 0,
             fail_cleanup_steps: true,
             uinput_open: true,

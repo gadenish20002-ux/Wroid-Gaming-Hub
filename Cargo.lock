@@ -723,8 +723,6 @@ version = "0.1.0"
 dependencies = [
  "evdev",
  "libc",
- "serde",
- "serde_json",
  "tempfile",
  "thiserror",
  "wroid-core",

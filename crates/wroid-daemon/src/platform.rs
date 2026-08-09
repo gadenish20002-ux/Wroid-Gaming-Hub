@@ -1,10 +1,10 @@
 use std::io;
-use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use wroid_core::Resolution;
-use wroid_inject::{RuntimeAttachmentReport, RuntimeChannelServer};
+use wroid_inject::{RuntimeAttachmentReport, RuntimeChannelServer, RuntimeChannelShutdown};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PlatformLaunch {
@@ -28,10 +28,22 @@ pub(crate) trait RuntimePlatformBackend: Send {
 
 pub(crate) struct PlatformAttachment {
     completion: Receiver<io::Result<RuntimeAttachmentReport>>,
+    runtime_shutdown: RuntimeChannelShutdown,
 }
 
 impl PlatformAttachment {
     pub(crate) fn finish(self) -> io::Result<RuntimeAttachmentReport> {
+        match self.completion.try_recv() {
+            Ok(result) => return result,
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "platform attachment thread ended before reporting completion",
+                ));
+            }
+        }
+        let _ = self.runtime_shutdown.shutdown();
         self.completion.recv().map_err(|_| {
             io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -52,6 +64,7 @@ type PlatformFactory =
 enum PlatformCommand {
     Attach {
         channel: RuntimeChannelServer,
+        completion_shutdown: RuntimeChannelShutdown,
         launch: PlatformLaunch,
         completion: SyncSender<io::Result<RuntimeAttachmentReport>>,
     },
@@ -73,10 +86,13 @@ impl PersistentPlatform {
         channel: RuntimeChannelServer,
         launch: PlatformLaunch,
     ) -> io::Result<PlatformAttachment> {
+        let runtime_shutdown = channel.shutdown_handle()?;
+        let completion_shutdown = channel.shutdown_handle()?;
         let (completion, result) = mpsc::sync_channel(1);
         self.commands
             .send(PlatformCommand::Attach {
                 channel,
+                completion_shutdown,
                 launch,
                 completion,
             })
@@ -86,7 +102,10 @@ impl PersistentPlatform {
                     "platform thread is not accepting attachments",
                 )
             })?;
-        Ok(PlatformAttachment { completion: result })
+        Ok(PlatformAttachment {
+            completion: result,
+            runtime_shutdown,
+        })
     }
 }
 
@@ -105,6 +124,7 @@ fn run_platform(factory: PlatformFactory, commands: Receiver<PlatformCommand>) -
         match command {
             PlatformCommand::Attach {
                 mut channel,
+                completion_shutdown,
                 launch,
                 completion,
             } => {
@@ -113,6 +133,7 @@ fn run_platform(factory: PlatformFactory, commands: Receiver<PlatformCommand>) -
                         Ok(created) => backend = Some(created),
                         Err(error) => {
                             let _ = channel.send_startup_error(&error.to_string());
+                            let _ = completion_shutdown.shutdown();
                             let _ = completion.send(Err(error));
                             continue;
                         }
@@ -122,11 +143,13 @@ fn run_platform(factory: PlatformFactory, commands: Receiver<PlatformCommand>) -
                 let active_backend = backend.as_mut().expect("backend was created above");
                 if let Err(error) = active_backend.prepare(&launch) {
                     let _ = channel.send_startup_error(&error.to_string());
+                    let _ = completion_shutdown.shutdown();
                     let _ = completion.send(Err(error));
                     continue;
                 }
                 let resolution = launch.resolution;
                 let result = active_backend.serve(channel, resolution);
+                let _ = completion_shutdown.shutdown();
                 let _ = completion.send(result);
             }
             PlatformCommand::Shutdown => break,
@@ -149,8 +172,10 @@ mod tests {
 
     use wroid_core::Resolution;
     use wroid_inject::{
-        runtime_socket_pair, RuntimeAttachmentReport, RuntimeChannelClient, RuntimeChannelServer,
+        runtime_socket_pair, serve_runtime_attachment, RuntimeAttachmentReport,
+        RuntimeChannelClient, RuntimeChannelServer,
     };
+    use wroid_runtime::{TouchEngine, TouchFrame, TouchInjectionError, TouchInjector};
 
     use super::{PersistentPlatform, PlatformFactory, PlatformLaunch, RuntimePlatformBackend};
 
@@ -202,6 +227,35 @@ mod tests {
         }
     }
 
+    struct RuntimeServingBackend;
+
+    impl RuntimePlatformBackend for RuntimeServingBackend {
+        fn prepare(&mut self, _launch: &PlatformLaunch) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn serve(
+            &mut self,
+            channel: RuntimeChannelServer,
+            resolution: Resolution,
+        ) -> io::Result<RuntimeAttachmentReport> {
+            let mut engine = TouchEngine::new(NoopInjector);
+            serve_runtime_attachment(channel, resolution, &mut engine, || Ok(()))
+        }
+
+        fn shutdown(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct NoopInjector;
+
+    impl TouchInjector for NoopInjector {
+        fn inject(&mut self, _frame: &TouchFrame) -> Result<(), TouchInjectionError> {
+            Ok(())
+        }
+    }
+
     fn fake_factory(calls: Arc<Mutex<Vec<String>>>) -> PlatformFactory {
         Arc::new(move || {
             calls.lock().unwrap().push("factory".to_owned());
@@ -238,6 +292,37 @@ mod tests {
     ) -> io::Result<RuntimeAttachmentReport> {
         let (_client, server) = runtime_pair();
         platform.attach(server, launch)?.finish()
+    }
+
+    #[test]
+    fn attachment_finish_after_worker_exit_failure_does_not_hang_on_leaked_runtime_peer() {
+        let platform = PersistentPlatform::with_factory(Arc::new(|| {
+            Ok(Box::new(RuntimeServingBackend) as Box<dyn RuntimePlatformBackend>)
+        }));
+        let (mut client, server) = runtime_pair();
+        let attachment = platform
+            .attach(
+                server,
+                platform_launch("com.example.leaked-peer", 1600, 900),
+            )
+            .unwrap();
+        client.wait_until_ready().unwrap();
+        let (finished, result) = mpsc::channel();
+
+        let join = thread::spawn(move || {
+            let _ = finished.send(attachment.finish());
+        });
+        let completion = result.recv_timeout(Duration::from_secs(1));
+        if completion.is_err() {
+            drop(client);
+            join.join().unwrap();
+            drop(platform);
+            panic!("platform attachment finish hung after worker exit");
+        }
+
+        completion.unwrap().unwrap();
+        drop(client);
+        join.join().unwrap();
     }
 
     #[test]

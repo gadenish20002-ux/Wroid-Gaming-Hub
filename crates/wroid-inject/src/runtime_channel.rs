@@ -3,7 +3,7 @@ mod tests {
     use super::*;
     use std::io;
     use std::os::fd::AsRawFd;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{mpsc, Arc, Mutex};
     use std::thread;
     use wroid_core::{Point, Resolution};
     use wroid_runtime::{
@@ -39,6 +39,21 @@ mod tests {
         }
     }
 
+    struct CancelFailingInjector;
+
+    impl TouchInjector for CancelFailingInjector {
+        fn inject(&mut self, frame: &TouchFrame) -> Result<(), TouchInjectionError> {
+            if frame
+                .events()
+                .iter()
+                .all(|event| event.phase == TouchPhase::Cancel)
+            {
+                return Err(TouchInjectionError::new("contact cleanup failed"));
+            }
+            Ok(())
+        }
+    }
+
     #[derive(Clone, Default)]
     struct SharedRecordingInjector(Arc<Mutex<Vec<TouchFrame>>>);
 
@@ -51,6 +66,27 @@ mod tests {
     impl TouchInjector for SharedRecordingInjector {
         fn inject(&mut self, frame: &TouchFrame) -> Result<(), TouchInjectionError> {
             self.0.lock().unwrap().push(frame.clone());
+            Ok(())
+        }
+    }
+
+    struct AckBlockingInjector {
+        recording: SharedRecordingInjector,
+        submitted: mpsc::SyncSender<()>,
+        release_ack: mpsc::Receiver<()>,
+    }
+
+    impl TouchInjector for AckBlockingInjector {
+        fn inject(&mut self, frame: &TouchFrame) -> Result<(), TouchInjectionError> {
+            self.recording.inject(frame)?;
+            if !frame
+                .events()
+                .iter()
+                .all(|event| event.phase == TouchPhase::Cancel)
+            {
+                self.submitted.send(()).unwrap();
+                self.release_ack.recv().unwrap();
+            }
             Ok(())
         }
     }
@@ -457,6 +493,32 @@ mod tests {
     }
 
     #[test]
+    fn invalid_protocol_cleanup_failure_reports_both_errors() {
+        let (mut client, server) = connected_runtime_pair();
+        let client_fd = client.socket.as_raw_fd();
+        let join = thread::spawn(move || {
+            let mut engine = TouchEngine::new(CancelFailingInjector);
+            serve_runtime_attachment(
+                server,
+                Resolution {
+                    width: 1920,
+                    height: 1080,
+                },
+                &mut engine,
+                || Ok(()),
+            )
+        });
+
+        client.wait_until_ready().unwrap();
+        client.inject(&ten_contact_down_frame()).unwrap();
+        send_raw_packet(client_fd, &[0xff; HEADER_BYTES]).unwrap();
+        let error = join.join().unwrap().unwrap_err().to_string();
+
+        assert!(error.contains("runtime protocol version mismatch"));
+        assert!(error.contains("contact cleanup failed"));
+    }
+
+    #[test]
     fn failed_health_check_cancels_existing_contacts() {
         let recording = SharedRecordingInjector::default();
         let (mut client, server) = connected_runtime_pair();
@@ -495,13 +557,19 @@ mod tests {
         let recording = SharedRecordingInjector::default();
         let (mut client, server) = connected_runtime_pair();
         let client_fd = client.socket.as_raw_fd();
+        let (submitted, submitted_result) = mpsc::sync_channel(1);
+        let (release_ack, release_ack_result) = mpsc::sync_channel(1);
         let join = spawn_attachment(
             server,
             Resolution {
                 width: 1920,
                 height: 1080,
             },
-            recording.clone(),
+            AckBlockingInjector {
+                recording: recording.clone(),
+                submitted,
+                release_ack: release_ack_result,
+            },
         );
         client.wait_until_ready().unwrap();
         send_raw_packet(
@@ -509,8 +577,10 @@ mod tests {
             &encode_frame_request(0, &ten_contact_down_frame()).unwrap(),
         )
         .unwrap();
+        submitted_result.recv().unwrap();
         // SAFETY: client_fd is owned by client for the duration of this test.
         assert_eq!(unsafe { libc::shutdown(client_fd, libc::SHUT_RDWR) }, 0);
+        release_ack.send(()).unwrap();
         assert!(join.join().unwrap().is_err());
         assert!(recording
             .last_frame()
@@ -791,6 +861,10 @@ pub struct RuntimeChannelServer {
     expected_sequence: u64,
 }
 
+pub struct RuntimeChannelShutdown {
+    socket: OwnedFd,
+}
+
 impl RuntimeChannelServer {
     pub fn from_owned_fd(fd: OwnedFd) -> io::Result<Self> {
         validate_owned_socket(&fd)?;
@@ -798,6 +872,11 @@ impl RuntimeChannelServer {
             socket: fd,
             expected_sequence: 0,
         })
+    }
+
+    pub fn shutdown_handle(&self) -> io::Result<RuntimeChannelShutdown> {
+        let duplicated = duplicate_fd(self.socket.as_raw_fd())?;
+        Ok(RuntimeChannelShutdown { socket: duplicated })
     }
 
     pub fn send_startup_error(&mut self, detail: &str) -> io::Result<()> {
@@ -841,6 +920,20 @@ impl RuntimeChannelServer {
             )
         })?;
         Ok(request)
+    }
+}
+
+impl RuntimeChannelShutdown {
+    pub fn shutdown(&self) -> io::Result<()> {
+        // SAFETY: shutdown only affects this duplicated Unix socket endpoint.
+        if unsafe { libc::shutdown(self.socket.as_raw_fd(), libc::SHUT_RDWR) } == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ENOTCONN) {
+            return Ok(());
+        }
+        Err(error)
     }
 }
 
@@ -936,9 +1029,14 @@ pub fn serve_runtime_attachment<I: TouchInjector>(
             RuntimeRequest::Finish => {
                 report.contacts_cancelled = engine.state().active_contact_count();
                 engine.cancel_all().map_err(to_io_error)?;
-                server.send_response(RuntimeResponse::Ack {
+                let finish_ack = server.send_response(RuntimeResponse::Ack {
                     sequence: decoded.sequence,
-                })?;
+                });
+                if let Err(error) = finish_ack {
+                    if !is_closed_runtime_channel(&error) {
+                        return Err(error);
+                    }
+                }
                 return Ok(report);
             }
         }
@@ -951,18 +1049,36 @@ fn cancel_and_return<I: TouchInjector>(
     outcome: Result<(), io::Error>,
 ) -> io::Result<RuntimeAttachmentReport> {
     report.contacts_cancelled = engine.state().active_contact_count();
-    if let Err(error) = engine.cancel_all() {
-        return Err(to_io_error(error));
+    let cleanup_result = engine.cancel_all().map(|_| ()).map_err(to_io_error);
+    match (outcome, cleanup_result) {
+        (Ok(()), Ok(())) => Ok(RuntimeAttachmentReport {
+            frames_submitted: report.frames_submitted,
+            peak_contacts: report.peak_contacts,
+            contacts_cancelled: report.contacts_cancelled,
+        }),
+        (Ok(()), Err(cleanup_error)) => Err(cleanup_error),
+        (Err(primary), Ok(())) => Err(primary),
+        (Err(primary), Err(cleanup_error)) => Err(io::Error::new(
+            primary.kind(),
+            format!(
+                "runtime attachment failed: {primary}; contact cleanup also failed: {cleanup_error}"
+            ),
+        )),
     }
-    outcome.map(|()| RuntimeAttachmentReport {
-        frames_submitted: report.frames_submitted,
-        peak_contacts: report.peak_contacts,
-        contacts_cancelled: report.contacts_cancelled,
-    })
 }
 
 fn to_io_error(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
+}
+
+fn is_closed_runtime_channel(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::UnexpectedEof
+    )
 }
 
 fn scale_frame(frame: TouchFrame, resolution: Resolution) -> io::Result<TouchFrame> {
@@ -1155,6 +1271,16 @@ fn receive_response(fd: RawFd, timeout: Duration) -> io::Result<RuntimeResponse>
             "invalid runtime response",
         )),
     }
+}
+
+fn duplicate_fd(fd: RawFd) -> io::Result<OwnedFd> {
+    // SAFETY: F_DUPFD_CLOEXEC duplicates a live descriptor or returns errno.
+    let duplicated = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, libc::STDERR_FILENO + 1) };
+    if duplicated < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: fcntl returned a fresh owned descriptor.
+    Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
 }
 
 fn header(opcode: u16, sequence: u64, count: u16) -> Packet {

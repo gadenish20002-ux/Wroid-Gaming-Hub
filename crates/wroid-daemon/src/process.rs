@@ -715,15 +715,20 @@ fn game_log_path() -> Result<PathBuf, ProcessError> {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
-    use std::os::fd::AsRawFd;
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
 
-    use wroid_core::Resolution;
+    use wroid_core::{Point, Resolution};
     use wroid_inject::{
-        runtime_socket_pair, RuntimeAttachmentReport, RuntimeChannelServer,
-        RUNTIME_WORKER_PROTOCOL_GENERATION,
+        runtime_socket_pair, serve_runtime_attachment, RuntimeAttachmentReport,
+        RuntimeChannelClient, RuntimeChannelServer, RUNTIME_WORKER_PROTOCOL_GENERATION,
+    };
+    use wroid_runtime::{
+        ContactId, TouchEngine, TouchEvent, TouchFrame, TouchInjectionError, TouchInjector,
+        TouchPhase,
     };
 
     use crate::platform::{PersistentPlatform, PlatformLaunch, RuntimePlatformBackend};
@@ -734,6 +739,14 @@ mod tests {
     struct RecordingBackend {
         calls: PlatformCalls,
         serve_error: Option<&'static str>,
+    }
+
+    struct DropOrderBackend {
+        log_path: PathBuf,
+    }
+
+    struct DropOrderInjector {
+        log_path: PathBuf,
     }
 
     impl RuntimePlatformBackend for RecordingBackend {
@@ -767,12 +780,60 @@ mod tests {
         }
     }
 
+    impl RuntimePlatformBackend for DropOrderBackend {
+        fn prepare(&mut self, _launch: &PlatformLaunch) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn serve(
+            &mut self,
+            channel: RuntimeChannelServer,
+            resolution: Resolution,
+        ) -> io::Result<RuntimeAttachmentReport> {
+            let mut engine = TouchEngine::new(DropOrderInjector {
+                log_path: self.log_path.clone(),
+            });
+            serve_runtime_attachment(channel, resolution, &mut engine, || Ok(()))
+        }
+
+        fn shutdown(&mut self) -> io::Result<()> {
+            append_call(&self.log_path, "waydroid:stop");
+            append_call(&self.log_path, "helper:finish");
+            append_call(&self.log_path, "uinput:drop");
+            Ok(())
+        }
+    }
+
+    impl TouchInjector for DropOrderInjector {
+        fn inject(&mut self, frame: &TouchFrame) -> Result<(), TouchInjectionError> {
+            if frame
+                .events()
+                .iter()
+                .all(|event| event.phase == TouchPhase::Cancel)
+            {
+                append_call(&self.log_path, "touch:cancel-all");
+            }
+            Ok(())
+        }
+    }
+
     fn shared_platform_calls() -> PlatformCalls {
         Arc::new(Mutex::new(Vec::new()))
     }
 
     fn fake_platform(calls: PlatformCalls) -> PersistentPlatform {
         fake_platform_with_serve_error(calls, None)
+    }
+
+    fn drop_order_platform(log_path: PathBuf) -> PersistentPlatform {
+        let factory: Arc<
+            dyn Fn() -> io::Result<Box<dyn RuntimePlatformBackend>> + Send + Sync + 'static,
+        > = Arc::new(move || {
+            Ok(Box::new(DropOrderBackend {
+                log_path: log_path.clone(),
+            }))
+        });
+        PersistentPlatform::with_factory(factory)
     }
 
     fn fake_platform_with_serve_error(
@@ -822,6 +883,71 @@ mod tests {
     fn runtime_server() -> RuntimeChannelServer {
         let (_client, server) = runtime_socket_pair().unwrap();
         RuntimeChannelServer::from_owned_fd(server).unwrap()
+    }
+
+    fn ten_contact_down_frame() -> TouchFrame {
+        TouchFrame::new((1..=10).map(|id| {
+            TouchEvent::new(
+                ContactId::new(id),
+                TouchPhase::Down,
+                Point {
+                    x: u32::from(id),
+                    y: 20,
+                },
+            )
+        }))
+    }
+
+    fn duplicate_owned_fd(fd: RawFd) -> io::Result<OwnedFd> {
+        // SAFETY: F_DUPFD_CLOEXEC duplicates a live descriptor or returns errno.
+        let duplicated = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, libc::STDERR_FILENO + 1) };
+        if duplicated < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: fcntl returned a fresh owned descriptor.
+        Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
+    }
+
+    fn append_call(log_path: &Path, call: &str) {
+        let mut log = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+            .unwrap();
+        writeln!(log, "{call}").unwrap();
+    }
+
+    fn wait_for_path(path: &Path) {
+        for _ in 0..100 {
+            if path.exists() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("{} was not created", path.display());
+    }
+
+    fn term_trap_worker(
+        directory: &Path,
+        log_path: &Path,
+        ready_path: &Path,
+        runtime_fd: RawFd,
+    ) -> Child {
+        let worker = directory.join("term-trap-worker.sh");
+        fs::write(
+            &worker,
+            b"#!/bin/sh\ntrap 'printf \"%s\\n\" worker:term >> \"$CALL_LOG\"; exit 0' TERM\n: > \"$READY_FILE\"\nwhile :; do sleep 1; done\n",
+        )
+        .unwrap();
+        fs::set_permissions(&worker, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut command = Command::new("/usr/bin/sh");
+        command
+            .arg(&worker)
+            .env("CALL_LOG", log_path)
+            .env("READY_FILE", ready_path);
+        configure_worker_child(&mut command, runtime_fd, std::process::id() as libc::pid_t)
+            .unwrap();
+        command.spawn().unwrap()
     }
 
     fn launch_request() -> GameLaunchRequest {
@@ -925,11 +1051,6 @@ mod tests {
                 .windows(2)
                 .any(|pair| pair == ["--runtime-fd", "198"].map(OsString::from))
         );
-        assert!(
-            !launch_arguments(Path::new("/profiles/pubg-v2.json"), &request, 4242)
-                .iter()
-                .any(|arg| arg == "--bridge-fd")
-        );
     }
 
     #[test]
@@ -988,6 +1109,79 @@ mod tests {
         assert!(!success);
         assert!(detail.contains("exit status: 7"));
         assert!(detail.contains("runtime attachment cleanup failed"));
+    }
+
+    #[test]
+    fn requested_sigterm_with_eof_cleanup_is_successful() {
+        let status = Command::new("/usr/bin/sh")
+            .args(["-c", "kill -TERM $$"])
+            .status()
+            .unwrap();
+        let (success, detail) = combine_reaped_detail(
+            status,
+            Ok(RuntimeAttachmentReport {
+                frames_submitted: 1,
+                peak_contacts: 10,
+                contacts_cancelled: 10,
+            }),
+            true,
+        );
+
+        assert!(success);
+        assert!(detail.contains("signal 15"));
+        assert!(detail.contains("cancelled 10 contact(s)"));
+    }
+
+    #[test]
+    fn daemon_drop_orders_worker_term_before_touch_and_platform_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("drop-order.log");
+        let ready_path = directory.path().join("worker-ready");
+        let (client_fd, server_fd) = runtime_socket_pair().unwrap();
+        let child_runtime_fd = duplicate_owned_fd(client_fd.as_raw_fd()).unwrap();
+        let mut client = RuntimeChannelClient::from_owned_fd(client_fd).unwrap();
+        let platform = drop_order_platform(log_path.clone());
+        let attachment = platform
+            .attach(
+                RuntimeChannelServer::from_owned_fd(server_fd).unwrap(),
+                platform_launch("com.example.drop"),
+            )
+            .unwrap();
+        client.wait_until_ready().unwrap();
+        client.inject(&ten_contact_down_frame()).unwrap();
+        let child = term_trap_worker(
+            directory.path(),
+            &log_path,
+            &ready_path,
+            child_runtime_fd.as_raw_fd(),
+        );
+        drop(child_runtime_fd);
+        drop(client);
+        wait_for_path(&ready_path);
+        let mut processes = ManagedProcesses::with_platform(platform);
+        processes.children.insert(
+            SessionId::new("drop-order").unwrap(),
+            ManagedProcess {
+                child,
+                attachment: Some(attachment),
+                stop_requested: false,
+            },
+        );
+
+        drop(processes);
+
+        let calls = fs::read_to_string(&log_path).unwrap();
+        let calls = calls.lines().collect::<Vec<_>>();
+        assert_eq!(
+            calls,
+            [
+                "worker:term",
+                "touch:cancel-all",
+                "waydroid:stop",
+                "helper:finish",
+                "uinput:drop"
+            ]
+        );
     }
 
     #[test]

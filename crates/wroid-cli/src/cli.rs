@@ -1103,18 +1103,6 @@ mod tests {
         assert_eq!(runtime_fd, Some(198));
         assert_eq!(daemon_parent_pid, Some(42));
         assert_eq!(exit_after_ms, Some(25));
-
-        assert!(Cli::try_parse_from([
-            "wroid",
-            "launch-v2",
-            "profiles/examples/pubg-v2.json",
-            "--daemon-worker",
-            "--bridge-fd",
-            "198",
-            "--daemon-parent-pid",
-            "42",
-        ])
-        .is_err());
     }
 
     #[test]
