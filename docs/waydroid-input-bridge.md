@@ -40,6 +40,24 @@ launchers could both plan restoration before the privileged bridge owner
 existed. Hub and Controls Studio probe both leases before opening a second game
 terminal.
 
+## Production daemon ownership
+
+Normal Hub launches, foreground `launch-v2`, and the bounded input self-test use
+the same daemon-owned helper lifecycle. `wroidd` validates that the helper
+staged beside its own executable is a protected current-user file and is
+byte-identical to `/usr/lib/wroid/wroid-helper`. It then creates a private Unix
+socket pair, starts the helper from a daemon-owned broker, and gives the worker
+only fixed inherited descriptor 198.
+
+The internal protocol is bounded, versioned, and ordered:
+`open(eventN) -> verify_android_input -> finish`. The worker still creates the
+virtual touchscreen and runs physical-input/profile dispatch, but it cannot
+choose a helper executable or reuse bridge authority outside that one session.
+Worker exit, Stop, daemon shutdown, protocol failure, and helper failure all
+close the broker and converge on helper cleanup. A daemon release with an
+active worker is not replaced; an idle stale daemon is authenticated and
+terminated through a revalidated pidfd before the new release starts.
+
 ## Build
 
 ```bash

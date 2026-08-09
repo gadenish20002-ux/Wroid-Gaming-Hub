@@ -31,6 +31,11 @@ The project currently supports:
   peer-UID verification, bounded messages, a singleton lease, and typed session
   prepare/launch/start/state/stop/list operations. Normal Hub launches are
   daemon-owned child processes with fixed argument construction and exit reaping.
+- Daemon-owned privileged bridge activation over a private versioned worker
+  channel. The daemon validates an exact paired helper release, owns helper
+  readiness and cleanup, refuses active stale-daemon replacement, and replaces
+  idle stale releases only through authenticated pidfd signalling. Profile and
+  physical-input dispatch remain in the unprivileged worker.
 - Concurrent virtual joysticks, keyboard/mouse taps, sustained hold controls
   for automatic fire, and toggle mouse aim.
 - Profile v2 Hold/Toggle layers and modifier chords, with deterministic

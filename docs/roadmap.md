@@ -80,7 +80,8 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
     a detached, write-sealed memfd release source.
   - [x] Keep production Android boot/render checks rootless and allow only one
     fixed helper-side `getevent -pl` touchscreen readiness probe.
-  - [ ] Replace direct helper activation with versioned daemon/helper IPC.
+  - [x] Replace direct helper activation with a private versioned daemon/worker
+    bridge protocol and daemon-owned helper lifecycle.
 - [ ] Move the remaining direct CLI execution paths onto the daemon API.
 - [ ] Add production session lifecycle, focus ownership, and configuration rollback.
 
@@ -199,8 +200,9 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - The visual editor can calibrate over a user-authorized live Waydroid window,
   but it is not an always-on overlay during gameplay.
 - No production daemon-managed global input capture.
-- The transactional bridge lifecycle and standalone root-owned helper are
-  implemented, but policy-controlled activation and the reconciliation daemon are not.
+- The transactional bridge lifecycle, standalone root-owned helper, and
+  daemon-owned helper activation are implemented. Stable bridge discovery and
+  daemon-native reconciliation are not.
 - Profile preparation and normal Hub process ownership use per-user daemon IPC;
   live profile controls still execute inside the daemon-supervised desktop-user
   `play-v2` worker until capture and cleanup move into daemon-native components.
@@ -217,7 +219,6 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 1. Productionize the persistent touchscreen bridge.
    - Keep the successful Android `getevent` integration path.
    - Add stable device discovery and bridge reconciliation.
-   - Move direct helper activation behind versioned daemon/helper IPC.
    - Verify ten simultaneous contacts and deterministic cleanup.
 
 2. Integrate safe host input capture with the managed session.
@@ -226,7 +227,7 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
    - Use profile-to-runtime joystick materialization when building session controls.
    - Preserve explicit user permissions and focus ownership.
    - Keep behavior transparent and avoid protection evasion.
-   - Move temporary root-owned orchestration behind the daemon/helper boundary.
+   - Move remaining profile/input orchestration into daemon-native components.
 
 3. Build a profile authoring workflow.
    - Inspect current app/package.

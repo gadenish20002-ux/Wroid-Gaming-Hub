@@ -187,12 +187,15 @@ submitted touch frames, and peak simultaneous contacts; input p95 above the
 
 Wroid stops the current desktop Waydroid session and keeps input capture,
 mapping, uinput, telemetry, and package lifecycle in the desktop-user process.
-The installed root-owned, release-matched helper validates and mounts the Wroid
-virtual touchscreen without another password prompt. Wroid restores the bridge
-configuration and previous desktop Waydroid session when play ends. A detached
-per-launch watchdog performs the same restoration if the game process crashes.
-If Waydroid was already stopped, Wroid leaves it stopped. The Hub and Controls
-Studio never run as root.
+`wroidd` alone activates and owns the installed root-owned helper through a
+private, bounded bridge channel inherited by the worker; no helper path or
+reusable credential is sent to the worker. The helper must match the staged
+release byte-for-byte before it validates and mounts the virtual touchscreen.
+The worker retains the latency-sensitive profile/input dispatch and restores
+the bridge configuration and previous desktop Waydroid session when play ends.
+A detached per-launch watchdog performs the same restoration if the worker
+crashes. If Waydroid was already stopped, Wroid leaves it stopped. The Hub,
+daemon, worker, and Controls Studio remain unprivileged.
 
 The same safe launch workflow is available without the UI:
 
@@ -543,9 +546,18 @@ daemon beside the other user runtime components.
 IPC, and leaves the materialized control plan owned by the daemon. Normal Hub
 launches use an atomic typed request: the daemon resolves the authenticated
 client executable, constructs only fixed `launch-v2` arguments, owns the child
-and private log, handles Stop, and reaps exit state. Direct `launch-v2` remains
-available for diagnostics; input capture and Waydroid cleanup still run inside
-that supervised desktop-user worker.
+and private log, handles Stop, and reaps exit state. It also owns the exact
+release-matched privileged helper and brokers only its typed open, readiness,
+and cleanup operations over an inherited private socket. Ordinary
+`launch-v2` uses the same daemon path, tails the private worker log while in
+the foreground, and converts Ctrl+C into typed Stop for its exact session.
+Input capture, profile evaluation, touch injection, and Waydroid lifecycle
+remain inside the supervised desktop-user worker.
+
+Before reuse, the client compares the authenticated daemon executable with the
+selected `wroidd` by device and inode. An idle stale release is replaced through
+a revalidated pidfd; an older daemon with an active managed worker is never
+replaced until that game is stopped.
 
 ```sh
 wroid daemon start

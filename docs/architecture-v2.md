@@ -55,23 +55,26 @@ wroidd (per-user runtime daemon)
 The CLI becomes another client of `wroidd`. Direct ADB and Waydroid shell
 wrappers remain available for diagnostics and compatibility mode.
 
-The current `launch-v2` path already applies the same process
-boundary without the daemon: the desktop user owns evdev/uinput and the entire
-input hot path, while a standalone root-owned typed helper owns only the
-validated LXC event-node bridge, one fixed Android input-device readiness
-probe, and crash rollback. Boot and render-property readiness remain in the
-desktop worker through Waydroid's user API. Hub requires that helper to match
-the staged release and prove effective root through a side-effect-free check.
+The current production boundary is an incremental form of this target.
+`wroidd` protocol v2 owns the managed worker and a private per-launch bridge
+broker. The desktop-user worker owns evdev/uinput, profile evaluation, the input
+hot path, telemetry, and Waydroid user-level lifecycle. The daemon alone starts
+the root-owned typed helper, which owns only the validated LXC event-node
+bridge, one fixed Android input-device readiness probe, and crash rollback.
+The worker receives an inherited versioned socket rather than a helper path.
+Boot and render-property readiness remain in the desktop worker through
+Waydroid's user API. The helper must match the daemon's paired staged release
+and prove effective root through a side-effect-free check.
 Mode `4750` limits execution to the `input` group and avoids per-game password
 prompts. Its Hub bootstrap uses a detached unprivileged installer,
 graphical Polkit authorization, an interprocess lease, and a write-sealed memfd
 source. The root-owned fixed `/usr/bin/install` process never reads a mutable
 staging pathname; if the detached owner disappears before the source is opened,
-installation fails instead of publishing a partial helper. The packaged
-per-user `wroidd` now exposes protocol v1 over a private Unix socket with
-peer-UID verification, bounded messages, and singleton ownership. Profile
-preparation already uses it; moving live capture and helper activation behind
-that boundary remains the next defense-in-depth stage.
+installation fails instead of publishing a partial helper. Daemon reuse is
+bound to authenticated peer credentials and exact executable identity; only an
+idle stale release may be replaced, through a revalidated pidfd. Moving profile
+evaluation, capture, injection, and lifecycle cleanup into daemon-native
+components remains a later migration.
 
 ## Workspace direction
 

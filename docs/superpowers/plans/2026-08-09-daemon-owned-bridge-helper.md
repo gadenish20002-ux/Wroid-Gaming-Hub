@@ -515,7 +515,8 @@ CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 cargo clippy --workspace --all-targe
 cargo fmt --all -- --check
 for js in $(git ls-files '*.js'); do node --check "$js"; done
 node --test crates/wroid-cli/assets/editor/profile-model.test.js crates/wroid-cli/assets/hub/control-chips.test.js
-for profile in profiles/examples/*-v2.json; do target/debug/wroid profile validate "$profile"; done
+cargo build -p wroid-core --bin wroid-profile-v2-validate
+for profile in profiles/examples/*-v2.json; do target/debug/wroid-profile-v2-validate "$profile"; done
 git diff --check
 ```
 

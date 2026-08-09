@@ -1,5 +1,17 @@
 # Daemon-Owned Bridge Helper Design
 
+## Implementation status
+
+Implemented: production `launch-v2` and Hub launches are
+daemon-managed; `wroidd` owns exact-release helper activation through the
+private bridge protocol; foreground CLI launch relays the private log and typed
+Stop; and running-daemon reuse is protected by peer credentials, executable
+identity, active-session refusal, and pidfd replacement. Profile evaluation,
+physical input capture, touch injection, and Waydroid user-level lifecycle
+remain in the supervised unprivileged worker as designed. Daemon-native capture,
+stable bridge reconciliation, gamepad support, package bundles, installed-game
+calibration, and cross-vendor hardware acceptance remain deferred.
+
 ## Problem
 
 Normal Hub launches are process-owned by the per-user `wroidd`, but the

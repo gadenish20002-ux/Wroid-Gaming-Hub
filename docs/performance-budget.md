@@ -33,6 +33,13 @@ package launch disabled and tracing enabled. Its 20-second live interval makes
 hardware latency and cleanup validation available before game installation;
 sudo authorization and Android boot occur before the timed interval begins.
 
+The daemon/helper bridge protocol runs only during bridge open, Android
+readiness verification, and cleanup. Steady-state keyboard/mouse dispatch and
+touch injection remain in the desktop-user worker and do not cross daemon IPC,
+so daemon ownership adds no request/response work to the measured input hot
+path. The foreground CLI log relay is also outside the worker and polls only
+daemon session state.
+
 Hub does not poll system probes periodically while a game is running. It
 performs one deduplicated state refresh after a launch handoff and refreshes
 again only when its browser regains focus or becomes visible, preventing the
