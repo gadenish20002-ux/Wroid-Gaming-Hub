@@ -1,6 +1,10 @@
 # Plan: profile layers and modifiers
 
 Status: implemented and verified in automated gates; live game calibration remains a follow-up.
+Implementation evidence: the post-layer release benchmark completed over
+20,000 frames at mean 0.8 us, p50 0.7 us, p95 1.0 us, p99 1.3 us, and max
+22.5 us; every frame stayed below 5 ms, all 10 contacts were active
+simultaneously, and the final release was clean.
 Author context: written against commit `eccc0cb` plus the uncommitted
 latency/mouse-accumulator work.
 
@@ -81,11 +85,20 @@ what every existing binding deserializes to.
 Write this reasoning into `docs/profile-v2.md` so the next person does not
 "fix" it by bumping the version.
 
-### 2.5 Modifier keys are matched by state, not by event order
+### 2.5 Modifier state has action-specific edge semantics
 
-The runtime must not require that the modifier arrive before the action key. It
-tracks which modifier keys are currently down and consults that set when a
-binding fires. This also makes release correct: see §2.7.
+The runtime tracks modifier keys as state, but the effect depends on the action:
+
+- Continuous `Hold` and hold-mode `VirtualJoystick` bindings reconcile whenever
+  the action key, modifier, or layer state changes. The modifier may therefore
+  arrive after the action key is already held; ownership transitions without a
+  leaked or overlapping contact.
+- Zero-latency `Tap` samples layer/modifier scope only on the physical action-key
+  press edge. A Tap chord requires the modifier to be down before that edge.
+  The runtime does not delay a Base tap waiting for a possible modifier and
+  never refires or switches a Tap on modifier/layer-only changes.
+
+Release remains correct independently of current availability: see §2.7.
 
 ### 2.6 Reserved keys
 
@@ -385,10 +398,13 @@ Current flow at `:961-1072`. Insert, in this order:
    plain binding elsewhere. When a modifier goes up, call
    `release_modifier(modifier)` (§6.5).
 
-3. **Gate presses, never gate releases.** In the existing match arms
-   (`:996-1069`), add `&& self.binding_is_available(control)` to the *press*
-   conditions only. The `Hold` arm at `:1002` handles both press and release in
-   one branch — split it so release does not consult availability.
+3. **Use action-specific press semantics; never gate releases.** A `Tap` checks
+   availability only on the physical action-key press edge. Do not delay the
+   Base tap and do not replay/switch it when only a modifier or layer changes.
+   Continuous `Hold` and hold-mode `VirtualJoystick` actions recompute desired
+   ownership on action-key, modifier, and layer changes, including when the
+   modifier arrives after the action key. Release paths never consult current
+   availability before cleaning up an active owner.
 
 4. **Track held bindings.** On a successful hold press, insert the control
    index into `held_bindings`; on release, remove it. `point_contacts`
@@ -443,8 +459,11 @@ Rust unit tests, alongside the existing ones in each file:
   3. layer binding fires while the hold key is down;
   4. toggle layer stays active after release and flips off on second press;
   5. same key drives different actions in base vs layer;
-  6. modifier binding fires only with the modifier held;
-  7. unmodified sibling is suppressed while the modifier is held;
+  6. modifier binding fires only with the modifier held, with separate edge
+     coverage proving that Tap requires modifier-before-action while continuous
+     actions reconcile if the modifier arrives after the action is already held;
+  7. unmodified sibling is suppressed while the modifier is held, and Tap does
+     not delay Base or refire on modifier/layer-only changes;
   8. **releasing the modifier while the action key is held releases the
      contact** (§2.7 case 1);
   9. **deactivating a layer releases contacts held by that layer** (case 2);
@@ -464,6 +483,9 @@ example profiles validate.
 Plus the performance gate from §2.8: re-run
 `target/release/wroid-inject-latency --samples 20000`, confirm p99 has not
 regressed, and record the number in `docs/runtime-benchmarks.md` if it moved.
+**Completed implementation evidence:** mean 0.8 us, p50 0.7 us, p95 1.0 us,
+p99 1.3 us, max 22.5 us; 20,000/20,000 frames stayed below 5 ms, 10/10
+simultaneous contacts were accepted, and clean release was verified.
 
 ## 8. Editor (Controls Studio)
 
@@ -570,7 +592,8 @@ Each step must leave the workspace green (`fmt`, `clippy`, `test`).
    byte-identically.
 2. Validation: all rules from §4 plus one test each.
 3. Runtime plan: `LayerId`, `RuntimeLayer`, interning, `UnknownLayer`.
-4. Dispatch — presses only: layer activation, modifier tracking, gated press.
+4. Dispatch — press/reconciliation semantics: layer activation, modifier
+   tracking, Tap press-edge scope, and continuous modifier-order reconciliation.
    Tests 1-7 from §7.
 5. Dispatch — releases: `release_layer`, `release_modifier`, `suspend()`
    clearing, sibling suppression. Tests 8-12 from §7. **Do not merge step 4
@@ -579,7 +602,9 @@ Each step must leave the workspace green (`fmt`, `clippy`, `test`).
    overlay filter, preview.
 7. Hub: counts and chips.
 8. Peripheral call sites (§10) and docs (§12).
-9. Re-run the latency benchmark, record the result.
+9. Re-run the latency benchmark and record the result. **Complete:** mean
+   0.8 us, p99 1.3 us over 20,000 frames; all frames met 5 ms, 10/10 contacts
+   were simultaneous, and release was clean.
 
 Steps 1-5 are the feature. Steps 6-7 are what makes it usable by someone who
 does not edit JSON by hand.
