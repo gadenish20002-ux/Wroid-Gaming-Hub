@@ -21,7 +21,9 @@ pub use mouse_aim::{
     MouseAimSensitivity, MouseAimSettings, MouseAimUpdate,
 };
 pub use profile_controls::{
-    RuntimeControlAction, RuntimeControlBinding, RuntimeControlPlan, RuntimeControlPlanError,
+    HostKeyName, HostMouseButton, LayerId, LayerMode, ModifierMask, RuntimeControlAction,
+    RuntimeControlBinding, RuntimeControlPlan, RuntimeControlPlanError, RuntimeLayer,
+    RuntimePhysicalInput,
 };
 pub use services::*;
 
