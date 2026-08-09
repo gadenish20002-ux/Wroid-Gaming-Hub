@@ -78,7 +78,17 @@ impl RuntimePlatformBackend for ProductionRuntimePlatform {
         } else if self.resolution == Some(launch.resolution) {
             self.driver.verify_health()?;
         } else {
-            self.driver.change_resolution(launch.resolution)?;
+            if let Err(resolution_error) = self.driver.change_resolution(launch.resolution) {
+                let rollback_result = self.driver.shutdown();
+                self.ready = false;
+                self.resolution = None;
+                return Err(combine_primary_and_cleanup(
+                    "platform resolution change",
+                    resolution_error,
+                    "rollback",
+                    rollback_result,
+                ));
+            }
             self.resolution = Some(launch.resolution);
         }
 
@@ -117,6 +127,7 @@ struct LinuxPlatformDriver {
     expected_uid: u32,
     event_node: Option<PathBuf>,
     waydroid: Option<DesktopWaydroidSession>,
+    waydroid_stop_unverified: bool,
     helper: Option<Box<dyn BridgeHelperSession>>,
     engine: Option<TouchEngine<UinputTouchInjector>>,
 }
@@ -127,6 +138,7 @@ impl LinuxPlatformDriver {
             expected_uid,
             event_node: None,
             waydroid: None,
+            waydroid_stop_unverified: false,
             helper: None,
             engine: None,
         }
@@ -159,6 +171,23 @@ impl LinuxPlatformDriver {
         }
         waydroid.confirm_resolution(resolution.width, resolution.height)
     }
+
+    fn store_waydroid_start(
+        &mut self,
+        result: io::Result<DesktopWaydroidSession>,
+    ) -> io::Result<()> {
+        match result {
+            Ok(waydroid) => {
+                self.waydroid = Some(waydroid);
+                self.waydroid_stop_unverified = false;
+                Ok(())
+            }
+            Err(error) => {
+                self.waydroid_stop_unverified = true;
+                Err(error)
+            }
+        }
+    }
 }
 
 impl PlatformDriver for LinuxPlatformDriver {
@@ -188,14 +217,18 @@ impl PlatformDriver for LinuxPlatformDriver {
         let desktop_user = DesktopUser::from_session_environment()?;
         stop_existing_waydroid_session(&desktop_user)?;
         self.helper = Some(helper_factory.start(&event_node)?);
-        self.waydroid = Some(DesktopWaydroidSession::start(desktop_user)?);
+        let waydroid = DesktopWaydroidSession::start(desktop_user);
+        self.store_waydroid_start(waydroid)?;
         self.configure_resolution(resolution)?;
         self.helper_mut()?.verify_android_input()
     }
 
     fn change_resolution(&mut self, resolution: Resolution) -> io::Result<()> {
         self.helper_mut()?.check_health()?;
-        self.configure_resolution(resolution)?;
+        if let Err(error) = self.configure_resolution(resolution) {
+            self.waydroid_stop_unverified = true;
+            return Err(error);
+        }
         self.helper_mut()?.verify_android_input()
     }
 
@@ -253,7 +286,16 @@ impl PlatformResources for LinuxPlatformDriver {
             None => Ok(()),
         };
         self.waydroid.take();
-        result
+        let stop_unverified = std::mem::take(&mut self.waydroid_stop_unverified);
+        match (stop_unverified, result) {
+            (false, result) => result,
+            (true, Ok(())) => Err(io::Error::other(
+                "Waydroid stop is unverified after a failed session start or restart",
+            )),
+            (true, Err(stop_error)) => Err(io::Error::other(format!(
+                "Waydroid stop is unverified after a failed session start or restart; stop also failed: {stop_error}"
+            ))),
+        }
     }
 
     fn finish_helper(&mut self, waydroid_stopped: bool) -> io::Result<()> {
@@ -365,24 +407,51 @@ mod tests {
     use crate::platform::{PlatformLaunch, RuntimePlatformBackend};
 
     use super::{
-        select_direct_event_node, shutdown_platform_resources, PlatformDriver, PlatformResources,
-        ProductionRuntimePlatform,
+        select_direct_event_node, shutdown_platform_resources, LinuxPlatformDriver, PlatformDriver,
+        PlatformResources, ProductionRuntimePlatform,
     };
 
     type Calls = Arc<Mutex<Vec<String>>>;
 
+    struct RecordingHelper {
+        finish_arguments: Arc<Mutex<Vec<bool>>>,
+        fail_finish: bool,
+    }
+
+    impl wroid_inject::BridgeHelperSession for RecordingHelper {
+        fn verify_android_input(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn check_health(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn finish(self: Box<Self>, waydroid_stopped: bool) -> io::Result<()> {
+            self.finish_arguments.lock().unwrap().push(waydroid_stopped);
+            if self.fail_finish {
+                return Err(io::Error::other("helper cleanup failed"));
+            }
+            Ok(())
+        }
+    }
+
     struct RecordingPlatformDriver {
         calls: Calls,
         fail_initializations: usize,
+        fail_resolution_changes: usize,
         fail_health_checks: usize,
         fail_shutdowns: usize,
         fail_cleanup_steps: bool,
-        resources_open: bool,
+        uinput_open: bool,
+        helper_open: bool,
+        waydroid_open: bool,
+        waydroid_stop_unverified: bool,
     }
 
     impl PlatformResources for RecordingPlatformDriver {
         fn cancel_contacts(&mut self) -> io::Result<()> {
-            if !self.resources_open {
+            if !self.uinput_open {
                 return Ok(());
             }
             self.calls.lock().unwrap().push("cancel".to_owned());
@@ -393,21 +462,39 @@ mod tests {
         }
 
         fn stop_waydroid(&mut self) -> io::Result<()> {
-            if !self.resources_open {
+            if self.waydroid_stop_unverified {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push("waydroid:stop-unverified".to_owned());
+                self.waydroid_open = false;
+                self.waydroid_stop_unverified = false;
+                return Err(io::Error::other(if self.fail_cleanup_steps {
+                    "stop failed"
+                } else {
+                    "stop unverified"
+                }));
+            }
+            if !self.waydroid_open {
                 return Ok(());
             }
             self.calls.lock().unwrap().push("waydroid:stop".to_owned());
+            self.waydroid_open = false;
             if self.fail_cleanup_steps {
                 return Err(io::Error::other("stop failed"));
             }
             Ok(())
         }
 
-        fn finish_helper(&mut self, _waydroid_stopped: bool) -> io::Result<()> {
-            if !self.resources_open {
+        fn finish_helper(&mut self, waydroid_stopped: bool) -> io::Result<()> {
+            if !self.helper_open {
                 return Ok(());
             }
-            self.calls.lock().unwrap().push("helper:finish".to_owned());
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("helper:finish:{waydroid_stopped}"));
+            self.helper_open = false;
             if self.fail_cleanup_steps {
                 return Err(io::Error::other("finish failed"));
             }
@@ -419,9 +506,9 @@ mod tests {
         }
 
         fn drop_uinput(&mut self) {
-            if self.resources_open {
+            if self.uinput_open {
                 self.calls.lock().unwrap().push("uinput:drop".to_owned());
-                self.resources_open = false;
+                self.uinput_open = false;
             }
         }
     }
@@ -432,11 +519,14 @@ mod tests {
                 .lock()
                 .unwrap()
                 .extend(["uinput:create".to_owned(), "helper:start".to_owned()]);
-            self.resources_open = true;
+            self.uinput_open = true;
+            self.helper_open = true;
             if self.fail_initializations > 0 {
                 self.fail_initializations -= 1;
+                self.waydroid_stop_unverified = true;
                 return Err(io::Error::other("initialization failed"));
             }
+            self.waydroid_open = true;
             self.calls.lock().unwrap().push(format!(
                 "waydroid:start:{}x{}",
                 resolution.width, resolution.height
@@ -449,6 +539,12 @@ mod tests {
                 "waydroid:restart:{}x{}",
                 resolution.width, resolution.height
             ));
+            if self.fail_resolution_changes > 0 {
+                self.fail_resolution_changes -= 1;
+                self.waydroid_open = false;
+                self.waydroid_stop_unverified = true;
+                return Err(io::Error::other("resolution restart failed"));
+            }
             Ok(())
         }
 
@@ -512,10 +608,29 @@ mod tests {
         ProductionRuntimePlatform::with_driver(Box::new(RecordingPlatformDriver {
             calls,
             fail_initializations,
+            fail_resolution_changes: 0,
             fail_health_checks,
             fail_shutdowns,
             fail_cleanup_steps: false,
-            resources_open: false,
+            uinput_open: false,
+            helper_open: false,
+            waydroid_open: false,
+            waydroid_stop_unverified: false,
+        }))
+    }
+
+    fn backend_with_resolution_failure(calls: Calls) -> ProductionRuntimePlatform {
+        ProductionRuntimePlatform::with_driver(Box::new(RecordingPlatformDriver {
+            calls,
+            fail_initializations: 0,
+            fail_resolution_changes: 1,
+            fail_health_checks: 0,
+            fail_shutdowns: 0,
+            fail_cleanup_steps: false,
+            uinput_open: false,
+            helper_open: false,
+            waydroid_open: false,
+            waydroid_stop_unverified: false,
         }))
     }
 
@@ -601,6 +716,30 @@ mod tests {
     }
 
     #[test]
+    fn failed_resolution_restart_resets_backend_before_same_resolution_retry() {
+        let calls = shared_calls();
+        let mut backend = backend_with_resolution_failure(calls.clone());
+        backend
+            .prepare(&platform_launch("com.example.one", 1920, 1080))
+            .unwrap();
+
+        let error = backend
+            .prepare(&platform_launch("com.example.fail", 1280, 720))
+            .unwrap_err();
+        assert!(error.to_string().contains("resolution restart failed"));
+        assert!(error.to_string().contains("stop unverified"));
+        backend
+            .prepare(&platform_launch("com.example.retry", 1280, 720))
+            .unwrap();
+
+        assert_eq!(count(&calls, "uinput:create"), 2);
+        assert_eq!(count(&calls, "helper:start"), 2);
+        assert_eq!(count(&calls, "waydroid:start:1280x720"), 1);
+        assert_eq!(count(&calls, "helper:finish:false"), 1);
+        assert_eq!(packages(&calls), ["com.example.one", "com.example.retry"]);
+    }
+
+    #[test]
     fn helper_health_failure_prevents_a_second_launch() {
         let calls = shared_calls();
         let mut backend = backend_with_failures(calls.clone(), 0, 1, 0);
@@ -665,7 +804,12 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert_eq!(
             &calls[calls.len() - 4..],
-            ["cancel", "waydroid:stop", "helper:finish", "uinput:drop"]
+            [
+                "cancel",
+                "waydroid:stop",
+                "helper:finish:true",
+                "uinput:drop"
+            ]
         );
     }
 
@@ -675,21 +819,55 @@ mod tests {
         let mut driver = RecordingPlatformDriver {
             calls: calls.clone(),
             fail_initializations: 0,
+            fail_resolution_changes: 0,
             fail_health_checks: 0,
             fail_shutdowns: 0,
             fail_cleanup_steps: true,
-            resources_open: true,
+            uinput_open: true,
+            helper_open: true,
+            waydroid_open: true,
+            waydroid_stop_unverified: false,
         };
 
         let error = shutdown_platform_resources(&mut driver).unwrap_err();
 
         assert_eq!(
             *calls.lock().unwrap(),
-            ["cancel", "waydroid:stop", "helper:finish", "uinput:drop"]
+            [
+                "cancel",
+                "waydroid:stop",
+                "helper:finish:false",
+                "uinput:drop"
+            ]
         );
         assert!(error.to_string().contains("cancel failed"));
         assert!(error.to_string().contains("stop failed"));
         assert!(error.to_string().contains("finish failed"));
+    }
+
+    #[test]
+    fn partial_waydroid_start_with_failed_cleanup_forces_helper_recovery() {
+        let finish_arguments = Arc::new(Mutex::new(Vec::new()));
+        let mut driver = LinuxPlatformDriver::new(1000);
+        driver.helper = Some(Box::new(RecordingHelper {
+            finish_arguments: finish_arguments.clone(),
+            fail_finish: true,
+        }));
+        let start_error: io::Result<wroid_inject::DesktopWaydroidSession> =
+            Err(io::Error::other("session start failed"));
+        assert_eq!(
+            driver
+                .store_waydroid_start(start_error)
+                .unwrap_err()
+                .to_string(),
+            "session start failed"
+        );
+
+        let error = shutdown_platform_resources(&mut driver).unwrap_err();
+
+        assert_eq!(*finish_arguments.lock().unwrap(), [false]);
+        assert!(error.to_string().contains("stop is unverified"));
+        assert!(error.to_string().contains("helper cleanup failed"));
     }
 
     #[test]
