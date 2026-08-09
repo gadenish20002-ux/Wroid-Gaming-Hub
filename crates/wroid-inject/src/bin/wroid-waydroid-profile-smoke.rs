@@ -110,6 +110,9 @@ struct MovementBinding {
 
 fn find_wasd_joystick(profile: &ProfileV2) -> Result<MovementBinding> {
     for binding in &profile.bindings {
+        if binding.layer.is_some() || binding.modifier.is_some() {
+            continue;
+        }
         let InputV2::KeyCluster {
             up,
             left,
@@ -164,6 +167,9 @@ fn find_key_taps(profile: &ProfileV2, resolution: Resolution) -> Vec<KeyTapBindi
         .bindings
         .iter()
         .filter_map(|binding| {
+            if binding.layer.is_some() || binding.modifier.is_some() {
+                return None;
+            }
             let (InputV2::Key { key }, ActionV2::Tap { point }) = (&binding.input, &binding.action)
             else {
                 return None;
@@ -310,4 +316,123 @@ fn print_usage() {
         "Example: sudo ./target/release/wroid-waydroid-profile-smoke profiles/examples/shooter-v2.json /dev/input/event7 --width 1920 --height 1080 --no-trace"
     );
     println!("Recovery: sudo ./target/release/wroid-waydroid-profile-smoke --cleanup");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wroid_core::profile_v2::{BindingV2, LayerActivation, LayerV2};
+
+    fn layered_profile() -> ProfileV2 {
+        ProfileV2 {
+            schema_version: 2,
+            name: "Layered smoke".to_owned(),
+            package_name: "com.example.layered".to_owned(),
+            orientation: Default::default(),
+            layers: vec![LayerV2 {
+                name: "grenades".to_owned(),
+                activation: LayerActivation::Hold {
+                    key: "g".to_owned(),
+                },
+            }],
+            bindings: vec![
+                joystick_binding(
+                    "layer movement",
+                    Some("grenades"),
+                    None,
+                    JoystickMode::Toggle,
+                    0.1,
+                ),
+                joystick_binding(
+                    "modified movement",
+                    None,
+                    Some("shift"),
+                    JoystickMode::Hold,
+                    0.2,
+                ),
+                joystick_binding("base movement", None, None, JoystickMode::Hold, 0.3),
+                tap_binding("layer tap", "1", Some("grenades"), None, 0.1),
+                tap_binding("modified tap", "2", None, Some("shift"), 0.2),
+                tap_binding("base tap", "2", None, None, 0.3),
+                tap_binding("other base tap", "3", None, None, 0.4),
+            ],
+        }
+    }
+
+    fn joystick_binding(
+        name: &str,
+        layer: Option<&str>,
+        modifier: Option<&str>,
+        mode: JoystickMode,
+        coordinate: f64,
+    ) -> BindingV2 {
+        BindingV2 {
+            name: name.to_owned(),
+            layer: layer.map(str::to_owned),
+            modifier: modifier.map(str::to_owned),
+            input: InputV2::KeyCluster {
+                up: "w".to_owned(),
+                left: "a".to_owned(),
+                down: "s".to_owned(),
+                right: "d".to_owned(),
+            },
+            action: ActionV2::VirtualJoystick {
+                center: NormalizedPoint {
+                    x: coordinate,
+                    y: coordinate,
+                },
+                radius: 0.1,
+                dead_zone: 0.0,
+                mode,
+                reaffirm_ms: None,
+            },
+        }
+    }
+
+    fn tap_binding(
+        name: &str,
+        key: &str,
+        layer: Option<&str>,
+        modifier: Option<&str>,
+        coordinate: f64,
+    ) -> BindingV2 {
+        BindingV2 {
+            name: name.to_owned(),
+            layer: layer.map(str::to_owned),
+            modifier: modifier.map(str::to_owned),
+            input: InputV2::Key {
+                key: key.to_owned(),
+            },
+            action: ActionV2::Tap {
+                point: NormalizedPoint {
+                    x: coordinate,
+                    y: coordinate,
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn smoke_discovers_only_base_unmodified_bindings() {
+        let profile = layered_profile();
+        profile.validate().unwrap();
+
+        let movement = find_wasd_joystick(&profile).unwrap();
+        let taps = find_key_taps(
+            &profile,
+            Resolution {
+                width: 100,
+                height: 100,
+            },
+        );
+
+        assert_eq!(movement.name, "base movement");
+        assert_eq!(movement.center, NormalizedPoint { x: 0.3, y: 0.3 });
+        assert_eq!(
+            taps.iter()
+                .map(|binding| binding.key.as_str())
+                .collect::<Vec<_>>(),
+            ["2", "3"]
+        );
+    }
 }

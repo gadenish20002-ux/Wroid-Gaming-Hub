@@ -18,7 +18,8 @@ use wroid_daemon::ipc::{DaemonRequest, DaemonResult};
 use wroid_daemon::DaemonSessionManager;
 #[cfg(test)]
 use wroid_runtime::{
-    DisplayInfo, PreparedSession, RuntimeControlAction, RuntimeControlPlan, SessionId,
+    DisplayInfo, HostKeyName, LayerId, PreparedSession, RuntimeControlAction, RuntimeControlPlan,
+    SessionId,
 };
 
 use crate::output;
@@ -113,11 +114,21 @@ fn render_prepared(
     );
     let _ = writeln!(output, "Controls ({}):", plan.controls.len());
     for control in &plan.controls {
+        let layer = if control.layer == LayerId::BASE {
+            "base"
+        } else {
+            plan.layers
+                .iter()
+                .find(|layer| layer.id == control.layer)
+                .map(|layer| layer.name.as_str())
+                .unwrap_or("unknown")
+        };
         let _ = writeln!(
             output,
-            "  {} [{}] -> {}",
+            "  {} [layer:{} {}] -> {}",
             control.name,
-            describe_input(&control.input),
+            layer,
+            describe_input(&control.input, control.modifier),
             describe_action(&control.action),
         );
     }
@@ -125,8 +136,8 @@ fn render_prepared(
 }
 
 #[cfg(test)]
-fn describe_input(input: &InputV2) -> String {
-    match input {
+fn describe_input(input: &InputV2, modifier: Option<HostKeyName>) -> String {
+    let input = match input {
         InputV2::Key { key } => format!("key:{key}"),
         InputV2::KeyCluster {
             up,
@@ -136,6 +147,10 @@ fn describe_input(input: &InputV2) -> String {
         } => format!("key_cluster:{up}{left}{down}{right}"),
         InputV2::MouseButton { button } => format!("mouse_button:{button}"),
         InputV2::MouseMove => "mouse_move".to_owned(),
+    };
+    match modifier {
+        Some(modifier) => format!("{}+{input}", modifier.profile_name()),
+        None => input,
     }
 }
 
@@ -175,7 +190,9 @@ fn describe_action(action: &RuntimeControlAction) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wroid_core::profile_v2::{ActionV2, BindingV2, NormalizedPoint, NormalizedRect};
+    use wroid_core::profile_v2::{
+        ActionV2, BindingV2, LayerActivation, LayerV2, NormalizedPoint, NormalizedRect,
+    };
 
     fn supported_profile() -> ProfileV2 {
         ProfileV2 {
@@ -257,12 +274,12 @@ mod tests {
         assert!(summary.contains("Resolution: 1920x1080"));
         assert!(summary.contains("Controls (3):"));
         assert!(summary.contains(
-            "movement [key_cluster:wasd] -> virtual_joystick center=(345,842) radius=97 dead_zone=22 contact=1"
+            "movement [layer:base key_cluster:wasd] -> virtual_joystick center=(345,842) radius=97 dead_zone=22 contact=1"
         ));
         assert!(summary.contains(
-            "aim [mouse_move] -> mouse_aim origin=(1247,485) region=(672,65)-(1823,906) contacts=2/3 toggle=tab"
+            "aim [layer:base mouse_move] -> mouse_aim origin=(1247,485) region=(672,65)-(1823,906) contacts=2/3 toggle=tab"
         ));
-        assert!(summary.contains("fire [mouse_button:left] -> hold (1650,540)"));
+        assert!(summary.contains("fire [layer:base mouse_button:left] -> hold (1650,540)"));
     }
 
     #[test]
@@ -271,6 +288,33 @@ mod tests {
             prepare_v2_summary(supported_profile(), resolution(), "shooter", false).unwrap();
 
         assert!(summary.contains("Launch package: false"));
+    }
+
+    #[test]
+    fn prepared_summary_names_base_layer_and_modifier_chords() {
+        let mut profile = supported_profile();
+        profile.layers.push(LayerV2 {
+            name: "grenades".to_owned(),
+            activation: LayerActivation::Hold {
+                key: "g".to_owned(),
+            },
+        });
+        profile.bindings.push(BindingV2 {
+            name: "frag".to_owned(),
+            layer: Some("grenades".to_owned()),
+            modifier: Some("shift".to_owned()),
+            input: InputV2::Key {
+                key: "1".to_owned(),
+            },
+            action: ActionV2::Tap {
+                point: NormalizedPoint { x: 0.7, y: 0.3 },
+            },
+        });
+
+        let summary = prepare_v2_summary(profile, resolution(), "layered", true).unwrap();
+
+        assert!(summary.contains("movement [layer:base key_cluster:wasd]"));
+        assert!(summary.contains("frag [layer:grenades shift+key:1] -> tap (1343,324)"));
     }
 
     #[test]

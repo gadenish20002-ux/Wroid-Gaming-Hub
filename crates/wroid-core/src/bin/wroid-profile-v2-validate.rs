@@ -4,7 +4,7 @@ use std::io;
 use std::path::PathBuf;
 
 use wroid_core::profile_v2::{
-    materialize_axis, materialize_dead_zone, materialize_radius, ActionV2, ProfileV2,
+    materialize_axis, materialize_dead_zone, materialize_radius, ActionV2, BindingV2, ProfileV2,
 };
 use wroid_core::{Point, Resolution};
 
@@ -102,8 +102,21 @@ fn parse_dimension(value: Option<String>, label: &str) -> Result<u32, io::Error>
 fn print_materialized_bindings(profile: &ProfileV2, resolution: Resolution) {
     println!("Materialized coordinates for {resolution}:");
     for binding in &profile.bindings {
-        print_materialized_action(&binding.name, &binding.action, resolution, 1);
+        print_materialized_action(
+            &format!("{} [{}]", binding.name, binding_context(binding)),
+            &binding.action,
+            resolution,
+            1,
+        );
     }
+}
+
+fn binding_context(binding: &BindingV2) -> String {
+    format!(
+        "layer={} modifier={}",
+        binding.layer.as_deref().unwrap_or("base"),
+        binding.modifier.as_deref().unwrap_or("none")
+    )
 }
 
 fn print_materialized_action(label: &str, action: &ActionV2, resolution: Resolution, depth: usize) {
@@ -167,6 +180,7 @@ fn print_usage() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wroid_core::profile_v2::{BindingV2, InputV2, NormalizedPoint};
 
     #[test]
     fn parses_materialize_dimensions() {
@@ -200,5 +214,27 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("greater than zero"));
+    }
+
+    #[test]
+    fn materialized_binding_context_names_layer_and_modifier() {
+        let binding = BindingV2 {
+            name: "frag".to_owned(),
+            layer: Some("grenades".to_owned()),
+            modifier: Some("shift".to_owned()),
+            input: InputV2::Key {
+                key: "1".to_owned(),
+            },
+            action: ActionV2::Tap {
+                point: NormalizedPoint { x: 0.7, y: 0.3 },
+            },
+        };
+
+        assert_eq!(binding_context(&binding), "layer=grenades modifier=shift");
+
+        let mut base = binding;
+        base.layer = None;
+        base.modifier = None;
+        assert_eq!(binding_context(&base), "layer=base modifier=none");
     }
 }

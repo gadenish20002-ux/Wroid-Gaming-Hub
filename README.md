@@ -265,6 +265,43 @@ Key, directional-cluster, and mouse-aim toggle cells capture the next physical
 key directly, including arrows, Tab, Escape, and modifiers. Backspace clears an
 optional aim toggle. Unsupported keys are rejected before they can enter the
 profile, and F12 remains reserved for releasing captured devices during play.
+Use the layer rail to add Base overrides or named Hold/Toggle maps, select the
+layer before placing controls, and capture an optional modifier in the binding
+inspector. The list, overlay, validation, and **Test inputs** preview follow the
+selected layer. For example, `G` can expose grenade slots while `Shift+R`
+selects a separate fire-mode action:
+
+```json
+{
+  "schema_version": 2,
+  "name": "Standoff 2 — layered",
+  "package_name": "com.axlebolt.standoff2",
+  "orientation": "landscape",
+  "layers": [
+    { "name": "grenades", "activation": { "kind": "hold", "key": "g" } }
+  ],
+  "bindings": [
+    {
+      "name": "primary_weapon",
+      "input": { "kind": "key", "key": "1" },
+      "action": { "kind": "tap", "point": { "x": 0.89, "y": 0.18 } }
+    },
+    {
+      "name": "frag",
+      "layer": "grenades",
+      "input": { "kind": "key", "key": "1" },
+      "action": { "kind": "tap", "point": { "x": 0.70, "y": 0.30 } }
+    },
+    {
+      "name": "fire_mode",
+      "modifier": "shift",
+      "input": { "kind": "key", "key": "r" },
+      "action": { "kind": "tap", "point": { "x": 0.93, "y": 0.60 } }
+    }
+  ]
+}
+```
+
 Use **Run map in Waydroid** to save the current map and open the same guarded
 game session used by the Hub, so bindings can be verified in the installed game
 before returning to the editor. Its **Session target** selector applies the same

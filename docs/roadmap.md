@@ -88,7 +88,9 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - [x] Reject non-executable input/action pairs in profile validation and only
   offer compatible input sources in Controls Studio.
 - [x] Add profile v2 runtime control plan materialization for relative mouse aim.
-- [ ] Add schema migrations, layers, modifiers, and production daemon profile wiring.
+- [x] Add profile v2 layers and modifier chords across validation, runtime
+  dispatch, Controls Studio, Hub readiness, and production session tooling.
+- [ ] Add schema migrations and finish production daemon profile wiring.
 - [x] Add a persistent virtual joystick runtime state machine.
 - [x] Wire physical WASD input to the persistent joystick in a host smoke path.
 - [x] Wire physical WASD through the temporary Waydroid bridge into Android.

@@ -33,6 +33,11 @@ The project currently supports:
   daemon-owned child processes with fixed argument construction and exit reaping.
 - Concurrent virtual joysticks, keyboard/mouse taps, sustained hold controls
   for automatic fire, and toggle mouse aim.
+- Profile v2 Hold/Toggle layers and modifier chords, with deterministic
+  highest-declared-layer and modifier-sibling precedence, continuous-action
+  reconciliation, and zero-latency Tap edges.
+- Controls Studio layer authoring, filtering, activation/modifier capture, and
+  matching input preview, plus per-profile layer readiness in the Hub.
 - SYN_REPORT-aware mouse batching plus reader-to-inject and evdev
   kernel-to-inject p50/p95/p99/max session telemetry.
 - Bounded structured last-session performance records surfaced in the Hub with
@@ -112,8 +117,11 @@ The project currently supports:
 
 ## Acceptance Gates
 
-- `cargo fmt`
-- `cargo test --workspace`
+- `cargo fmt --all -- --check`
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- `cargo test --workspace --all-features`
+- `node --check` for repository JavaScript and focused JavaScript model tests.
 - Example profiles validate.
+- `git diff --check` is clean.
 - Existing CLI behavior remains compatible.
 - New behavior has focused unit coverage.

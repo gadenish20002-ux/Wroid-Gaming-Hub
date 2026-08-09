@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
-use wroid_core::profile_v2::{ActionV2, ProfileV2};
+use wroid_core::profile_v2::{ActionV2, LayerActivation, ProfileV2};
 use wroid_input::{discover_keyboard_devices, discover_mouse_devices, InputDeviceInfo};
 
 use crate::backend::InputExecutor;
@@ -28,6 +28,7 @@ use super::terminal::spawn_terminal;
 
 const INDEX_HTML: &str = include_str!("../../assets/hub/index.html");
 const STYLES_CSS: &str = include_str!("../../assets/hub/styles.css");
+const CONTROL_CHIPS_JS: &str = include_str!("../../assets/hub/control-chips.js");
 const APP_JS: &str = include_str!("../../assets/hub/app.js");
 const MAX_HEADER_BYTES: usize = 32 * 1024;
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
@@ -467,29 +468,7 @@ fn build_state(directory: &Path) -> Result<Value> {
 
     let games = profiles
         .iter()
-        .map(|entry| {
-            let (taps, holds, joysticks, mouse_aim) = control_counts(&entry.profile);
-            let calibration = calibration_json(&entry.path);
-            json!({
-                "id": entry.id,
-                "name": display_name(&entry.profile.name),
-                "package": entry.profile.package_name,
-                "path": entry.path,
-                "kind": game_kind(&entry.profile.package_name),
-                "description": game_description(&entry.profile.package_name),
-                "bindings": entry.profile.bindings.len(),
-                "controls": {
-                    "taps": taps,
-                    "holds": holds,
-                    "joysticks": joysticks,
-                    "mouseAim": mouse_aim,
-                },
-                "calibration": calibration,
-                "installed": installed_packages.as_ref().map(|packages| {
-                    packages.iter().any(|package| package == &entry.profile.package_name)
-                }),
-            })
-        })
+        .map(|entry| library_game_json(entry, installed_packages.as_deref()))
         .collect::<Vec<_>>();
 
     let keyboard =
@@ -640,8 +619,49 @@ fn input_devices_json(result: std::result::Result<Vec<InputDeviceInfo>, String>)
     }
 }
 
-fn control_counts(profile: &ProfileV2) -> (usize, usize, usize, usize) {
-    profile
+fn library_game_json(entry: &LibraryProfile, installed_packages: Option<&[String]>) -> Value {
+    let (taps, holds, joysticks, mouse_aim, layers) = control_counts(&entry.profile);
+    let layer_metadata = entry
+        .profile
+        .layers
+        .iter()
+        .map(|layer| {
+            let (mode, key) = match &layer.activation {
+                LayerActivation::Hold { key } => ("hold", key),
+                LayerActivation::Toggle { key } => ("toggle", key),
+            };
+            json!({
+                "name": layer.name,
+                "mode": mode,
+                "key": key,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "id": entry.id,
+        "name": display_name(&entry.profile.name),
+        "package": entry.profile.package_name,
+        "path": entry.path,
+        "kind": game_kind(&entry.profile.package_name),
+        "description": game_description(&entry.profile.package_name),
+        "bindings": entry.profile.bindings.len(),
+        "layers": layer_metadata,
+        "controls": {
+            "layers": layers,
+            "taps": taps,
+            "holds": holds,
+            "joysticks": joysticks,
+            "mouseAim": mouse_aim,
+        },
+        "calibration": calibration_json(&entry.path),
+        "installed": installed_packages.map(|packages| {
+            packages.iter().any(|package| package == &entry.profile.package_name)
+        }),
+    })
+}
+
+fn control_counts(profile: &ProfileV2) -> (usize, usize, usize, usize, usize) {
+    let action_counts = profile
         .bindings
         .iter()
         .fold((0, 0, 0, 0), |mut counts, binding| {
@@ -653,7 +673,14 @@ fn control_counts(profile: &ProfileV2) -> (usize, usize, usize, usize) {
                 ActionV2::Macro { .. } => {}
             }
             counts
-        })
+        });
+    (
+        action_counts.0,
+        action_counts.1,
+        action_counts.2,
+        action_counts.3,
+        profile.layers.len(),
+    )
 }
 
 fn game_kind(package: &str) -> &'static str {
@@ -1318,6 +1345,7 @@ fn handle_request(
 
     match (request.method.as_str(), route) {
         ("GET", "/styles.css") => (Response::css(STYLES_CSS), false),
+        ("GET", "/control-chips.js") => (Response::javascript(CONTROL_CHIPS_JS), false),
         ("GET", "/app.js") => (Response::javascript(APP_JS), false),
         ("GET", "/") if authorized => (Response::html(INDEX_HTML), false),
         ("GET", "/api/state") if authorized => match build_state(directory) {
@@ -1996,6 +2024,7 @@ mod tests {
 
     use super::*;
     use wroid_android::{AbiCompatibility, PackageFormat, PackageInspection};
+    use wroid_core::profile_v2::{LayerActivation, LayerV2};
 
     fn write_minimal_apk(path: &Path) {
         const LOCAL: u32 = 0x0403_4b50;
@@ -2564,6 +2593,58 @@ mod tests {
             ProfileV2::load_from_path(path).unwrap().name,
             "My PUBG layout"
         );
+    }
+
+    #[test]
+    fn layered_profile_state_exposes_readiness_metadata_and_counts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("layered.json");
+        let mut profile: ProfileV2 = serde_json::from_str(STARTER_PROFILES[0].source).unwrap();
+        profile.layers.push(LayerV2 {
+            name: "grenades".to_owned(),
+            activation: LayerActivation::Hold {
+                key: "x".to_owned(),
+            },
+        });
+        let entry = LibraryProfile {
+            id: "layered".to_owned(),
+            path,
+            profile,
+        };
+
+        let state = library_game_json(&entry, None);
+
+        assert_eq!(state["bindings"], 12);
+        assert_eq!(state["controls"]["layers"], 1);
+        assert_eq!(state["controls"]["taps"], 9);
+        assert_eq!(state["controls"]["holds"], 1);
+        assert_eq!(state["controls"]["joysticks"], 1);
+        assert_eq!(state["controls"]["mouseAim"], 1);
+        assert_eq!(
+            state["layers"],
+            json!([{"name": "grenades", "mode": "hold", "key": "x"}])
+        );
+    }
+
+    #[test]
+    fn untouched_starter_stays_equal_after_profile_v2_load_save_round_trip() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pubg-v2.json");
+        let original: ProfileV2 = serde_json::from_str(STARTER_PROFILES[0].source).unwrap();
+
+        assert!(original.layers.is_empty());
+        assert!(original
+            .bindings
+            .iter()
+            .all(|binding| binding.layer.is_none() && binding.modifier.is_none()));
+
+        original.save_to_path(&path).unwrap();
+        let reloaded = ProfileV2::load_from_path(&path).unwrap();
+
+        assert_eq!(reloaded, original);
+        assert!(starter_predecessors(&original)
+            .iter()
+            .all(|predecessor| predecessor.layers.is_empty()));
     }
 
     #[test]

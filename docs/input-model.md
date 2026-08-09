@@ -1,138 +1,112 @@
 # Input Model
 
-Wroid profiles describe Android actions independently from the backend used to execute them.
+Wroid separates host input capture, profile matching, Android actions, and the
+persistent Type-B touch injector. Profile v2 is used by Controls Studio and
+production `play-v2`/`launch-v2` sessions; legacy pixel-coordinate profiles keep
+their terminal runner and CLI commands.
 
-## Profile Shape
+## Inputs and actions
 
-Each profile contains:
+Profile v2 inputs are:
 
-- `name`: human-readable profile name.
-- `package_name`: Android package launched by `run` and `run-profile`.
-- `resolution`: Android surface size used when coordinates were authored.
-- `bindings`: named input/action pairs.
+- `key`: one canonical keyboard key;
+- `key_cluster`: four directional keys, normally W/A/S/D;
+- `mouse_button`: left, right, middle, side, or extra;
+- `mouse_move`: relative pointer motion for mouse aim.
 
-Binding names must be non-empty and unique within a profile.
+The executable compatibility matrix is strict:
 
-## Inputs
+- `key` or `mouse_button` -> `tap` or sustained `hold`;
+- `key_cluster` -> `virtual_joystick`;
+- `mouse_move` -> `mouse_aim`.
 
-Legacy profile inputs:
+`macro` remains a validated schema action but is not executable. Invalid pairs
+are rejected when the profile is saved or loaded instead of being ignored at
+runtime.
 
-- `key`: one keyboard key, for example `{ "kind": "key", "key": "f" }`.
-- `key_cluster`: four directional keys, for example `w/a/s/d`.
-- `mouse_button`: stored by the schema but not executed by the legacy terminal runner.
+`EvdevKeyboard` and `EvdevMouse` normalize physical events. The game-session
+runtime resolves them against a pre-materialized control plan and submits
+synchronized touch frames through the persistent injector. The shell backend is
+not used for the gaming hot path.
 
-Profile v2 prototype inputs add:
+## Layers and modifiers
 
-- `mouse_move`: relative host pointer motion for future `mouse_aim` bindings.
+Base is implicit and always available. Named layers use either a held activation
+key or a press-to-toggle activation key. Bindings may also require one modifier
+key. Layer IDs, modifier keys, physical inputs, and modifier-sibling relations
+are resolved before gameplay, so dispatch does not allocate or compare strings.
 
-Host input capture is split from profile execution:
+When several active named layers bind the same physical key or mouse button,
+the highest `LayerId` wins: this is the later layer in profile declaration
+order. If it has no binding for that input, precedence falls through to the next
+active layer and finally Base. Only one layer owns a physical input at a time;
+overlapping layers never double-fire it.
 
-- `EvdevKeyboard` normalizes physical keyboard events into profile-visible key events.
-- `EvdevMouse` normalizes relative x/y motion, wheel deltas, and mouse buttons.
-- The production daemon should own focus, leases, and grabs before forwarding host events into the runtime.
+Inside the selected layer, an available modifier binding suppresses its
+unmodified sibling for that same physical key or mouse button. For example,
+holding Shift makes `Shift+R` win over plain `R` in the same layer. Key-cluster
+suppression is evaluated per constituent key, so a chord for Shift+W does not
+silence A/S/D movement.
 
-## Actions
+Layer activation keys are consumed before normal binding dispatch. Modifier
+state is updated before reconciliation, but a modifier key may still be a normal
+binding on another physical-input path when validation permits it.
 
-Supported legacy actions:
+## Press, release, and continuous reconciliation
 
-- `tap`: emits Android input tap at one point.
-- `swipe`: emits Android input swipe from one point to another with a duration.
-- `virtual_joystick`: tracks a directional key cluster and repeatedly emits a swipe from the joystick center to a computed target point.
+Presses are gated by the layer, modifier, sibling, and selected-layer condition.
+Releases are not gated by the current condition. The runtime records active
+owners and releases a contact whenever its action key goes up or its modifier or
+layer becomes unavailable. This prevents stuck touches when events arrive in
+the order `Shift down`, `W down`, `Shift up`, `W up`.
 
-Profile v2 prototype actions:
+For continuous `hold` and hold-mode `virtual_joystick` actions, every relevant
+key, modifier, or layer state change computes the complete desired state. Stale
+contacts and joystick directions are released or neutralized first; replacement
+Base/lower-layer actions start afterward. Consequently a key already held can
+move cleanly between modifier or layer owners without simultaneous contacts.
+Toggle joysticks change only on a physical press edge and neutralize when their
+binding becomes unavailable.
 
-- `tap`
-- `hold`: keeps one Android contact down until the physical key or mouse button
-  is released.
-- `virtual_joystick`
-- `mouse_aim`
-- `macro`
+`tap` is intentionally a zero-latency edge action. A modifier must already be
+held when the action key is pressed for the chorded tap to fire. Wroid does not
+delay an unmodified tap waiting for a possible chord, and it does not refire a
+tap merely because a modifier or layer changes while the action key remains
+held. Release the action key and press it again under the desired scope.
 
-Tap, hold, virtual joystick, and mouse aim execute in production `play-v2`
-sessions. Macros remain unsupported.
+On focus loss, F12 release, stop, or failure, suspension best-effort cancels all
+contacts, neutralizes joysticks, and clears held keys, modifiers, toggled layers,
+and binding ownership before capture can resume.
 
-Production bindings use a strict executable compatibility matrix:
+## Mouse aim
 
-- `key` or `mouse_button` → `tap` or `hold`;
-- `key_cluster` → `virtual_joystick`;
-- `mouse_move` → `mouse_aim`.
+Mouse aim is deliberately always live regardless of selected layer or held
+modifier. Its own optional `toggle_key` controls enablement, and right mouse ADS
+scaling remains independent of profile layers. Validation therefore rejects
+`modifier` on `mouse_move`; layer selection never gates motion dispatch.
 
-Profile validation rejects every mismatched input/action pair instead of allowing
-the runtime to ignore it.
+Relative motion applies sensitivity, ADS scaling, sub-pixel accumulation,
+aim-region constraints, and recentering before submitting stateful touch frames.
+Normalized mouse events include x/y motion, horizontal/vertical wheel deltas,
+and all five supported mouse buttons.
 
-## Virtual Joystick
+## Virtual joystick
 
-A virtual joystick binding stores:
+A profile v2 joystick stores normalized center/radius geometry, a dead zone,
+Hold or Toggle mode, and optional reaffirm interval. Opposite directions cancel
+on each axis, and diagonals are normalized so the target remains on the joystick
+radius. Up is negative y; down is positive y; left is negative x; right is
+positive x.
 
-- `center`: Android coordinate for the joystick center.
-- `radius`: maximum movement distance.
-- `tick_ms`: how often to emit movement while held.
-- `swipe_duration_ms`: duration sent to Android `input swipe`.
+## Legacy coordinate scaling
 
-Direction vector rules:
+Legacy profiles store an authored pixel resolution. Tap/swipe endpoints and
+joystick centers scale by axis; joystick radius uses the average horizontal and
+vertical scale because it is a scalar. `--scale-to-current` remains available
+for the legacy `play`, `run`, `run-profile`, and `binding run` paths.
 
-- Up moves toward negative y.
-- Down moves toward positive y.
-- Left moves toward negative x.
-- Right moves toward positive x.
-- Opposite directions cancel on the same axis.
-- Diagonals are normalized so the target remains on the joystick radius instead of exceeding it.
-
-Example:
-
-```json
-{
-  "name": "movement",
-  "input": {
-    "kind": "key_cluster",
-    "up": "w",
-    "left": "a",
-    "down": "s",
-    "right": "d"
-  },
-  "action": {
-    "kind": "virtual_joystick",
-    "center": { "x": 320, "y": 640 },
-    "radius": 120,
-    "tick_ms": 80,
-    "swipe_duration_ms": 70
-  }
-}
-```
-
-## Relative Mouse Capture
-
-The relative mouse capture path is validated with:
-
-```sh
-cargo run -p wroid-input --bin wroid-mouse-capture -- /dev/input/event7 --max-events 20
-```
-
-Normalized events include:
-
-- relative motion: `dx`, `dy`;
-- wheel deltas: vertical and horizontal;
-- mouse buttons: left, right, middle, side, extra.
-
-Production sessions map `mouse_move` to `mouse_aim`, apply profile sensitivity
-and aim-region constraints, and emit stateful touch frames through `TouchEngine`
-and the persistent Type-B injector. The shell compatibility backend is not used
-for gaming mouse aim.
-
-## Coordinate Scaling
-
-Profiles can be scaled to another Android surface resolution.
-
-- Tap points scale by x/y axis.
-- Swipe endpoints scale by x/y axis.
-- Virtual joystick centers scale by x/y axis.
-- Virtual joystick radius uses the average of the horizontal and vertical scale factors because it is a single scalar.
-
-Use `--scale-to-current` on `play`, `run`, `run-profile`, or `binding run` when the current Waydroid surface differs from the profile's authored resolution.
-
-## Current Limitations
+## Remaining limitations
 
 - The legacy terminal runner still requires terminal focus.
-- Production global input capture is not daemon-managed yet.
-- Profile v2 is the production format for Hub and Controls Studio sessions.
-- Macros are not implemented in the runtime.
+- Remaining direct CLI execution paths are not all daemon-owned.
+- Macro execution and physical/virtual gamepad mapping are not implemented.

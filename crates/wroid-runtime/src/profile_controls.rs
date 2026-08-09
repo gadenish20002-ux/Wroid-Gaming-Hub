@@ -158,6 +158,11 @@ impl HostKeyName {
     pub const fn bit(self) -> u64 {
         1_u64 << self.index()
     }
+
+    /// Canonical spelling used by profile v2 JSON and human-readable reports.
+    pub fn profile_name(self) -> &'static str {
+        Self::PROFILE_NAMES[usize::from(self.index())].0
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1034,5 +1039,12 @@ mod tests {
             RuntimePhysicalInput::MouseButton(HostMouseButton::Left),
             ModifierMask::from_key(HostKeyName::Shift),
         ));
+    }
+
+    #[test]
+    fn resolved_host_keys_keep_their_profile_spelling() {
+        for (input, expected) in [("0", "0"), ("r", "r"), ("Shift", "shift"), ("esc", "esc")] {
+            assert_eq!(HostKeyName::parse(input).unwrap().profile_name(), expected);
+        }
     }
 }

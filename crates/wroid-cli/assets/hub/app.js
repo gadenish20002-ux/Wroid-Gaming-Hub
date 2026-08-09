@@ -522,12 +522,7 @@ function renderLibrary() {
       description.textContent = game.description;
       const controls = document.createElement("div");
       controls.className = "card-controls";
-      controls.append(
-        label(`${game.controls.taps} taps`),
-        label(`${game.controls.holds} holds`),
-        label(`${game.controls.joysticks} sticks`),
-        label(game.controls.mouseAim ? "mouse aim" : "no mouse aim"),
-      );
+      controls.append(...window.WroidHubControlChips.controlChipLabels(game).map(label));
       bottom.append(title, description, controls);
       card.append(top, bottom);
       card.addEventListener("click", () => selectGame(game.id));

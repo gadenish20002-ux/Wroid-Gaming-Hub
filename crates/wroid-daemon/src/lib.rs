@@ -341,9 +341,12 @@ mod tests {
             name: "Shooter v2".to_owned(),
             package_name: "com.example.shooter".to_owned(),
             orientation: Default::default(),
+            layers: Vec::new(),
             bindings: vec![
                 BindingV2 {
                     name: "movement".to_owned(),
+                    layer: None,
+                    modifier: None,
                     input: InputV2::KeyCluster {
                         up: "w".to_owned(),
                         left: "a".to_owned(),
@@ -360,6 +363,8 @@ mod tests {
                 },
                 BindingV2 {
                     name: "fire".to_owned(),
+                    layer: None,
+                    modifier: None,
                     input: InputV2::MouseButton {
                         button: "left".to_owned(),
                     },
