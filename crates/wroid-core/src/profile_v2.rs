@@ -101,14 +101,13 @@ impl ProfileV2 {
         }
 
         for binding in &self.bindings {
-            if binding.layer.is_none()
-                && binding.modifier.is_none()
-                && matches!(&binding.input, InputV2::Key { key } if activation_keys.contains(&canonical_key(key)))
-            {
-                if let InputV2::Key { key } = &binding.input {
-                    errors.push(format!(
-                        "layer activation key {key} cannot be used by a base-layer binding"
-                    ));
+            if binding.layer.is_none() && binding.modifier.is_none() {
+                for key in binding_input_keys(&binding.input) {
+                    if activation_keys.contains(&canonical_key(key)) {
+                        errors.push(format!(
+                            "layer activation key {key} cannot be used by a base-layer binding"
+                        ));
+                    }
                 }
             }
         }
@@ -171,14 +170,15 @@ impl ProfileV2 {
             let scope_layer = binding.layer.as_deref().unwrap_or("base");
             let scope_modifier = binding.modifier.as_deref().map(canonical_key);
             let mut binding_keys = HashSet::new();
-            for key in binding_input_keys(&binding.input) {
+            for (key, input_kind) in binding_scope_input_keys(&binding.input) {
                 let canonical_key = canonical_key(key);
-                if !binding_keys.insert(canonical_key.clone()) {
+                if !binding_keys.insert((input_kind, canonical_key.clone())) {
                     continue;
                 }
                 if !scoped_input_keys.insert((
                     scope_layer.to_owned(),
                     scope_modifier.clone(),
+                    input_kind,
                     canonical_key.clone(),
                 )) {
                     let modifier = scope_modifier
@@ -186,10 +186,11 @@ impl ProfileV2 {
                         .map(|modifier| format!("with modifier {modifier}"))
                         .unwrap_or_else(|| "without a modifier".to_owned());
                     errors.push(format!(
-                        "key {key} drives multiple bindings in {scope_layer} layer {modifier}"
+                        "{input_kind} {key} drives multiple bindings in {scope_layer} layer {modifier}"
                     ));
                 }
-                if binding.layer.is_some()
+                if input_kind == "key"
+                    && binding.layer.is_some()
                     && layer_activation_keys.contains(&(scope_layer, canonical_key.clone()))
                 {
                     errors.push(format!(
@@ -403,6 +404,20 @@ fn binding_input_keys(input: &InputV2) -> Vec<&str> {
             right,
         } => vec![up, left, down, right],
         InputV2::MouseButton { .. } | InputV2::MouseMove => Vec::new(),
+    }
+}
+
+fn binding_scope_input_keys(input: &InputV2) -> Vec<(&str, &'static str)> {
+    match input {
+        InputV2::Key { key } => vec![(key, "key")],
+        InputV2::KeyCluster {
+            up,
+            left,
+            down,
+            right,
+        } => vec![(up, "key"), (left, "key"), (down, "key"), (right, "key")],
+        InputV2::MouseButton { button } => vec![(button, "mouse_button")],
+        InputV2::MouseMove => Vec::new(),
     }
 }
 
@@ -892,6 +907,18 @@ mod tests {
         ]);
         value["bindings"][0]["modifier"] = serde_json::json!("ctrl");
         profile_from_value(value).validate().unwrap();
+
+        let mut value = simple_profile_value();
+        value["layers"] = serde_json::json!([
+            { "name": "grenades", "activation": { "kind": "hold", "key": "g" } }
+        ]);
+        value["bindings"][0] = serde_json::json!({
+            "name": "movement",
+            "input": { "kind": "key_cluster", "up": "g", "left": "a", "down": "s", "right": "d" },
+            "action": { "kind": "virtual_joystick", "center": { "x": 0.18, "y": 0.78 }, "radius": 0.09 }
+        });
+        assert!(validation_errors(value)
+            .contains("layer activation key g cannot be used by a base-layer binding"));
     }
 
     #[test]
@@ -1004,6 +1031,63 @@ mod tests {
         let mut value = simple_profile_value();
         value["bindings"] = serde_json::json!([
             {
+                "name": "primary-fire",
+                "input": { "kind": "mouse_button", "button": "left" },
+                "action": { "kind": "tap", "point": { "x": 0.86, "y": 0.50 } }
+            },
+            {
+                "name": "secondary-fire",
+                "input": { "kind": "mouse_button", "button": "left" },
+                "action": { "kind": "tap", "point": { "x": 0.75, "y": 0.50 } }
+            }
+        ]);
+        assert!(validation_errors(value).contains(
+            "mouse_button left drives multiple bindings in base layer without a modifier"
+        ));
+
+        let mut value = simple_profile_value();
+        value["layers"] = serde_json::json!([
+            { "name": "grenades", "activation": { "kind": "hold", "key": "g" } }
+        ]);
+        value["bindings"] = serde_json::json!([
+            {
+                "name": "base-fire",
+                "input": { "kind": "mouse_button", "button": "left" },
+                "action": { "kind": "tap", "point": { "x": 0.86, "y": 0.50 } }
+            },
+            {
+                "name": "layer-fire",
+                "layer": "grenades",
+                "input": { "kind": "mouse_button", "button": "left" },
+                "action": { "kind": "tap", "point": { "x": 0.75, "y": 0.50 } }
+            },
+            {
+                "name": "shift-fire",
+                "modifier": "shift",
+                "input": { "kind": "mouse_button", "button": "left" },
+                "action": { "kind": "tap", "point": { "x": 0.65, "y": 0.50 } }
+            }
+        ]);
+        profile_from_value(value).validate().unwrap();
+
+        let mut value = simple_profile_value();
+        value["bindings"] = serde_json::json!([
+            {
+                "name": "arrow-left",
+                "input": { "kind": "key", "key": "left" },
+                "action": { "kind": "tap", "point": { "x": 0.86, "y": 0.50 } }
+            },
+            {
+                "name": "mouse-left",
+                "input": { "kind": "mouse_button", "button": "left" },
+                "action": { "kind": "tap", "point": { "x": 0.75, "y": 0.50 } }
+            }
+        ]);
+        profile_from_value(value).validate().unwrap();
+
+        let mut value = simple_profile_value();
+        value["bindings"] = serde_json::json!([
+            {
                 "name": "movement-a",
                 "input": { "kind": "key_cluster", "up": "w", "left": "a", "down": "s", "right": "d" },
                 "action": { "kind": "virtual_joystick", "center": { "x": 0.18, "y": 0.78 }, "radius": 0.09 }
@@ -1038,6 +1122,15 @@ mod tests {
         assert!(validation_errors(value).contains(
             "layer activation key g cannot be used by binding fire inside layer grenades"
         ));
+
+        let mut value = simple_profile_value();
+        value["layers"] = serde_json::json!([
+            { "name": "grenades", "activation": { "kind": "hold", "key": "left" } }
+        ]);
+        value["bindings"][0]["layer"] = serde_json::json!("grenades");
+        value["bindings"][0]["input"] =
+            serde_json::json!({ "kind": "mouse_button", "button": "left" });
+        profile_from_value(value).validate().unwrap();
     }
 
     #[test]
