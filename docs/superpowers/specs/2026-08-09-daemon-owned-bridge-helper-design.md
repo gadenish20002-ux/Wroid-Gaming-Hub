@@ -178,8 +178,11 @@ managed worker was spawned, not that Android is already ready. Existing active
 session, Stop, log, outcome, and performance displays remain valid.
 
 The public `launch-v2` command performs its existing profile, graphics,
-compatibility, and input selection preflight, sends the typed launch request to
-`wroidd`, and returns after managed spawn. Only the daemon-constructed hidden
+compatibility, and input selection preflight, then sends the typed launch
+request to `wroidd`. To preserve CLI behavior, it waits for that exact managed
+session, safely tails the private daemon-owned game log, forwards `Ctrl+C` as a
+typed Stop request, and exits with the recorded worker outcome. The Hub keeps
+its current asynchronous start response. Only the daemon-constructed hidden
 worker invocation enters the desktop restoration and input session code. The
 hidden mode requires a valid inherited bridge descriptor; invoking it manually
 must fail before uinput or Waydroid mutation.
@@ -191,11 +194,13 @@ installed.
 ## Security Invariants
 
 - The Hub, CLI, daemon, and game worker remain unprivileged.
-- Only `wroidd` executes the exact installed helper after its current ownership,
-  mode, effective-root, and staged-release checks pass. The paired staged helper
-  is derived from the daemon executable's release directory, opened without
-  following a final symlink, validated as a non-writable executable owned by the
-  desktop user, and compared byte-for-byte before activation.
+- Only `wroidd` activates the exact installed helper bridge after its current
+  ownership, mode, effective-root, and staged-release checks pass. The existing
+  side-effect-free `wroid helper status`/`--check` probe remains available. The
+  paired staged helper is derived from the daemon executable's release
+  directory, opened without following a final symlink, validated as a
+  non-writable executable owned by the desktop user, and compared byte-for-byte
+  before activation.
 - The worker receives one already-open channel, not a helper executable or a
   reusable filesystem credential.
 - No arbitrary command, executable, environment entry, package, property, or
@@ -223,6 +228,9 @@ Focused automated tests must prove:
 - combined worker and broker failures remain visible;
 - ordinary `launch-v2` routes through `wroidd` while hidden mode cannot be used
   without an inherited channel;
+- foreground CLI launch tails only the validated private log, stops its exact
+  daemon session on `Ctrl+C`, and reports the worker outcome while Hub launch
+  remains asynchronous;
 - worker-generation zero and mismatches are rejected before spawn;
 - matched daemons are reused, resource-idle stale daemons are replaced by
   authenticated pidfd signalling, and active stale daemons are never replaced;
