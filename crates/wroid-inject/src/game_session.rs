@@ -28,9 +28,12 @@ use wroid_runtime::{
 const DEFAULT_WIDTH: u32 = 1920;
 const DEFAULT_HEIGHT: u32 = 1080;
 const IDLE_POLL: Duration = Duration::from_millis(50);
-const INPUT_READER_POLL: Duration = Duration::from_millis(1);
 const INPUT_CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
 const FOCUS_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Upper bound on how long an input reader parks inside `poll`. Control
+/// commands are delivered over a channel that `poll` cannot observe, so the
+/// wait is bounded to keep capture toggles and shutdown responsive.
+const INPUT_READER_WAIT_MS: libc::c_int = 20;
 const SIGHUP: i32 = 1;
 const SIGINT: i32 = 2;
 const SIGTERM: i32 = 15;
@@ -443,6 +446,7 @@ fn spawn_keyboard_reader(
     mut captured: bool,
 ) -> Sender<InputReaderCommand> {
     let (control, commands) = mpsc::channel();
+    let keyboard_fd = keyboard.as_raw_fd();
     thread::spawn(move || loop {
         match commands.try_recv() {
             Ok(InputReaderCommand::SetCapture { enabled, reply }) => {
@@ -484,7 +488,10 @@ fn spawn_keyboard_reader(
         if had_events {
             continue;
         }
-        match commands.recv_timeout(INPUT_READER_POLL) {
+        // Park in the kernel until the device is readable. A bounded wait still
+        // lets queued control commands be observed on the next iteration.
+        wait_for_input(keyboard_fd, INPUT_READER_WAIT_MS);
+        match commands.try_recv() {
             Ok(InputReaderCommand::SetCapture { enabled, reply }) => {
                 let result = update_keyboard_capture(&mut keyboard, enabled);
                 if result.is_ok() {
@@ -492,11 +499,29 @@ fn spawn_keyboard_reader(
                 }
                 let _ = reply.send(result.map_err(|error| error.to_string()));
             }
-            Err(RecvTimeoutError::Disconnected) => return,
-            Err(RecvTimeoutError::Timeout) => {}
+            Err(mpsc::TryRecvError::Disconnected) => return,
+            Err(mpsc::TryRecvError::Empty) => {}
         }
     });
     control
+}
+
+/// Block until the evdev descriptor has readable data or the bound elapses.
+///
+/// Returning on either condition lets the reader sleep in the kernel between
+/// events instead of spinning on a fixed timer, which removes the fixed poll
+/// delay from every keystroke and mouse report.
+fn wait_for_input(fd: libc::c_int, timeout_ms: libc::c_int) {
+    let mut descriptor = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: `descriptor` is a single valid, initialized pollfd owned by this
+    // call, and the device fd stays open for the lifetime of the reader.
+    unsafe {
+        libc::poll(&mut descriptor, 1, timeout_ms);
+    }
 }
 
 fn keyboard_events_for_capture(events: Vec<HostKeyEvent>, captured: bool) -> Vec<HostKeyEvent> {
@@ -515,6 +540,7 @@ fn spawn_mouse_reader(
     mut captured: bool,
 ) -> Sender<InputReaderCommand> {
     let (control, commands) = mpsc::channel();
+    let mouse_fd = mouse.as_raw_fd();
     thread::spawn(move || loop {
         match commands.try_recv() {
             Ok(InputReaderCommand::SetCapture { enabled, reply }) => {
@@ -556,7 +582,10 @@ fn spawn_mouse_reader(
         if had_events {
             continue;
         }
-        match commands.recv_timeout(INPUT_READER_POLL) {
+        // Park in the kernel until the device is readable. A bounded wait still
+        // lets queued control commands be observed on the next iteration.
+        wait_for_input(mouse_fd, INPUT_READER_WAIT_MS);
+        match commands.try_recv() {
             Ok(InputReaderCommand::SetCapture { enabled, reply }) => {
                 let result = update_mouse_capture(&mut mouse, enabled);
                 if result.is_ok() {
@@ -564,8 +593,8 @@ fn spawn_mouse_reader(
                 }
                 let _ = reply.send(result.map_err(|error| error.to_string()));
             }
-            Err(RecvTimeoutError::Disconnected) => return,
-            Err(RecvTimeoutError::Timeout) => {}
+            Err(mpsc::TryRecvError::Disconnected) => return,
+            Err(mpsc::TryRecvError::Empty) => {}
         }
     });
     control

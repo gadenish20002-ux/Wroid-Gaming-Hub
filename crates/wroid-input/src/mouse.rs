@@ -267,6 +267,14 @@ impl EvdevMouse {
             })
     }
 
+    /// Raw evdev descriptor, exposed so a reader can block in `poll` until the
+    /// kernel has an event instead of waking on a fixed timer.
+    pub fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
+        use std::os::unix::io::AsRawFd;
+
+        self.device.as_raw_fd()
+    }
+
     pub fn grab(&mut self) -> Result<(), MouseDeviceError> {
         if self.grabbed {
             return Ok(());

@@ -48,6 +48,37 @@ the preallocated uinput buffers without a runtime heap allocation. Joystick
 bookkeeping allocates a binding key only on its first direction event after
 startup or suspension; large cleanup frames retain a heap fallback.
 
+Input readers park in `poll` on the evdev descriptor instead of waking on a
+fixed timer, so a keystroke or mouse report is picked up as soon as the kernel
+queues it rather than after a scheduling tick. The wait stays bounded because
+capture toggles and shutdown arrive over a channel that `poll` cannot observe.
+
+Scaled mouse motion carries its sub-pixel remainder across events. Integer
+division alone discards every delta smaller than the scale denominator, so any
+sensitivity below 1.0 previously dropped slow aim movement entirely; the
+accumulator keeps slow tracking proportional and makes total travel match the
+configured sensitivity. It resets on deactivation and on ADS transitions so a
+remainder captured under one scale cannot leak into another.
+
+Release builds are tuned for steady-state latency: `opt-level = 3`, fat LTO, a
+single codegen unit, and `panic = "abort"` allow inlining across the reader,
+runtime, and injector crates and remove unwinding machinery from the injection
+path.
+
+`wroid-inject-latency` measures the injection hot path alone — no evdev capture,
+no Android, no root, no device grab. It walks one contact around the virtual
+touchscreen and reports mean/p50/p95/p99/max per touch frame, flagging any frame
+over the 5 ms budget. Measured baseline on the AMD RX 6600 XT / 7.1.5-cachyos /
+KDE Wayland development host, 20 000 frames:
+
+| Build | mean | p50 | p95 | p99 | max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| release | 0.8 us | 0.7 us | 1.1 us | 1.3 us | 20.9 us |
+| dev | 1.3 us | 1.2 us | 1.6 us | 1.9 us | 117.6 us |
+
+Injection therefore consumes a negligible share of the 5 ms capture-to-inject
+budget on this host, and the release profile matters most for tail stability.
+
 ## Rendering
 
 | Metric | Initial acceptance target |

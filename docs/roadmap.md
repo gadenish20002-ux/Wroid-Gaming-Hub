@@ -48,6 +48,14 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
   and periodic reaffirm hot paths.
 - [x] Keep steady-state mouse-aim frames inline and commit validated touch state
   in place, eliminating frame/map allocation from successful MOVE dispatch.
+- [x] Preserve the sub-pixel remainder of scaled mouse motion so sensitivity
+  below 1.0 no longer discards slow aim movement.
+- [x] Wait on the evdev descriptor instead of a fixed timer, removing the
+  per-event reader poll delay.
+- [x] Tune the release profile (fat LTO, single codegen unit, abort on panic)
+  for the injection hot path.
+- [x] Measure injection-path p50/p95/p99/max on hardware with
+  `wroid-inject-latency` (release p99 1.3 us over 20 000 frames).
 - [ ] Measure kernel event timestamp-to-inject p50/p95/p99 latency on hardware.
 
 ## Phase 2: Runtime daemon and security boundary

@@ -64,6 +64,47 @@ The tool reports:
 how long the process waited for the next physical event and is mostly useful for
 sanity checks.
 
+## Injection latency (`wroid-inject-latency`)
+
+`wroid-bench-host` needs a physical keyboard and an exclusive grab, which makes
+it awkward to run repeatedly on a working desktop. `wroid-inject-latency`
+isolates the other end of the pipeline instead — the `TouchEngine` submit that
+every gameplay input ends in — and needs no root, no Waydroid session, and no
+device grab:
+
+```text
+TouchEngine submit
+  -> slot/tracking-id translation
+  -> real uinput virtual touchscreen
+```
+
+```sh
+cargo build --release --bin wroid-inject-latency
+target/release/wroid-inject-latency --samples 20000
+```
+
+It walks one contact around the surface so no frame can be skipped as a no-op,
+discards a 256-frame warm-up, then reports per-frame mean/p50/p95/p99/max and
+flags any frame over the 5 ms budget. Afterwards it holds all ten advertised
+slots simultaneously and releases them, failing loudly if the kernel does not
+accept the full advertised contact count.
+
+### Baseline
+
+Host: AMD Radeon RX 6600 XT (radeonsi, navi23), kernel 7.1.5-1-cachyos, KDE
+Plasma 6 on Wayland, 1920x1080 @ 239.66 Hz, Waydroid MAINLINE x86_64 with
+libhoudini. 20 000 frames at 1920x1080.
+
+| Build | mean | p50 | p95 | p99 | max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| release | 0.8 us | 0.7 us | 0.9 us | 1.0 us | 27.5 us |
+| dev | 1.3 us | 1.2 us | 1.6 us | 1.9 us | 117.6 us |
+
+Injection is therefore not the bottleneck on this host: it consumes roughly
+0.02% of the 5 ms capture-to-inject budget. The release profile matters mostly
+for tail stability — its maximum is about four times lower than the debug
+build's. Ten simultaneous contacts are held and released cleanly.
+
 ## Next benchmark targets
 
 1. Add daemon IPC timing once `wroidd` exists.

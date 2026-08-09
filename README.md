@@ -32,6 +32,13 @@ runtime for profile-driven Android gaming.
 - Keep steady-state relative mouse-aim dispatch allocation-free after session
   preparation; inline touch frames and in-place state commit avoid profile,
   frame, and contact-map clones per MOVE.
+- Preserve the sub-pixel remainder of scaled mouse motion, so a sensitivity or
+  ADS multiplier below 1.0 keeps slow aim tracking proportional.
+- Wait on the evdev descriptor rather than a fixed timer, removing the
+  per-event reader poll delay from keyboard and mouse capture.
+- Measure the injection hot path without root or Waydroid using
+  `wroid-inject-latency`, which reports per-frame p50/p95/p99/max against the
+  5 ms budget and verifies ten simultaneous contacts.
 - Use shipped starter profiles for Brawl Stars, Standoff 2, PUBG Mobile, and
   Free Fire. FPS starters include mouse fire/ADS, reload, movement, camera aim,
   and editable game-specific actions.
@@ -90,6 +97,25 @@ wroid desktop uninstall
 
 The development binary is `target/debug/wroid`. During development,
 `cargo run -p wroid-cli -- <command>` is equivalent.
+
+Always benchmark and play with the release build. The release profile enables
+fat LTO, a single codegen unit, and `panic = "abort"` so the reader, runtime,
+and injector crates inline into one gameplay hot path; the debug build shows a
+tail an order of magnitude worse.
+
+### Injection latency benchmark
+
+```sh
+cargo build --release --bin wroid-inject-latency
+target/release/wroid-inject-latency --samples 20000
+```
+
+This needs no root, no Waydroid session, and no device grab: it creates the
+same virtual touchscreen a production session uses, walks one contact across
+it, and reports per-frame mean/p50/p95/p99/max against the 5 ms budget. It then
+holds all ten advertised slots at once and releases them, which fails loudly if
+the kernel does not accept the full contact count. Baseline on the RX 6600 XT /
+7.1.5-cachyos / KDE Wayland development host is p99 ≈ 1 µs over 20 000 frames.
 
 ## Gaming Hub
 

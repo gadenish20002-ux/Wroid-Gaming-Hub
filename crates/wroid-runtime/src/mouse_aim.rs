@@ -54,11 +54,59 @@ impl MouseAimSensitivity {
         (i64::from(delta) * i64::from(self.numerator)) / i64::from(self.denominator)
     }
 
-    fn scale_i64(self, delta: i64) -> i64 {
-        delta
-            .saturating_mul(i64::from(self.numerator))
-            .checked_div(i64::from(self.denominator))
-            .unwrap_or_default()
+    const fn numerator(self) -> i64 {
+        self.numerator as i64
+    }
+
+    const fn denominator(self) -> i64 {
+        self.denominator as i64
+    }
+}
+
+/// Fixed-point accumulator that preserves the sub-pixel remainder of scaled
+/// mouse motion.
+///
+/// Integer division alone discards every delta smaller than the scale
+/// denominator, so a sensitivity below 1.0 silently drops slow aim movement
+/// entirely. The accumulator carries the remainder into the next event, which
+/// keeps slow tracking proportional and makes total travel match the requested
+/// sensitivity.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ScaleAccumulator {
+    carry_x: i64,
+    carry_y: i64,
+}
+
+impl ScaleAccumulator {
+    fn scale(&mut self, delta: MouseAimDelta, numerator: i64, denominator: i64) -> (i64, i64) {
+        let dx = Self::step(
+            &mut self.carry_x,
+            i64::from(delta.dx),
+            numerator,
+            denominator,
+        );
+        let dy = Self::step(
+            &mut self.carry_y,
+            i64::from(delta.dy),
+            numerator,
+            denominator,
+        );
+        (dx, dy)
+    }
+
+    fn step(carry: &mut i64, delta: i64, numerator: i64, denominator: i64) -> i64 {
+        if denominator == 0 {
+            return 0;
+        }
+        let scaled = delta.saturating_mul(numerator).saturating_add(*carry);
+        let whole = scaled / denominator;
+        *carry = scaled % denominator;
+        whole
+    }
+
+    fn reset(&mut self) {
+        self.carry_x = 0;
+        self.carry_y = 0;
     }
 }
 
@@ -327,6 +375,7 @@ pub struct MouseAimController {
     ads_active: bool,
     recenter_count: u64,
     last_reaffirm_at: Option<Duration>,
+    accumulator: ScaleAccumulator,
 }
 
 impl MouseAimController {
@@ -355,6 +404,7 @@ impl MouseAimController {
             ads_active: false,
             recenter_count: 0,
             last_reaffirm_at: None,
+            accumulator: ScaleAccumulator::default(),
         })
     }
 
@@ -402,7 +452,12 @@ impl MouseAimController {
         }
     }
 
-    pub const fn set_ads_active(&mut self, active: bool) {
+    pub fn set_ads_active(&mut self, active: bool) {
+        if self.ads_active != active {
+            // Drop the remainder captured under the previous scale so an ADS
+            // switch cannot leak accumulated motion at the new sensitivity.
+            self.accumulator.reset();
+        }
         self.ads_active = active;
     }
 
@@ -497,6 +552,7 @@ impl MouseAimController {
         }
         self.ads_active = false;
         self.last_reaffirm_at = None;
+        self.accumulator.reset();
         Ok(if changed {
             MouseAimUpdate::Deactivated
         } else {
@@ -521,19 +577,20 @@ impl MouseAimController {
         }
         self.ads_active = false;
         self.last_reaffirm_at = None;
+        self.accumulator.reset();
         Ok(changed)
     }
 
-    fn scaled_delta(&self, delta: MouseAimDelta) -> (i64, i64) {
-        let mut dx = self.aim.sensitivity.scale(delta.dx);
-        let mut dy = self.aim.sensitivity.scale(delta.dy);
+    fn scaled_delta(&mut self, delta: MouseAimDelta) -> (i64, i64) {
+        let sensitivity = self.aim.sensitivity;
+        let (mut numerator, mut denominator) = (sensitivity.numerator(), sensitivity.denominator());
         if self.ads_active {
             if let Some(multiplier) = self.settings.ads_multiplier {
-                dx = multiplier.scale_i64(dx);
-                dy = multiplier.scale_i64(dy);
+                numerator = numerator.saturating_mul(multiplier.numerator());
+                denominator = denominator.saturating_mul(multiplier.denominator());
             }
         }
-        (dx, dy)
+        self.accumulator.scale(delta, numerator, denominator)
     }
 
     fn past_recenter_threshold(&self, target: Point) -> bool {
@@ -809,6 +866,51 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn slow_motion_below_one_pixel_accumulates_instead_of_vanishing() {
+        let slow_aim = MouseAim::new(
+            ContactId::new(9),
+            Point { x: 960, y: 540 },
+            MouseAimRegion {
+                left: 640,
+                top: 240,
+                right: 1600,
+                bottom: 840,
+            },
+            resolution(),
+            // 0.6 sensitivity: every single-count delta scales below one pixel.
+            MouseAimSensitivity::new(600, 1_000).unwrap(),
+        )
+        .unwrap();
+        let mut controller = MouseAimController::new(
+            slow_aim,
+            MouseAimSettings {
+                alternate_contact_id: ContactId::new(10),
+                recenter_threshold_milli: 1_000,
+                ..MouseAimSettings::default()
+            },
+        )
+        .unwrap();
+        let mut engine = TouchEngine::new(RecordingInjector::default());
+        controller.activate(&mut engine, Duration::ZERO).unwrap();
+
+        for tick in 0..10 {
+            controller
+                .move_by(
+                    &mut engine,
+                    MouseAimDelta::new(1, 0),
+                    Duration::from_millis(tick + 1),
+                )
+                .unwrap();
+        }
+
+        // Ten counts at 0.6 must land six pixels away, not zero.
+        assert_eq!(
+            engine.state().position(ContactId::new(9)),
+            Some(Point { x: 966, y: 540 })
+        );
     }
 
     #[test]

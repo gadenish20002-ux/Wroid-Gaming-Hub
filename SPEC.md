@@ -40,6 +40,14 @@ The project currently supports:
   matching input preview, plus per-profile layer readiness in the Hub.
 - SYN_REPORT-aware mouse batching plus reader-to-inject and evdev
   kernel-to-inject p50/p95/p99/max session telemetry.
+- Sub-pixel-accurate mouse aim: scaled motion carries its remainder across
+  events, so sensitivity below 1.0 and ADS multipliers keep slow tracking
+  proportional instead of discarding it.
+- Descriptor-driven input readers that park in `poll` on the evdev device
+  instead of waking on a fixed timer.
+- Latency-tuned release profile (fat LTO, single codegen unit, abort on panic)
+  and a rootless `wroid-inject-latency` benchmark that reports injection
+  p50/p95/p99/max and verifies ten simultaneous contacts.
 - Bounded structured last-session performance records surfaced in the Hub with
   input/kernel p95, touch-frame count, peak contacts, and 5 ms budget warning.
 - Automatic Waydroid focus protection on KDE Plasma 6 plus an F12 manual

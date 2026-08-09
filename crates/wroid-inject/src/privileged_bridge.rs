@@ -550,8 +550,7 @@ mod tests {
         assert_eq!(command.get_program(), "/usr/bin/lxc-unfreeze");
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
-            ["-P", "/var/lib/waydroid/lxc", "-n", "waydroid"]
-                .map(std::ffi::OsStr::new)
+            ["-P", "/var/lib/waydroid/lxc", "-n", "waydroid"].map(std::ffi::OsStr::new)
         );
 
         assert!(waydroid_status_is_frozen("FROZEN\n"));
@@ -655,16 +654,14 @@ mod tests {
         assert_eq!(command.get_program(), "/usr/bin/lxc-info");
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
-            ["-P", "/var/lib/waydroid/lxc", "-n", "waydroid", "-sH"]
-                .map(std::ffi::OsStr::new)
+            ["-P", "/var/lib/waydroid/lxc", "-n", "waydroid", "-sH"].map(std::ffi::OsStr::new)
         );
 
         let command = lxc_stop_command();
         assert_eq!(command.get_program(), "/usr/bin/lxc-stop");
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
-            ["-P", "/var/lib/waydroid/lxc", "-n", "waydroid", "-k"]
-                .map(std::ffi::OsStr::new)
+            ["-P", "/var/lib/waydroid/lxc", "-n", "waydroid", "-k"].map(std::ffi::OsStr::new)
         );
         let environment = command
             .get_envs()
