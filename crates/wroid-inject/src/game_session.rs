@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::io::{self, BufRead, BufReader};
 use std::os::unix::net::UnixStream;
@@ -19,8 +19,9 @@ use wroid_core::{Point, Resolution};
 use wroid_input::mouse::{EvdevMouse, MouseButtonTransition, MouseEvent, RelativeMouseMotion};
 use wroid_input::{EvdevKeyboard, HostKey, HostKeyEvent, KeyTransition};
 use wroid_runtime::{
-    ContactId, DirectionalInput, MouseAimController, MouseAimDelta, MouseAimUpdate,
-    RuntimeControlAction, RuntimeControlPlan, TouchEngine, TouchEvent, TouchFrame,
+    ContactId, DirectionalInput, HostKeyName, HostMouseButton, LayerId, LayerMode, ModifierMask,
+    MouseAimController, MouseAimDelta, MouseAimUpdate, RuntimeControlAction, RuntimeControlBinding,
+    RuntimeControlPlan, RuntimePhysicalInput, TouchEngine, TouchEvent, TouchFrame,
     TouchInjectionError, TouchInjector, TouchPhase,
 };
 
@@ -34,6 +35,7 @@ const SIGHUP: i32 = 1;
 const SIGINT: i32 = 2;
 const SIGTERM: i32 = 15;
 const SIGNAL_ERROR: usize = usize::MAX;
+const PHYSICAL_INPUT_COUNT: usize = 51;
 
 static INTERRUPT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -854,13 +856,64 @@ fn run_event_loop<I: TouchInjector>(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolvedControlInput {
+    Key(HostKeyName),
+    KeyCluster {
+        up: HostKeyName,
+        left: HostKeyName,
+        down: HostKeyName,
+        right: HostKeyName,
+    },
+    MouseButton(HostMouseButton),
+    MouseMove,
+}
+
+impl ResolvedControlInput {
+    fn from_profile(input: &InputV2) -> Option<Self> {
+        match input {
+            InputV2::Key { key } => HostKeyName::parse(key).map(Self::Key),
+            InputV2::KeyCluster {
+                up,
+                left,
+                down,
+                right,
+            } => Some(Self::KeyCluster {
+                up: HostKeyName::parse(up)?,
+                left: HostKeyName::parse(left)?,
+                down: HostKeyName::parse(down)?,
+                right: HostKeyName::parse(right)?,
+            }),
+            InputV2::MouseButton { button } => parse_mouse_button(button).map(Self::MouseButton),
+            InputV2::MouseMove => Some(Self::MouseMove),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LayerControl {
+    mask: u64,
+    mode: LayerMode,
+}
+
 struct UnifiedRuntime<I: TouchInjector> {
     plan: RuntimeControlPlan,
     engine: TouchEngine<I>,
-    directions: BTreeMap<String, DirectionalInput>,
-    point_contacts: BTreeMap<String, ContactId>,
-    aim_controllers: BTreeMap<String, MouseAimController>,
-    last_joystick_frame: BTreeMap<String, Duration>,
+    control_inputs: Vec<ResolvedControlInput>,
+    layer_controls: [Option<LayerControl>; 46],
+    directions: Vec<DirectionalInput>,
+    desired_directions: Vec<DirectionalInput>,
+    active_bindings: Vec<bool>,
+    desired_bindings: Vec<bool>,
+    selected_input_layers: [Option<LayerId>; PHYSICAL_INPUT_COUNT],
+    point_contacts: Vec<Option<ContactId>>,
+    aim_controllers: Vec<Option<MouseAimController>>,
+    aim_toggle_keys: Vec<Option<HostKeyName>>,
+    last_joystick_frame: Vec<Option<Duration>>,
+    active_layers: u64,
+    held_keys: ModifierMask,
+    held_modifiers: ModifierMask,
+    held_mouse_buttons: u8,
     started_at: Instant,
     pipeline_latencies: Vec<Duration>,
     kernel_latencies: Vec<Duration>,
@@ -870,6 +923,8 @@ struct UnifiedRuntime<I: TouchInjector> {
 
 impl<I: TouchInjector> UnifiedRuntime<I> {
     fn new(plan: RuntimeControlPlan, injector: I, trace_input: bool) -> GameSessionResult<Self> {
+        const MAX_LATENCY_SAMPLES: usize = 100_000;
+
         let mut next_contact = plan
             .controls
             .iter()
@@ -887,33 +942,69 @@ impl<I: TouchInjector> UnifiedRuntime<I> {
             .max()
             .unwrap_or(0)
             .saturating_add(1);
-        let mut point_contacts = BTreeMap::new();
-        let mut aim_controllers = BTreeMap::new();
+        let control_count = plan.controls.len();
+        let mut control_inputs = Vec::with_capacity(control_count);
+        let mut point_contacts = Vec::with_capacity(control_count);
+        let mut aim_controllers = Vec::with_capacity(control_count);
+        let mut aim_toggle_keys = Vec::with_capacity(control_count);
         for control in &plan.controls {
+            control_inputs.push(
+                ResolvedControlInput::from_profile(&control.input).ok_or_else(|| {
+                    io::Error::other("validated control input did not resolve at runtime")
+                })?,
+            );
             if matches!(
                 control.action,
                 RuntimeControlAction::Tap { .. } | RuntimeControlAction::Hold { .. }
             ) {
-                point_contacts.insert(control.name.clone(), ContactId::new(next_contact));
+                point_contacts.push(Some(ContactId::new(next_contact)));
                 next_contact = next_contact.saturating_add(1);
+            } else {
+                point_contacts.push(None);
             }
             if let RuntimeControlAction::MouseAim { aim, settings } = &control.action {
-                aim_controllers.insert(
-                    control.name.clone(),
-                    MouseAimController::new(aim.clone(), settings.clone())?,
-                );
+                aim_controllers.push(Some(MouseAimController::new(
+                    aim.clone(),
+                    settings.clone(),
+                )?));
+                aim_toggle_keys.push(settings.toggle_key.as_deref().and_then(HostKeyName::parse));
+            } else {
+                aim_controllers.push(None);
+                aim_toggle_keys.push(None);
             }
         }
+
+        let mut layer_controls = [None; 46];
+        for layer in &plan.layers {
+            let mask = layer_mask_bit(layer.id)
+                .ok_or_else(|| io::Error::other("declared runtime layer id is out of range"))?;
+            layer_controls[usize::from(layer.activation_key.index())] = Some(LayerControl {
+                mask,
+                mode: layer.mode,
+            });
+        }
+
         Ok(Self {
             plan,
             engine: TouchEngine::new(injector),
-            directions: BTreeMap::new(),
+            control_inputs,
+            layer_controls,
+            directions: vec![DirectionalInput::default(); control_count],
+            desired_directions: vec![DirectionalInput::default(); control_count],
+            active_bindings: vec![false; control_count],
+            desired_bindings: vec![false; control_count],
+            selected_input_layers: [None; PHYSICAL_INPUT_COUNT],
             point_contacts,
             aim_controllers,
-            last_joystick_frame: BTreeMap::new(),
+            aim_toggle_keys,
+            last_joystick_frame: vec![None; control_count],
+            active_layers: 0,
+            held_keys: ModifierMask::EMPTY,
+            held_modifiers: ModifierMask::EMPTY,
+            held_mouse_buttons: 0,
             started_at: Instant::now(),
-            pipeline_latencies: Vec::new(),
-            kernel_latencies: Vec::new(),
+            pipeline_latencies: Vec::with_capacity(MAX_LATENCY_SAMPLES),
+            kernel_latencies: Vec::with_capacity(MAX_LATENCY_SAMPLES),
             rejected_kernel_timestamps: 0,
             trace_input,
         })
@@ -921,7 +1012,7 @@ impl<I: TouchInjector> UnifiedRuntime<I> {
 
     fn start(&mut self) -> GameSessionResult<()> {
         let now = self.now();
-        for controller in self.aim_controllers.values_mut() {
+        for controller in self.aim_controllers.iter_mut().flatten() {
             if controller.settings().toggle_key.is_none() {
                 controller.activate(&mut self.engine, now)?;
             }
@@ -930,114 +1021,64 @@ impl<I: TouchInjector> UnifiedRuntime<I> {
     }
 
     fn handle_keyboard(&mut self, event: HostKeyEvent) -> GameSessionResult<bool> {
-        let key = event.key.profile_name();
         let pressed = match event.transition {
             KeyTransition::Pressed => true,
             KeyTransition::Released => false,
             KeyTransition::Repeated => return Ok(false),
         };
-        let now = self.now();
-        let mut submitted = false;
-
+        let Some(key) = runtime_key(event.key) else {
+            return Ok(false);
+        };
         if pressed {
-            for (name, controller) in &mut self.aim_controllers {
-                if controller
-                    .settings()
-                    .toggle_key
-                    .as_deref()
-                    .is_some_and(|toggle| key_eq(toggle, key))
-                {
-                    let update = controller.toggle(&mut self.engine, now)?;
-                    submitted |= update != MouseAimUpdate::Ignored;
-                    if self.trace_input {
-                        println!("[trace] runtime aim binding={name} toggle={update:?}");
-                    }
-                }
+            self.held_keys.insert(key);
+        } else {
+            self.held_keys.remove(key);
+        }
+
+        let activation_consumed = if let Some(layer) = self.layer_controls[key.index() as usize] {
+            match (layer.mode, pressed) {
+                (LayerMode::Hold, true) => self.active_layers |= layer.mask,
+                (LayerMode::Hold, false) => self.active_layers &= !layer.mask,
+                (LayerMode::Toggle, true) => self.active_layers ^= layer.mask,
+                (LayerMode::Toggle, false) => {}
+            }
+            true
+        } else {
+            false
+        };
+
+        if self.plan.modifier_keys.contains(key) {
+            if pressed {
+                self.held_modifiers.insert(key);
+            } else {
+                self.held_modifiers.remove(key);
             }
         }
 
-        let controls = &self.plan.controls;
-        let directions = &mut self.directions;
-        let point_contacts = &self.point_contacts;
-        let engine = &mut self.engine;
-        let last_joystick_frame = &mut self.last_joystick_frame;
-        let trace_input = self.trace_input;
-        for control in controls {
-            match (&control.input, &control.action) {
-                (InputV2::Key { key: binding_key }, RuntimeControlAction::Tap { point })
-                    if pressed && key_eq(binding_key, key) =>
-                {
-                    tap_binding(engine, point_contacts, &control.name, *point, trace_input)?;
-                    submitted = true;
+        let now = self.now();
+        let mut submitted = self.reconcile_continuous(now)?;
+        if activation_consumed {
+            return Ok(submitted);
+        }
+
+        if pressed {
+            for index in 0..self.aim_controllers.len() {
+                if self.aim_toggle_keys[index] != Some(key) {
+                    continue;
                 }
-                (InputV2::Key { key: binding_key }, RuntimeControlAction::Hold { point })
-                    if key_eq(binding_key, key) =>
-                {
-                    submitted |= set_hold_binding(
-                        engine,
-                        point_contacts,
-                        &control.name,
-                        *point,
-                        pressed,
-                        trace_input,
-                    )?;
+                let controller = self.aim_controllers[index]
+                    .as_mut()
+                    .expect("aim toggle keys belong to aim controllers");
+                let update = controller.toggle(&mut self.engine, now)?;
+                submitted |= update != MouseAimUpdate::Ignored;
+                if self.trace_input {
+                    println!(
+                        "[trace] runtime aim binding={} toggle={update:?}",
+                        self.plan.controls[index].name
+                    );
                 }
-                (
-                    InputV2::KeyCluster {
-                        up,
-                        left,
-                        down,
-                        right,
-                    },
-                    RuntimeControlAction::VirtualJoystick { joystick, mode, .. },
-                ) => {
-                    let relevant = [up, left, down, right]
-                        .into_iter()
-                        .any(|binding| key_eq(binding, key));
-                    if !relevant {
-                        continue;
-                    }
-                    if !directions.contains_key(control.name.as_str()) {
-                        directions.insert(control.name.clone(), DirectionalInput::default());
-                    }
-                    let direction = directions
-                        .get_mut(control.name.as_str())
-                        .expect("joystick direction was initialized");
-                    let mut changed = false;
-                    match mode {
-                        JoystickMode::Hold => {
-                            changed |= update_direction(&mut direction.up, up, key, pressed);
-                            changed |= update_direction(&mut direction.left, left, key, pressed);
-                            changed |= update_direction(&mut direction.down, down, key, pressed);
-                            changed |= update_direction(&mut direction.right, right, key, pressed);
-                        }
-                        JoystickMode::Toggle if pressed => {
-                            changed |= toggle_direction(&mut direction.up, up, key);
-                            changed |= toggle_direction(&mut direction.left, left, key);
-                            changed |= toggle_direction(&mut direction.down, down, key);
-                            changed |= toggle_direction(&mut direction.right, right, key);
-                        }
-                        JoystickMode::Toggle => {}
-                    }
-                    if changed {
-                        let frame_submitted = joystick.apply(engine, *direction)?;
-                        submitted |= frame_submitted;
-                        if frame_submitted {
-                            record_joystick_frame(last_joystick_frame, &control.name, now);
-                        }
-                        if trace_input {
-                            println!(
-                                "[trace] runtime joystick binding={} contact={} direction={direction:?} submitted={} position={:?}",
-                                control.name,
-                                joystick.contact_id().get(),
-                                frame_submitted,
-                                engine.state().position(joystick.contact_id())
-                            );
-                        }
-                    }
-                }
-                _ => {}
             }
+            submitted |= self.dispatch_keyboard_press(key, now)?;
         }
         Ok(submitted)
     }
@@ -1047,66 +1088,38 @@ impl<I: TouchInjector> UnifiedRuntime<I> {
         let mut submitted = false;
         match event {
             MouseEvent::Motion(RelativeMouseMotion { dx, dy }) if dx != 0 || dy != 0 => {
-                for (name, controller) in &mut self.aim_controllers {
+                for (index, controller) in self.aim_controllers.iter_mut().enumerate() {
+                    let Some(controller) = controller else {
+                        continue;
+                    };
                     let update =
                         controller.move_by(&mut self.engine, MouseAimDelta::new(dx, dy), now)?;
                     submitted |= update != MouseAimUpdate::Ignored;
                     if self.trace_input {
                         println!(
-                            "[trace] runtime aim binding={name} delta=({dx},{dy}) update={update:?} recenter_count={}",
+                            "[trace] runtime aim binding={} delta=({dx},{dy}) update={update:?} recenter_count={}",
+                            self.plan.controls[index].name,
                             controller.recenter_count(),
                         );
                     }
                 }
             }
             MouseEvent::Button(button_event) => {
-                let button = button_event.button.profile_name();
                 let pressed = match button_event.transition {
                     MouseButtonTransition::Pressed => true,
                     MouseButtonTransition::Released => false,
                     MouseButtonTransition::Repeated => return Ok(false),
                 };
-                if button == "right" {
-                    for controller in self.aim_controllers.values_mut() {
+                let button = runtime_mouse_button(button_event.button);
+                set_mouse_button_held(&mut self.held_mouse_buttons, button, pressed);
+                if button == HostMouseButton::Right {
+                    for controller in self.aim_controllers.iter_mut().flatten() {
                         controller.set_ads_active(pressed);
                     }
                 }
-                let controls = &self.plan.controls;
-                let point_contacts = &self.point_contacts;
-                let engine = &mut self.engine;
-                let trace_input = self.trace_input;
-                for control in controls {
-                    let InputV2::MouseButton {
-                        button: binding_button,
-                    } = &control.input
-                    else {
-                        continue;
-                    };
-                    if key_eq(binding_button, button) {
-                        match &control.action {
-                            RuntimeControlAction::Tap { point } if pressed => {
-                                tap_binding(
-                                    engine,
-                                    point_contacts,
-                                    &control.name,
-                                    *point,
-                                    trace_input,
-                                )?;
-                                submitted = true;
-                            }
-                            RuntimeControlAction::Hold { point } => {
-                                submitted |= set_hold_binding(
-                                    engine,
-                                    point_contacts,
-                                    &control.name,
-                                    *point,
-                                    pressed,
-                                    trace_input,
-                                )?;
-                            }
-                            _ => {}
-                        }
-                    }
+                submitted |= self.reconcile_continuous(now)?;
+                if pressed {
+                    submitted |= self.dispatch_mouse_press(button)?;
                 }
             }
             MouseEvent::Motion(_) | MouseEvent::Wheel(_) => {}
@@ -1114,15 +1127,420 @@ impl<I: TouchInjector> UnifiedRuntime<I> {
         Ok(submitted)
     }
 
+    fn reconcile_continuous(&mut self, now: Duration) -> GameSessionResult<bool> {
+        self.refresh_selected_input_layers();
+        for index in 0..self.plan.controls.len() {
+            let control = &self.plan.controls[index];
+            let input = self.control_inputs[index];
+            self.desired_bindings[index] = false;
+            self.desired_directions[index] = DirectionalInput::default();
+            match (&control.action, input) {
+                (RuntimeControlAction::Hold { .. }, ResolvedControlInput::Key(key)) => {
+                    let physical = RuntimePhysicalInput::Key(key);
+                    self.desired_bindings[index] = self.layer_controls[key.index() as usize]
+                        .is_none()
+                        && self.held_keys.contains(key)
+                        && binding_available(
+                            control,
+                            physical,
+                            self.active_layers,
+                            self.held_modifiers,
+                            &self.selected_input_layers,
+                        );
+                }
+                (RuntimeControlAction::Hold { .. }, ResolvedControlInput::MouseButton(button)) => {
+                    let physical = RuntimePhysicalInput::MouseButton(button);
+                    self.desired_bindings[index] =
+                        mouse_button_held(self.held_mouse_buttons, button)
+                            && binding_available(
+                                control,
+                                physical,
+                                self.active_layers,
+                                self.held_modifiers,
+                                &self.selected_input_layers,
+                            );
+                }
+                (
+                    RuntimeControlAction::VirtualJoystick {
+                        mode: JoystickMode::Hold,
+                        ..
+                    },
+                    ResolvedControlInput::KeyCluster {
+                        up,
+                        left,
+                        down,
+                        right,
+                    },
+                ) => {
+                    self.desired_directions[index] = DirectionalInput {
+                        up: self.layer_controls[up.index() as usize].is_none()
+                            && self.held_keys.contains(up)
+                            && binding_available(
+                                control,
+                                RuntimePhysicalInput::Key(up),
+                                self.active_layers,
+                                self.held_modifiers,
+                                &self.selected_input_layers,
+                            ),
+                        left: self.layer_controls[left.index() as usize].is_none()
+                            && self.held_keys.contains(left)
+                            && binding_available(
+                                control,
+                                RuntimePhysicalInput::Key(left),
+                                self.active_layers,
+                                self.held_modifiers,
+                                &self.selected_input_layers,
+                            ),
+                        down: self.layer_controls[down.index() as usize].is_none()
+                            && self.held_keys.contains(down)
+                            && binding_available(
+                                control,
+                                RuntimePhysicalInput::Key(down),
+                                self.active_layers,
+                                self.held_modifiers,
+                                &self.selected_input_layers,
+                            ),
+                        right: self.layer_controls[right.index() as usize].is_none()
+                            && self.held_keys.contains(right)
+                            && binding_available(
+                                control,
+                                RuntimePhysicalInput::Key(right),
+                                self.active_layers,
+                                self.held_modifiers,
+                                &self.selected_input_layers,
+                            ),
+                    };
+                    self.desired_bindings[index] =
+                        self.desired_directions[index] != DirectionalInput::default();
+                }
+                (
+                    RuntimeControlAction::VirtualJoystick {
+                        mode: JoystickMode::Toggle,
+                        ..
+                    },
+                    ResolvedControlInput::KeyCluster {
+                        up,
+                        left,
+                        down,
+                        right,
+                    },
+                ) => {
+                    let mut desired = self.directions[index];
+                    desired.up &= binding_available(
+                        control,
+                        RuntimePhysicalInput::Key(up),
+                        self.active_layers,
+                        self.held_modifiers,
+                        &self.selected_input_layers,
+                    );
+                    desired.left &= binding_available(
+                        control,
+                        RuntimePhysicalInput::Key(left),
+                        self.active_layers,
+                        self.held_modifiers,
+                        &self.selected_input_layers,
+                    );
+                    desired.down &= binding_available(
+                        control,
+                        RuntimePhysicalInput::Key(down),
+                        self.active_layers,
+                        self.held_modifiers,
+                        &self.selected_input_layers,
+                    );
+                    desired.right &= binding_available(
+                        control,
+                        RuntimePhysicalInput::Key(right),
+                        self.active_layers,
+                        self.held_modifiers,
+                        &self.selected_input_layers,
+                    );
+                    self.desired_directions[index] = desired;
+                    self.desired_bindings[index] = desired != DirectionalInput::default();
+                }
+                _ => {}
+            }
+        }
+
+        let mut submitted = false;
+        for index in 0..self.plan.controls.len() {
+            match &self.plan.controls[index].action {
+                RuntimeControlAction::Hold { point }
+                    if self.active_bindings[index] && !self.desired_bindings[index] =>
+                {
+                    let contact_id = point_contact(self.point_contacts[index])?;
+                    submitted |= set_hold_binding(
+                        &mut self.engine,
+                        contact_id,
+                        &self.plan.controls[index].name,
+                        *point,
+                        false,
+                        self.trace_input,
+                    )?;
+                    self.active_bindings[index] = false;
+                }
+                RuntimeControlAction::VirtualJoystick { joystick, .. }
+                    if self.directions[index] != self.desired_directions[index]
+                        && self.directions[index] != DirectionalInput::default() =>
+                {
+                    let desired = self.desired_directions[index];
+                    let frame_submitted = joystick.apply(&mut self.engine, desired)?;
+                    submitted |= frame_submitted;
+                    if frame_submitted {
+                        self.last_joystick_frame[index] = Some(now);
+                    }
+                    self.directions[index] = desired;
+                    self.active_bindings[index] = desired != DirectionalInput::default();
+                    trace_joystick(
+                        self.trace_input,
+                        &self.plan.controls[index].name,
+                        joystick,
+                        desired,
+                        frame_submitted,
+                        &self.engine,
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        for index in 0..self.plan.controls.len() {
+            match &self.plan.controls[index].action {
+                RuntimeControlAction::Hold { point }
+                    if !self.active_bindings[index] && self.desired_bindings[index] =>
+                {
+                    let contact_id = point_contact(self.point_contacts[index])?;
+                    submitted |= set_hold_binding(
+                        &mut self.engine,
+                        contact_id,
+                        &self.plan.controls[index].name,
+                        *point,
+                        true,
+                        self.trace_input,
+                    )?;
+                    self.active_bindings[index] = true;
+                }
+                RuntimeControlAction::VirtualJoystick { joystick, .. }
+                    if self.directions[index] == DirectionalInput::default()
+                        && self.desired_directions[index] != DirectionalInput::default() =>
+                {
+                    let desired = self.desired_directions[index];
+                    let frame_submitted = joystick.apply(&mut self.engine, desired)?;
+                    submitted |= frame_submitted;
+                    if frame_submitted {
+                        self.last_joystick_frame[index] = Some(now);
+                    }
+                    self.directions[index] = desired;
+                    self.active_bindings[index] = true;
+                    trace_joystick(
+                        self.trace_input,
+                        &self.plan.controls[index].name,
+                        joystick,
+                        desired,
+                        frame_submitted,
+                        &self.engine,
+                    );
+                }
+                _ => {}
+            }
+        }
+        Ok(submitted)
+    }
+
+    fn refresh_selected_input_layers(&mut self) {
+        self.selected_input_layers.fill(None);
+        for (index, control) in self.plan.controls.iter().enumerate() {
+            if control.layer == LayerId::BASE {
+                continue;
+            }
+            match self.control_inputs[index] {
+                ResolvedControlInput::Key(key) => select_input_layer(
+                    &mut self.selected_input_layers,
+                    control,
+                    RuntimePhysicalInput::Key(key),
+                    self.active_layers,
+                    self.held_modifiers,
+                ),
+                ResolvedControlInput::KeyCluster {
+                    up,
+                    left,
+                    down,
+                    right,
+                } => {
+                    for key in [up, left, down, right] {
+                        select_input_layer(
+                            &mut self.selected_input_layers,
+                            control,
+                            RuntimePhysicalInput::Key(key),
+                            self.active_layers,
+                            self.held_modifiers,
+                        );
+                    }
+                }
+                ResolvedControlInput::MouseButton(button) => select_input_layer(
+                    &mut self.selected_input_layers,
+                    control,
+                    RuntimePhysicalInput::MouseButton(button),
+                    self.active_layers,
+                    self.held_modifiers,
+                ),
+                ResolvedControlInput::MouseMove => {}
+            }
+        }
+    }
+
+    fn dispatch_keyboard_press(
+        &mut self,
+        key: HostKeyName,
+        now: Duration,
+    ) -> GameSessionResult<bool> {
+        let physical = RuntimePhysicalInput::Key(key);
+        let mut submitted = false;
+        for index in 0..self.plan.controls.len() {
+            let control = &self.plan.controls[index];
+            match (self.control_inputs[index], &control.action) {
+                (ResolvedControlInput::Key(binding_key), RuntimeControlAction::Tap { point })
+                    if binding_key == key
+                        && binding_available(
+                            control,
+                            physical,
+                            self.active_layers,
+                            self.held_modifiers,
+                            &self.selected_input_layers,
+                        ) =>
+                {
+                    tap_binding(
+                        &mut self.engine,
+                        point_contact(self.point_contacts[index])?,
+                        &control.name,
+                        *point,
+                        self.trace_input,
+                    )?;
+                    submitted = true;
+                }
+                (
+                    ResolvedControlInput::KeyCluster {
+                        up,
+                        left,
+                        down,
+                        right,
+                    },
+                    RuntimeControlAction::VirtualJoystick {
+                        joystick,
+                        mode: JoystickMode::Toggle,
+                        ..
+                    },
+                ) => {
+                    let mut desired = self.directions[index];
+                    let mut changed = false;
+                    if up == key
+                        && binding_available(
+                            control,
+                            physical,
+                            self.active_layers,
+                            self.held_modifiers,
+                            &self.selected_input_layers,
+                        )
+                    {
+                        desired.up = !desired.up;
+                        changed = true;
+                    }
+                    if left == key
+                        && binding_available(
+                            control,
+                            physical,
+                            self.active_layers,
+                            self.held_modifiers,
+                            &self.selected_input_layers,
+                        )
+                    {
+                        desired.left = !desired.left;
+                        changed = true;
+                    }
+                    if down == key
+                        && binding_available(
+                            control,
+                            physical,
+                            self.active_layers,
+                            self.held_modifiers,
+                            &self.selected_input_layers,
+                        )
+                    {
+                        desired.down = !desired.down;
+                        changed = true;
+                    }
+                    if right == key
+                        && binding_available(
+                            control,
+                            physical,
+                            self.active_layers,
+                            self.held_modifiers,
+                            &self.selected_input_layers,
+                        )
+                    {
+                        desired.right = !desired.right;
+                        changed = true;
+                    }
+                    if !changed {
+                        continue;
+                    }
+                    let frame_submitted = joystick.apply(&mut self.engine, desired)?;
+                    submitted |= frame_submitted;
+                    if frame_submitted {
+                        self.last_joystick_frame[index] = Some(now);
+                    }
+                    self.directions[index] = desired;
+                    self.active_bindings[index] = desired != DirectionalInput::default();
+                    trace_joystick(
+                        self.trace_input,
+                        &control.name,
+                        joystick,
+                        desired,
+                        frame_submitted,
+                        &self.engine,
+                    );
+                }
+                _ => {}
+            }
+        }
+        Ok(submitted)
+    }
+
+    fn dispatch_mouse_press(&mut self, button: HostMouseButton) -> GameSessionResult<bool> {
+        let physical = RuntimePhysicalInput::MouseButton(button);
+        let mut submitted = false;
+        for index in 0..self.plan.controls.len() {
+            let control = &self.plan.controls[index];
+            if self.control_inputs[index] != ResolvedControlInput::MouseButton(button)
+                || !binding_available(
+                    control,
+                    physical,
+                    self.active_layers,
+                    self.held_modifiers,
+                    &self.selected_input_layers,
+                )
+            {
+                continue;
+            }
+            if let RuntimeControlAction::Tap { point } = &control.action {
+                tap_binding(
+                    &mut self.engine,
+                    point_contact(self.point_contacts[index])?,
+                    &control.name,
+                    *point,
+                    self.trace_input,
+                )?;
+                submitted = true;
+            }
+        }
+        Ok(submitted)
+    }
+
     fn tick(&mut self) -> GameSessionResult<()> {
         let now = self.now();
-        for controller in self.aim_controllers.values_mut() {
+        for controller in self.aim_controllers.iter_mut().flatten() {
             controller.tick(&mut self.engine, now)?;
         }
-        let controls = &self.plan.controls;
-        let engine = &mut self.engine;
-        let last_joystick_frame = &mut self.last_joystick_frame;
-        for control in controls {
+        for (index, control) in self.plan.controls.iter().enumerate() {
             let RuntimeControlAction::VirtualJoystick {
                 joystick,
                 reaffirm_interval: Some(interval),
@@ -1131,36 +1549,58 @@ impl<I: TouchInjector> UnifiedRuntime<I> {
             else {
                 continue;
             };
-            let Some(position) = engine.state().position(joystick.contact_id()) else {
+            let Some(position) = self.engine.state().position(joystick.contact_id()) else {
                 continue;
             };
-            if last_joystick_frame
-                .get(&control.name)
-                .is_some_and(|last| now.saturating_sub(*last) < *interval)
+            if self.last_joystick_frame[index]
+                .is_some_and(|last| now.saturating_sub(last) < *interval)
             {
                 continue;
             }
-            engine.move_contact(joystick.contact_id(), position)?;
-            record_joystick_frame(last_joystick_frame, &control.name, now);
+            self.engine.move_contact(joystick.contact_id(), position)?;
+            self.last_joystick_frame[index] = Some(now);
         }
         Ok(())
     }
 
     fn suspend(&mut self) -> GameSessionResult<()> {
         let active_before = self.engine.state().active_contact_count();
-        self.directions.clear();
-        self.last_joystick_frame.clear();
-        for controller in self.aim_controllers.values_mut() {
-            controller.cancel(&mut self.engine)?;
+        let mut cleanup_error: Option<Box<dyn Error + Send + Sync>> = None;
+        for controller in self.aim_controllers.iter_mut().flatten() {
+            if let Err(error) = controller.cancel(&mut self.engine) {
+                cleanup_error.get_or_insert_with(|| Box::new(error));
+                // `cancel` removes the controller's active contact before it
+                // submits the frame. A retry therefore performs no injection,
+                // but does finish clearing ADS, timing, and scale state.
+                if let Err(reset_error) = controller.cancel(&mut self.engine) {
+                    cleanup_error.get_or_insert_with(|| Box::new(reset_error));
+                }
+            }
         }
-        let cancelled = self.engine.cancel_all()?;
+        let cancelled = match self.engine.cancel_all() {
+            Ok(cancelled) => cancelled,
+            Err(error) => {
+                cleanup_error.get_or_insert_with(|| Box::new(error));
+                false
+            }
+        };
+        self.active_layers = 0;
+        self.held_keys = ModifierMask::EMPTY;
+        self.held_modifiers = ModifierMask::EMPTY;
+        self.held_mouse_buttons = 0;
+        self.directions.fill(DirectionalInput::default());
+        self.desired_directions.fill(DirectionalInput::default());
+        self.active_bindings.fill(false);
+        self.desired_bindings.fill(false);
+        self.selected_input_layers.fill(None);
+        self.last_joystick_frame.fill(None);
         if self.trace_input {
             println!(
                 "[trace] runtime suspend active_before={} cancel_frame_submitted={cancelled}",
                 active_before
             );
         }
-        Ok(())
+        cleanup_error.map_or(Ok(()), Err)
     }
 
     fn stop(&mut self) -> GameSessionResult<()> {
@@ -1194,14 +1634,11 @@ impl<I: TouchInjector> UnifiedRuntime<I> {
 
 fn tap_binding<I: TouchInjector>(
     engine: &mut TouchEngine<I>,
-    point_contacts: &BTreeMap<String, ContactId>,
+    contact_id: ContactId,
     binding: &str,
     point: Point,
     trace_input: bool,
 ) -> GameSessionResult<()> {
-    let contact_id = *point_contacts
-        .get(binding)
-        .ok_or_else(|| io::Error::other(format!("missing point contact for {binding}")))?;
     engine.submit(TouchFrame::single(TouchEvent::new(
         contact_id,
         TouchPhase::Down,
@@ -1225,15 +1662,12 @@ fn tap_binding<I: TouchInjector>(
 
 fn set_hold_binding<I: TouchInjector>(
     engine: &mut TouchEngine<I>,
-    point_contacts: &BTreeMap<String, ContactId>,
+    contact_id: ContactId,
     binding: &str,
     point: Point,
     pressed: bool,
     trace_input: bool,
 ) -> GameSessionResult<bool> {
-    let contact_id = *point_contacts
-        .get(binding)
-        .ok_or_else(|| io::Error::other(format!("missing hold contact for {binding}")))?;
     let active = engine.state().position(contact_id).is_some();
     if active == pressed {
         return Ok(false);
@@ -1257,15 +1691,173 @@ fn set_hold_binding<I: TouchInjector>(
     Ok(true)
 }
 
-fn record_joystick_frame(
-    last_frames: &mut BTreeMap<String, Duration>,
-    binding: &str,
-    now: Duration,
+fn point_contact(contact_id: Option<ContactId>) -> GameSessionResult<ContactId> {
+    contact_id.ok_or_else(|| io::Error::other("point binding is missing its contact id").into())
+}
+
+fn binding_available(
+    control: &RuntimeControlBinding,
+    input: RuntimePhysicalInput,
+    active_layers: u64,
+    held_modifiers: ModifierMask,
+    selected_input_layers: &[Option<LayerId>; PHYSICAL_INPUT_COUNT],
+) -> bool {
+    if selected_input_layers[physical_input_index(input)]
+        .is_some_and(|layer| control.layer == LayerId::BASE || control.layer < layer)
+    {
+        return false;
+    }
+    binding_condition_available(control, input, active_layers, held_modifiers)
+}
+
+fn binding_condition_available(
+    control: &RuntimeControlBinding,
+    input: RuntimePhysicalInput,
+    active_layers: u64,
+    held_modifiers: ModifierMask,
+) -> bool {
+    let layer_available = control.layer == LayerId::BASE
+        || layer_mask_bit(control.layer).is_some_and(|mask| active_layers & mask != 0);
+    layer_available
+        && control
+            .modifier
+            .is_none_or(|modifier| held_modifiers.contains(modifier))
+        && !control.is_suppressed(input, held_modifiers)
+}
+
+fn select_input_layer(
+    selected_input_layers: &mut [Option<LayerId>; PHYSICAL_INPUT_COUNT],
+    control: &RuntimeControlBinding,
+    input: RuntimePhysicalInput,
+    active_layers: u64,
+    held_modifiers: ModifierMask,
 ) {
-    if let Some(last) = last_frames.get_mut(binding) {
-        *last = now;
+    if !binding_condition_available(control, input, active_layers, held_modifiers) {
+        return;
+    }
+    let selected = &mut selected_input_layers[physical_input_index(input)];
+    if selected.is_none_or(|layer| control.layer > layer) {
+        *selected = Some(control.layer);
+    }
+}
+
+fn physical_input_index(input: RuntimePhysicalInput) -> usize {
+    match input {
+        RuntimePhysicalInput::Key(key) => usize::from(key.index()),
+        RuntimePhysicalInput::MouseButton(button) => 46 + button as usize,
+    }
+}
+
+fn runtime_key(key: HostKey) -> Option<HostKeyName> {
+    Some(match key {
+        HostKey::Num0 => HostKeyName::Num0,
+        HostKey::Num1 => HostKeyName::Num1,
+        HostKey::Num2 => HostKeyName::Num2,
+        HostKey::Num3 => HostKeyName::Num3,
+        HostKey::Num4 => HostKeyName::Num4,
+        HostKey::Num5 => HostKeyName::Num5,
+        HostKey::Num6 => HostKeyName::Num6,
+        HostKey::Num7 => HostKeyName::Num7,
+        HostKey::Num8 => HostKeyName::Num8,
+        HostKey::Num9 => HostKeyName::Num9,
+        HostKey::A => HostKeyName::A,
+        HostKey::B => HostKeyName::B,
+        HostKey::C => HostKeyName::C,
+        HostKey::D => HostKeyName::D,
+        HostKey::E => HostKeyName::E,
+        HostKey::F => HostKeyName::F,
+        HostKey::G => HostKeyName::G,
+        HostKey::H => HostKeyName::H,
+        HostKey::I => HostKeyName::I,
+        HostKey::J => HostKeyName::J,
+        HostKey::K => HostKeyName::K,
+        HostKey::L => HostKeyName::L,
+        HostKey::M => HostKeyName::M,
+        HostKey::N => HostKeyName::N,
+        HostKey::O => HostKeyName::O,
+        HostKey::P => HostKeyName::P,
+        HostKey::Q => HostKeyName::Q,
+        HostKey::R => HostKeyName::R,
+        HostKey::S => HostKeyName::S,
+        HostKey::T => HostKeyName::T,
+        HostKey::U => HostKeyName::U,
+        HostKey::V => HostKeyName::V,
+        HostKey::W => HostKeyName::W,
+        HostKey::X => HostKeyName::X,
+        HostKey::Y => HostKeyName::Y,
+        HostKey::Z => HostKeyName::Z,
+        HostKey::Space => HostKeyName::Space,
+        HostKey::Tab => HostKeyName::Tab,
+        HostKey::LeftShift => HostKeyName::Shift,
+        HostKey::LeftCtrl => HostKeyName::Ctrl,
+        HostKey::LeftAlt => HostKeyName::Alt,
+        HostKey::ArrowUp => HostKeyName::Up,
+        HostKey::ArrowLeft => HostKeyName::Left,
+        HostKey::ArrowDown => HostKeyName::Down,
+        HostKey::ArrowRight => HostKeyName::Right,
+        HostKey::Esc => HostKeyName::Esc,
+        HostKey::F12 => return None,
+    })
+}
+
+fn parse_mouse_button(button: &str) -> Option<HostMouseButton> {
+    let button = button.trim();
+    if button.eq_ignore_ascii_case("left") {
+        Some(HostMouseButton::Left)
+    } else if button.eq_ignore_ascii_case("right") {
+        Some(HostMouseButton::Right)
+    } else if button.eq_ignore_ascii_case("middle") {
+        Some(HostMouseButton::Middle)
+    } else if button.eq_ignore_ascii_case("side") {
+        Some(HostMouseButton::Side)
+    } else if button.eq_ignore_ascii_case("extra") {
+        Some(HostMouseButton::Extra)
     } else {
-        last_frames.insert(binding.to_owned(), now);
+        None
+    }
+}
+
+fn runtime_mouse_button(button: wroid_input::mouse::MouseButton) -> HostMouseButton {
+    match button {
+        wroid_input::mouse::MouseButton::Left => HostMouseButton::Left,
+        wroid_input::mouse::MouseButton::Right => HostMouseButton::Right,
+        wroid_input::mouse::MouseButton::Middle => HostMouseButton::Middle,
+        wroid_input::mouse::MouseButton::Side => HostMouseButton::Side,
+        wroid_input::mouse::MouseButton::Extra => HostMouseButton::Extra,
+    }
+}
+
+fn mouse_button_mask(button: HostMouseButton) -> u8 {
+    1_u8 << button as u8
+}
+
+fn mouse_button_held(held: u8, button: HostMouseButton) -> bool {
+    held & mouse_button_mask(button) != 0
+}
+
+fn set_mouse_button_held(held: &mut u8, button: HostMouseButton, pressed: bool) {
+    let mask = mouse_button_mask(button);
+    if pressed {
+        *held |= mask;
+    } else {
+        *held &= !mask;
+    }
+}
+
+fn trace_joystick<I: TouchInjector>(
+    trace_input: bool,
+    binding: &str,
+    joystick: &wroid_runtime::VirtualJoystick,
+    direction: DirectionalInput,
+    submitted: bool,
+    engine: &TouchEngine<I>,
+) {
+    if trace_input {
+        println!(
+            "[trace] runtime joystick binding={binding} contact={} direction={direction:?} submitted={submitted} position={:?}",
+            joystick.contact_id().get(),
+            engine.state().position(joystick.contact_id())
+        );
     }
 }
 
@@ -1280,7 +1872,8 @@ impl UnifiedRuntime<SessionMetricsInjector<UinputTouchInjector>> {
         let injector = self.engine.injector();
         let recenter_count = self
             .aim_controllers
-            .values()
+            .iter()
+            .flatten()
             .map(MouseAimController::recenter_count)
             .sum::<u64>();
         let reader_to_inject = latency_metrics(&self.pipeline_latencies);
@@ -1420,24 +2013,12 @@ fn percentile_from_sorted(micros: &[u128], percentile: usize) -> u128 {
     micros[index]
 }
 
-fn update_direction(state: &mut bool, binding_key: &str, event_key: &str, pressed: bool) -> bool {
-    if !key_eq(binding_key, event_key) || *state == pressed {
-        return false;
-    }
-    *state = pressed;
-    true
-}
-
-fn toggle_direction(state: &mut bool, binding_key: &str, event_key: &str) -> bool {
-    if !key_eq(binding_key, event_key) {
-        return false;
-    }
-    *state = !*state;
-    true
-}
-
-fn key_eq(left: &str, right: &str) -> bool {
-    left.trim().eq_ignore_ascii_case(right.trim())
+fn layer_mask_bit(layer: LayerId) -> Option<u64> {
+    layer
+        .get()
+        .checked_sub(1)
+        .filter(|index| *index < 64)
+        .map(|index| 1_u64 << index)
 }
 
 #[derive(Debug)]
@@ -1602,16 +2183,24 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    use wroid_core::profile_v2::{ActionV2, BindingV2, JoystickMode, NormalizedPoint, ProfileV2};
+    use wroid_core::profile_v2::{
+        ActionV2, BindingV2, JoystickMode, LayerActivation, LayerV2, NormalizedPoint,
+        NormalizedRect, ProfileV2,
+    };
     use wroid_runtime::{TouchInjectionError, TouchInjector};
 
     #[derive(Default)]
     struct RecordingInjector {
         frames: Vec<TouchFrame>,
+        fail_next: bool,
     }
 
     impl TouchInjector for RecordingInjector {
         fn inject(&mut self, frame: &TouchFrame) -> Result<(), TouchInjectionError> {
+            if self.fail_next {
+                self.fail_next = false;
+                return Err(TouchInjectionError::new("injected cleanup failure"));
+            }
             self.frames.push(frame.clone());
             Ok(())
         }
@@ -1715,11 +2304,14 @@ mod tests {
             name: "Brawl test".to_owned(),
             package_name: "com.supercell.brawlstars".to_owned(),
             orientation: Default::default(),
+            layers: Vec::new(),
             bindings: vec![
                 joystick_binding("movement", "w", "a", "s", "d", 0.2),
                 joystick_binding("attack", "up", "left", "down", "right", 0.8),
                 BindingV2 {
                     name: "super".to_owned(),
+                    layer: None,
+                    modifier: None,
                     input: InputV2::Key {
                         key: "space".to_owned(),
                     },
@@ -1783,8 +2375,11 @@ mod tests {
             name: "Automatic fire test".to_owned(),
             package_name: "com.example.shooter".to_owned(),
             orientation: Default::default(),
+            layers: Vec::new(),
             bindings: vec![BindingV2 {
                 name: "fire".to_owned(),
+                layer: None,
+                modifier: None,
                 input: InputV2::MouseButton {
                     button: "left".to_owned(),
                 },
@@ -1837,6 +2432,7 @@ mod tests {
             name: "Focus test".to_owned(),
             package_name: "com.example.focus".to_owned(),
             orientation: Default::default(),
+            layers: Vec::new(),
             bindings: vec![joystick_binding("movement", "w", "a", "s", "d", 0.2)],
         };
         let plan = RuntimeControlPlan::from_profile_v2(
@@ -1892,7 +2488,10 @@ mod tests {
 
         assert_eq!(exit, EventLoopExit::TimeLimitReached);
         assert_eq!(runtime.engine.state().active_contact_count(), 0);
-        assert!(runtime.directions.is_empty());
+        assert!(runtime
+            .directions
+            .iter()
+            .all(|direction| *direction == DirectionalInput::default()));
     }
 
     #[test]
@@ -1902,6 +2501,7 @@ mod tests {
             name: "Capture toggle test".to_owned(),
             package_name: "com.example.capture".to_owned(),
             orientation: Default::default(),
+            layers: Vec::new(),
             bindings: vec![joystick_binding("movement", "w", "a", "s", "d", 0.2)],
         };
         let plan = RuntimeControlPlan::from_profile_v2(
@@ -1977,8 +2577,11 @@ mod tests {
             name: "Escape binding test".to_owned(),
             package_name: "com.example.escape".to_owned(),
             orientation: Default::default(),
+            layers: Vec::new(),
             bindings: vec![BindingV2 {
                 name: "menu".to_owned(),
+                layer: None,
+                modifier: None,
                 input: InputV2::Key {
                     key: "esc".to_owned(),
                 },
@@ -2038,6 +2641,826 @@ mod tests {
         assert_eq!(runtime.engine.state().active_contact_count(), 0);
     }
 
+    #[test]
+    fn base_binding_fires_without_a_declared_layer() {
+        let mut runtime = test_runtime(
+            Vec::new(),
+            vec![key_hold_binding("base", "r", None, None, 0.2)],
+        );
+
+        assert!(send_key(&mut runtime, HostKey::R, KeyTransition::Pressed));
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+        assert_eq!(emitted_phases(&runtime), [TouchPhase::Down]);
+
+        assert!(send_key(&mut runtime, HostKey::R, KeyTransition::Released));
+        assert_eq!(runtime.engine.state().active_contact_count(), 0);
+        assert_eq!(emitted_phases(&runtime), [TouchPhase::Down, TouchPhase::Up]);
+    }
+
+    #[test]
+    fn inactive_layer_blocks_binding() {
+        let mut runtime = test_runtime(
+            vec![hold_layer("combat", "tab")],
+            vec![key_hold_binding(
+                "layer-fire",
+                "r",
+                Some("combat"),
+                None,
+                0.2,
+            )],
+        );
+
+        assert!(!send_key(&mut runtime, HostKey::R, KeyTransition::Pressed));
+        assert!(!send_key(&mut runtime, HostKey::R, KeyTransition::Released));
+        assert!(runtime.engine.injector().frames.is_empty());
+        assert_eq!(runtime.engine.state().active_contact_count(), 0);
+    }
+
+    #[test]
+    fn hold_layer_enables_binding_only_while_held() {
+        let mut runtime = test_runtime(
+            vec![hold_layer("combat", "tab")],
+            vec![key_hold_binding(
+                "layer-fire",
+                "r",
+                Some("combat"),
+                None,
+                0.2,
+            )],
+        );
+
+        assert!(!send_key(
+            &mut runtime,
+            HostKey::Tab,
+            KeyTransition::Pressed
+        ));
+        assert!(send_key(&mut runtime, HostKey::R, KeyTransition::Pressed));
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+
+        assert!(send_key(
+            &mut runtime,
+            HostKey::Tab,
+            KeyTransition::Released
+        ));
+        assert_eq!(runtime.engine.state().active_contact_count(), 0);
+        assert_eq!(emitted_phases(&runtime), [TouchPhase::Down, TouchPhase::Up]);
+        assert!(!send_key(&mut runtime, HostKey::R, KeyTransition::Released));
+    }
+
+    #[test]
+    fn toggle_layer_persists_after_activation_release_and_turns_off_on_second_press() {
+        let mut runtime = test_runtime(
+            vec![toggle_layer("combat", "tab")],
+            vec![key_hold_binding(
+                "layer-fire",
+                "r",
+                Some("combat"),
+                None,
+                0.2,
+            )],
+        );
+
+        assert!(!send_key(
+            &mut runtime,
+            HostKey::Tab,
+            KeyTransition::Pressed
+        ));
+        assert!(!send_key(
+            &mut runtime,
+            HostKey::Tab,
+            KeyTransition::Released
+        ));
+        assert!(send_key(&mut runtime, HostKey::R, KeyTransition::Pressed));
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+
+        assert!(send_key(&mut runtime, HostKey::Tab, KeyTransition::Pressed));
+        assert_eq!(runtime.engine.state().active_contact_count(), 0);
+        assert_eq!(emitted_phases(&runtime), [TouchPhase::Down, TouchPhase::Up]);
+    }
+
+    #[test]
+    fn activation_key_is_consumed_instead_of_dispatching_a_modified_base_binding() {
+        let mut runtime = test_runtime(
+            vec![hold_layer("combat", "tab")],
+            vec![key_hold_binding(
+                "base-tab",
+                "tab",
+                None,
+                Some("shift"),
+                0.2,
+            )],
+        );
+
+        assert!(!send_key(
+            &mut runtime,
+            HostKey::LeftShift,
+            KeyTransition::Pressed
+        ));
+        assert!(!send_key(
+            &mut runtime,
+            HostKey::Tab,
+            KeyTransition::Pressed
+        ));
+        assert!(!send_key(
+            &mut runtime,
+            HostKey::Tab,
+            KeyTransition::Released
+        ));
+        assert!(runtime.engine.injector().frames.is_empty());
+        assert_eq!(runtime.engine.state().active_contact_count(), 0);
+    }
+
+    #[test]
+    fn same_key_selects_active_layer_action_instead_of_base_action() {
+        let mut runtime = test_runtime(
+            vec![hold_layer("combat", "tab")],
+            vec![
+                key_hold_binding("base", "r", None, None, 0.2),
+                key_hold_binding("layer", "r", Some("combat"), None, 0.8),
+            ],
+        );
+
+        assert!(send_key(&mut runtime, HostKey::R, KeyTransition::Pressed));
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+        assert_eq!(last_touch_event(&runtime).position.x, 200);
+
+        assert!(send_key(&mut runtime, HostKey::Tab, KeyTransition::Pressed));
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+        assert_eq!(last_touch_event(&runtime).position.x, 799);
+        assert_eq!(
+            emitted_phases(&runtime),
+            [TouchPhase::Down, TouchPhase::Up, TouchPhase::Down]
+        );
+
+        assert!(send_key(
+            &mut runtime,
+            HostKey::Tab,
+            KeyTransition::Released
+        ));
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+        assert_eq!(last_touch_event(&runtime).position.x, 200);
+    }
+
+    #[test]
+    fn highest_active_layer_id_wins_when_named_layers_share_an_input() {
+        let mut runtime = test_runtime(
+            vec![hold_layer("lower", "tab"), hold_layer("higher", "alt")],
+            vec![
+                key_hold_binding("base", "r", None, None, 0.2),
+                key_hold_binding("lower", "r", Some("lower"), None, 0.5),
+                key_hold_binding("higher", "r", Some("higher"), None, 0.8),
+            ],
+        );
+
+        send_key(&mut runtime, HostKey::R, KeyTransition::Pressed);
+        send_key(&mut runtime, HostKey::Tab, KeyTransition::Pressed);
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+        assert_eq!(last_touch_event(&runtime).position.x, 500);
+
+        send_key(&mut runtime, HostKey::LeftAlt, KeyTransition::Pressed);
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+        assert_eq!(last_touch_event(&runtime).position.x, 799);
+
+        send_key(&mut runtime, HostKey::LeftAlt, KeyTransition::Released);
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+        assert_eq!(last_touch_event(&runtime).position.x, 500);
+
+        send_key(&mut runtime, HostKey::Tab, KeyTransition::Released);
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+        assert_eq!(last_touch_event(&runtime).position.x, 200);
+    }
+
+    #[test]
+    fn modifier_binding_requires_held_modifier() {
+        let mut runtime = test_runtime(
+            Vec::new(),
+            vec![key_hold_binding(
+                "shift-fire",
+                "r",
+                None,
+                Some("shift"),
+                0.2,
+            )],
+        );
+
+        assert!(!send_key(&mut runtime, HostKey::R, KeyTransition::Pressed));
+        assert!(!send_key(&mut runtime, HostKey::R, KeyTransition::Released));
+        assert!(!send_key(
+            &mut runtime,
+            HostKey::LeftShift,
+            KeyTransition::Pressed
+        ));
+        assert!(send_key(&mut runtime, HostKey::R, KeyTransition::Pressed));
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+        assert_eq!(emitted_phases(&runtime), [TouchPhase::Down]);
+    }
+
+    #[test]
+    fn unmodified_sibling_is_suppressed_while_modifier_is_held() {
+        let mut runtime = test_runtime(
+            Vec::new(),
+            vec![
+                key_hold_binding("base", "r", None, None, 0.2),
+                key_hold_binding("specific", "r", None, Some("shift"), 0.8),
+            ],
+        );
+
+        send_key(&mut runtime, HostKey::LeftShift, KeyTransition::Pressed);
+        assert!(send_key(&mut runtime, HostKey::R, KeyTransition::Pressed));
+
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+        assert_eq!(runtime.engine.injector().frames.len(), 1);
+        let event = runtime.engine.injector().frames[0].events()[0];
+        assert_eq!(event.phase, TouchPhase::Down);
+        assert_eq!(event.position.x, 799);
+    }
+
+    #[test]
+    fn releasing_modifier_while_action_key_is_held_releases_specific_contact() {
+        let mut runtime = test_runtime(
+            Vec::new(),
+            vec![key_hold_binding("specific", "r", None, Some("shift"), 0.8)],
+        );
+
+        send_key(&mut runtime, HostKey::LeftShift, KeyTransition::Pressed);
+        send_key(&mut runtime, HostKey::R, KeyTransition::Pressed);
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+
+        assert!(send_key(
+            &mut runtime,
+            HostKey::LeftShift,
+            KeyTransition::Released
+        ));
+        assert_eq!(runtime.engine.state().active_contact_count(), 0);
+        assert_eq!(emitted_phases(&runtime), [TouchPhase::Down, TouchPhase::Up]);
+    }
+
+    #[test]
+    fn deactivating_layer_releases_its_held_contacts() {
+        let mut runtime = test_runtime(
+            vec![hold_layer("combat", "tab")],
+            vec![key_hold_binding(
+                "layer-fire",
+                "r",
+                Some("combat"),
+                None,
+                0.2,
+            )],
+        );
+
+        send_key(&mut runtime, HostKey::Tab, KeyTransition::Pressed);
+        send_key(&mut runtime, HostKey::R, KeyTransition::Pressed);
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+
+        assert!(send_key(
+            &mut runtime,
+            HostKey::Tab,
+            KeyTransition::Released
+        ));
+        assert_eq!(runtime.engine.state().active_contact_count(), 0);
+        assert_eq!(emitted_phases(&runtime), [TouchPhase::Down, TouchPhase::Up]);
+    }
+
+    #[test]
+    fn action_key_release_after_modifier_release_leaks_nothing() {
+        let mut runtime = test_runtime(
+            Vec::new(),
+            vec![key_hold_binding("specific", "r", None, Some("shift"), 0.8)],
+        );
+
+        send_key(&mut runtime, HostKey::LeftShift, KeyTransition::Pressed);
+        send_key(&mut runtime, HostKey::R, KeyTransition::Pressed);
+        send_key(&mut runtime, HostKey::LeftShift, KeyTransition::Released);
+        let frames_after_modifier_release = runtime.engine.injector().frames.len();
+
+        assert!(!send_key(&mut runtime, HostKey::R, KeyTransition::Released));
+        assert_eq!(
+            runtime.engine.injector().frames.len(),
+            frames_after_modifier_release
+        );
+        assert_eq!(runtime.engine.state().active_contact_count(), 0);
+        assert_eq!(emitted_phases(&runtime), [TouchPhase::Down, TouchPhase::Up]);
+    }
+
+    #[test]
+    fn suspend_resets_layer_modifier_and_held_key_state() {
+        let mut runtime = test_runtime(
+            vec![toggle_layer("combat", "tab")],
+            vec![key_hold_binding(
+                "specific",
+                "r",
+                Some("combat"),
+                Some("shift"),
+                0.8,
+            )],
+        );
+
+        send_key(&mut runtime, HostKey::Tab, KeyTransition::Pressed);
+        send_key(&mut runtime, HostKey::Tab, KeyTransition::Released);
+        send_key(&mut runtime, HostKey::LeftShift, KeyTransition::Pressed);
+        send_key(&mut runtime, HostKey::R, KeyTransition::Pressed);
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+
+        runtime.suspend().unwrap();
+        assert_eq!(runtime.engine.state().active_contact_count(), 0);
+        let frames_after_suspend = runtime.engine.injector().frames.len();
+        assert!(!send_key(&mut runtime, HostKey::R, KeyTransition::Pressed));
+        assert!(!send_key(&mut runtime, HostKey::R, KeyTransition::Released));
+        assert_eq!(runtime.engine.injector().frames.len(), frames_after_suspend);
+        send_key(&mut runtime, HostKey::LeftShift, KeyTransition::Pressed);
+        send_key(&mut runtime, HostKey::Tab, KeyTransition::Pressed);
+        assert_eq!(runtime.engine.injector().frames.len(), frames_after_suspend);
+        assert_eq!(runtime.engine.state().active_contact_count(), 0);
+
+        assert!(send_key(&mut runtime, HostKey::R, KeyTransition::Pressed));
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+    }
+
+    #[test]
+    fn suspend_resets_logical_state_even_when_contact_cleanup_must_be_retried() {
+        let mut runtime = test_runtime(
+            vec![toggle_layer("combat", "tab")],
+            vec![key_hold_binding(
+                "specific",
+                "r",
+                Some("combat"),
+                Some("shift"),
+                0.8,
+            )],
+        );
+        send_key(&mut runtime, HostKey::Tab, KeyTransition::Pressed);
+        send_key(&mut runtime, HostKey::LeftShift, KeyTransition::Pressed);
+        send_key(&mut runtime, HostKey::R, KeyTransition::Pressed);
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+        runtime.engine.injector_mut().fail_next = true;
+
+        assert!(runtime.suspend().is_err());
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+        assert_eq!(runtime.active_layers, 0);
+        assert_eq!(runtime.held_keys, ModifierMask::EMPTY);
+        assert_eq!(runtime.held_modifiers, ModifierMask::EMPTY);
+        assert_eq!(runtime.held_mouse_buttons, 0);
+        assert!(runtime.active_bindings.iter().all(|active| !active));
+
+        runtime.suspend().unwrap();
+        assert_eq!(runtime.engine.state().active_contact_count(), 0);
+    }
+
+    #[test]
+    fn failed_mouse_aim_cancel_does_not_leave_phantom_ads_after_recapture() {
+        let mut runtime = test_runtime(
+            Vec::new(),
+            vec![BindingV2 {
+                name: "aim".to_owned(),
+                layer: None,
+                modifier: None,
+                input: InputV2::MouseMove,
+                action: ActionV2::MouseAim {
+                    region: NormalizedRect {
+                        x: 0.4,
+                        y: 0.1,
+                        w: 0.5,
+                        h: 0.7,
+                    },
+                    sensitivity: 1.0,
+                    toggle_key: None,
+                    recenter_threshold: 0.8,
+                    recenter_gap_ms: 0,
+                    ads_multiplier: Some(0.5),
+                    reaffirm_ms: None,
+                },
+            }],
+        );
+        let controller = runtime.aim_controllers[0].as_ref().unwrap();
+        let contact_id = controller.aim().contact_id();
+        let origin = controller.aim().origin();
+        send_mouse_button(
+            &mut runtime,
+            wroid_input::mouse::MouseButton::Right,
+            MouseButtonTransition::Pressed,
+        );
+        runtime.engine.injector_mut().fail_next = true;
+
+        assert!(runtime.suspend().is_err());
+        assert_eq!(runtime.engine.state().active_contact_count(), 0);
+        runtime.start().unwrap();
+        assert!(runtime
+            .handle_mouse(MouseEvent::Motion(RelativeMouseMotion::new(2, 0)))
+            .unwrap());
+
+        assert_eq!(
+            runtime.engine.state().position(contact_id),
+            Some(Point {
+                x: origin.x + 2,
+                y: origin.y,
+            })
+        );
+    }
+
+    #[test]
+    fn layer_joystick_becomes_neutral_when_layer_deactivates() {
+        let mut binding = joystick_binding("movement", "w", "a", "s", "d", 0.2);
+        binding.layer = Some("combat".to_owned());
+        let ActionV2::VirtualJoystick { mode, .. } = &mut binding.action else {
+            unreachable!("joystick helper returns a joystick action")
+        };
+        *mode = JoystickMode::Toggle;
+        let mut runtime = test_runtime(vec![hold_layer("combat", "tab")], vec![binding]);
+
+        send_key(&mut runtime, HostKey::Tab, KeyTransition::Pressed);
+        assert!(send_key(&mut runtime, HostKey::W, KeyTransition::Pressed));
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+
+        assert!(send_key(
+            &mut runtime,
+            HostKey::Tab,
+            KeyTransition::Released
+        ));
+        assert_eq!(runtime.engine.state().active_contact_count(), 0);
+        assert_eq!(emitted_phases(&runtime), [TouchPhase::Down, TouchPhase::Up]);
+    }
+
+    #[test]
+    fn modifier_arriving_after_held_key_transitions_base_to_specific_safely() {
+        let mut runtime = test_runtime(
+            Vec::new(),
+            vec![
+                key_hold_binding("base", "r", None, None, 0.2),
+                key_hold_binding("specific", "r", None, Some("shift"), 0.8),
+            ],
+        );
+
+        assert!(send_key(&mut runtime, HostKey::R, KeyTransition::Pressed));
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+        assert!(send_key(
+            &mut runtime,
+            HostKey::LeftShift,
+            KeyTransition::Pressed
+        ));
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+        assert_eq!(
+            emitted_phases(&runtime),
+            [TouchPhase::Down, TouchPhase::Up, TouchPhase::Down]
+        );
+        assert_eq!(last_touch_event(&runtime).position.x, 799);
+
+        assert!(send_key(
+            &mut runtime,
+            HostKey::LeftShift,
+            KeyTransition::Released
+        ));
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+        assert_eq!(
+            emitted_phases(&runtime),
+            [
+                TouchPhase::Down,
+                TouchPhase::Up,
+                TouchPhase::Down,
+                TouchPhase::Up,
+                TouchPhase::Down,
+            ]
+        );
+        assert_eq!(last_touch_event(&runtime).position.x, 200);
+
+        assert!(send_key(&mut runtime, HostKey::R, KeyTransition::Released));
+        assert_eq!(runtime.engine.state().active_contact_count(), 0);
+    }
+
+    #[test]
+    fn key_cluster_suppression_is_per_key_and_keeps_unrelated_direction_usable() {
+        let mut specific = joystick_binding("shift-movement", "w", "up", "down", "right", 0.8);
+        specific.modifier = Some("shift".to_owned());
+        let mut runtime = test_runtime(
+            Vec::new(),
+            vec![
+                joystick_binding("movement", "w", "a", "s", "d", 0.2),
+                specific,
+            ],
+        );
+
+        send_key(&mut runtime, HostKey::A, KeyTransition::Pressed);
+        send_key(&mut runtime, HostKey::LeftShift, KeyTransition::Pressed);
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+        let base_contact = joystick_contact(&runtime, "movement");
+        assert_eq!(
+            runtime.engine.state().position(base_contact),
+            Some(Point { x: 100, y: 799 })
+        );
+
+        assert!(send_key(&mut runtime, HostKey::W, KeyTransition::Pressed));
+        assert_eq!(runtime.engine.state().active_contact_count(), 2);
+        assert_eq!(
+            runtime.engine.state().position(base_contact),
+            Some(Point { x: 100, y: 799 })
+        );
+        let specific_contact = joystick_contact(&runtime, "shift-movement");
+        assert_eq!(
+            runtime.engine.state().position(specific_contact),
+            Some(Point { x: 799, y: 699 })
+        );
+    }
+
+    #[test]
+    fn mouse_button_obeys_layer_modifier_press_gating_and_release_cleanup() {
+        let mut runtime = test_runtime(
+            vec![hold_layer("combat", "tab")],
+            vec![mouse_hold_binding(
+                "fire",
+                "left",
+                Some("combat"),
+                Some("shift"),
+                0.8,
+            )],
+        );
+
+        assert!(!send_mouse_button(
+            &mut runtime,
+            wroid_input::mouse::MouseButton::Left,
+            MouseButtonTransition::Pressed
+        ));
+        assert!(!send_mouse_button(
+            &mut runtime,
+            wroid_input::mouse::MouseButton::Left,
+            MouseButtonTransition::Released
+        ));
+        send_key(&mut runtime, HostKey::Tab, KeyTransition::Pressed);
+        send_key(&mut runtime, HostKey::LeftShift, KeyTransition::Pressed);
+
+        assert!(send_mouse_button(
+            &mut runtime,
+            wroid_input::mouse::MouseButton::Left,
+            MouseButtonTransition::Pressed
+        ));
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+        assert!(send_key(
+            &mut runtime,
+            HostKey::Tab,
+            KeyTransition::Released
+        ));
+        assert_eq!(runtime.engine.state().active_contact_count(), 0);
+        let frames_after_cleanup = runtime.engine.injector().frames.len();
+        assert!(!send_mouse_button(
+            &mut runtime,
+            wroid_input::mouse::MouseButton::Left,
+            MouseButtonTransition::Released
+        ));
+        assert_eq!(runtime.engine.injector().frames.len(), frames_after_cleanup);
+        assert_eq!(emitted_phases(&runtime), [TouchPhase::Down, TouchPhase::Up]);
+    }
+
+    #[test]
+    fn tap_does_not_refire_when_modifier_or_layer_state_changes() {
+        let mut runtime = test_runtime(
+            vec![toggle_layer("combat", "tab")],
+            vec![
+                key_tap_binding("base", "r", None, None, 0.2),
+                key_tap_binding("specific", "r", None, Some("shift"), 0.5),
+                key_tap_binding("layer", "r", Some("combat"), None, 0.8),
+            ],
+        );
+
+        assert!(send_key(&mut runtime, HostKey::R, KeyTransition::Pressed));
+        assert_eq!(emitted_phases(&runtime), [TouchPhase::Down, TouchPhase::Up]);
+        assert!(!send_key(
+            &mut runtime,
+            HostKey::LeftShift,
+            KeyTransition::Pressed
+        ));
+        assert!(!send_key(
+            &mut runtime,
+            HostKey::Tab,
+            KeyTransition::Pressed
+        ));
+        assert!(!send_key(
+            &mut runtime,
+            HostKey::LeftShift,
+            KeyTransition::Released
+        ));
+        assert_eq!(emitted_phases(&runtime), [TouchPhase::Down, TouchPhase::Up]);
+        assert_eq!(runtime.engine.state().active_contact_count(), 0);
+    }
+
+    #[test]
+    fn mouse_aim_stays_live_when_its_declared_layer_is_inactive() {
+        let mut runtime = test_runtime(
+            vec![hold_layer("combat", "tab")],
+            vec![BindingV2 {
+                name: "aim".to_owned(),
+                layer: Some("combat".to_owned()),
+                modifier: None,
+                input: InputV2::MouseMove,
+                action: ActionV2::MouseAim {
+                    region: NormalizedRect {
+                        x: 0.4,
+                        y: 0.1,
+                        w: 0.5,
+                        h: 0.7,
+                    },
+                    sensitivity: 1.0,
+                    toggle_key: None,
+                    recenter_threshold: 0.8,
+                    recenter_gap_ms: 0,
+                    ads_multiplier: None,
+                    reaffirm_ms: None,
+                },
+            }],
+        );
+        assert_eq!(runtime.engine.state().active_contact_count(), 1);
+        let frames_before_motion = runtime.engine.injector().frames.len();
+
+        assert!(runtime
+            .handle_mouse(MouseEvent::Motion(RelativeMouseMotion::new(5, -3)))
+            .unwrap());
+        assert_eq!(
+            runtime.engine.injector().frames.len(),
+            frames_before_motion + 1
+        );
+        assert_eq!(last_touch_event(&runtime).phase, TouchPhase::Move);
+    }
+
+    #[test]
+    fn declared_layer_64_uses_the_high_mask_bit_without_colliding_with_base() {
+        assert_eq!(
+            layer_mask_bit(wroid_runtime::LayerId::new(64)),
+            Some(1_u64 << 63)
+        );
+        assert_eq!(layer_mask_bit(wroid_runtime::LayerId::BASE), None);
+    }
+
+    fn test_runtime(
+        layers: Vec<LayerV2>,
+        bindings: Vec<BindingV2>,
+    ) -> UnifiedRuntime<RecordingInjector> {
+        let profile = ProfileV2 {
+            schema_version: 2,
+            name: "dispatch test".to_owned(),
+            package_name: "com.example.dispatch".to_owned(),
+            orientation: Default::default(),
+            layers,
+            bindings,
+        };
+        let plan = RuntimeControlPlan::from_profile_v2(
+            &profile,
+            Resolution {
+                width: 1000,
+                height: 1000,
+            },
+        )
+        .unwrap();
+        let mut runtime = UnifiedRuntime::new(plan, RecordingInjector::default(), false).unwrap();
+        runtime.start().unwrap();
+        runtime
+    }
+
+    fn hold_layer(name: &str, key: &str) -> LayerV2 {
+        LayerV2 {
+            name: name.to_owned(),
+            activation: LayerActivation::Hold {
+                key: key.to_owned(),
+            },
+        }
+    }
+
+    fn toggle_layer(name: &str, key: &str) -> LayerV2 {
+        LayerV2 {
+            name: name.to_owned(),
+            activation: LayerActivation::Toggle {
+                key: key.to_owned(),
+            },
+        }
+    }
+
+    fn key_hold_binding(
+        name: &str,
+        key: &str,
+        layer: Option<&str>,
+        modifier: Option<&str>,
+        x: f64,
+    ) -> BindingV2 {
+        point_binding(
+            name,
+            InputV2::Key {
+                key: key.to_owned(),
+            },
+            layer,
+            modifier,
+            x,
+            false,
+        )
+    }
+
+    fn mouse_hold_binding(
+        name: &str,
+        button: &str,
+        layer: Option<&str>,
+        modifier: Option<&str>,
+        x: f64,
+    ) -> BindingV2 {
+        point_binding(
+            name,
+            InputV2::MouseButton {
+                button: button.to_owned(),
+            },
+            layer,
+            modifier,
+            x,
+            false,
+        )
+    }
+
+    fn key_tap_binding(
+        name: &str,
+        key: &str,
+        layer: Option<&str>,
+        modifier: Option<&str>,
+        x: f64,
+    ) -> BindingV2 {
+        point_binding(
+            name,
+            InputV2::Key {
+                key: key.to_owned(),
+            },
+            layer,
+            modifier,
+            x,
+            true,
+        )
+    }
+
+    fn point_binding(
+        name: &str,
+        input: InputV2,
+        layer: Option<&str>,
+        modifier: Option<&str>,
+        x: f64,
+        tap: bool,
+    ) -> BindingV2 {
+        let point = NormalizedPoint { x, y: 0.5 };
+        BindingV2 {
+            name: name.to_owned(),
+            layer: layer.map(str::to_owned),
+            modifier: modifier.map(str::to_owned),
+            input,
+            action: if tap {
+                ActionV2::Tap { point }
+            } else {
+                ActionV2::Hold { point }
+            },
+        }
+    }
+
+    fn send_key(
+        runtime: &mut UnifiedRuntime<RecordingInjector>,
+        key: HostKey,
+        transition: KeyTransition,
+    ) -> bool {
+        runtime
+            .handle_keyboard(HostKeyEvent::new(key, transition))
+            .unwrap()
+    }
+
+    fn send_mouse_button(
+        runtime: &mut UnifiedRuntime<RecordingInjector>,
+        button: wroid_input::mouse::MouseButton,
+        transition: MouseButtonTransition,
+    ) -> bool {
+        runtime
+            .handle_mouse(MouseEvent::Button(
+                wroid_input::mouse::MouseButtonEvent::new(button, transition),
+            ))
+            .unwrap()
+    }
+
+    fn emitted_phases(runtime: &UnifiedRuntime<RecordingInjector>) -> Vec<TouchPhase> {
+        runtime
+            .engine
+            .injector()
+            .frames
+            .iter()
+            .flat_map(|frame| frame.events().iter().map(|event| event.phase))
+            .collect()
+    }
+
+    fn last_touch_event(runtime: &UnifiedRuntime<RecordingInjector>) -> TouchEvent {
+        *runtime
+            .engine
+            .injector()
+            .frames
+            .last()
+            .expect("runtime emitted a touch frame")
+            .events()
+            .last()
+            .expect("touch frame contains an event")
+    }
+
+    fn joystick_contact(runtime: &UnifiedRuntime<RecordingInjector>, name: &str) -> ContactId {
+        let control = runtime.plan.control(name).unwrap();
+        let RuntimeControlAction::VirtualJoystick { joystick, .. } = &control.action else {
+            panic!("binding must be a joystick")
+        };
+        joystick.contact_id()
+    }
+
     fn joystick_binding(
         name: &str,
         up: &str,
@@ -2048,6 +3471,8 @@ mod tests {
     ) -> BindingV2 {
         BindingV2 {
             name: name.to_owned(),
+            layer: None,
+            modifier: None,
             input: InputV2::KeyCluster {
                 up: up.to_owned(),
                 left: left.to_owned(),
