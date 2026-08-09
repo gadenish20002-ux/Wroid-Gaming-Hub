@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
@@ -24,6 +24,7 @@ const ANDROID_INPUT_INTERVAL: Duration = Duration::from_millis(500);
 const LXC_PATH: &str = "/var/lib/waydroid/lxc";
 const WAYDROID_CONTAINER_NAME: &str = "waydroid";
 const SAFE_SYSTEM_PATH: &str = "/usr/sbin:/usr/bin";
+const MAX_STAGED_HELPER_BYTES: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_PRIVILEGED_BRIDGE_HELPER: &str = "/usr/lib/wroid/wroid-helper";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +41,87 @@ impl BridgeHelperCommand {
 
     pub fn executable(&self) -> &Path {
         &self.executable
+    }
+
+    pub fn production_release(staged: &Path, expected_uid: u32) -> io::Result<Self> {
+        validate_staged_helper_release(staged, expected_uid)?;
+        let installed = Path::new(DEFAULT_PRIVILEGED_BRIDGE_HELPER);
+        if !release_files_match(installed, staged)? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "installed Wroid helper differs from the paired staged release",
+            ));
+        }
+        validate_installed_bridge_helper(installed)?;
+        Ok(Self {
+            executable: installed.to_path_buf(),
+        })
+    }
+}
+
+fn open_release_file(path: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+}
+
+fn validate_staged_helper_release(path: &Path, expected_uid: u32) -> io::Result<()> {
+    let file = open_release_file(path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "cannot open paired staged Wroid helper {}: {error}",
+                path.display()
+            ),
+        )
+    })?;
+    let metadata = file.metadata()?;
+    let valid = metadata.is_file()
+        && metadata.uid() == expected_uid
+        && metadata.permissions().mode() & 0o7777 == 0o555
+        && metadata.nlink() == 1
+        && metadata.len() <= MAX_STAGED_HELPER_BYTES;
+    if !valid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "paired staged Wroid helper must be a current-user-owned, single-link mode 0555 regular file no larger than 64 MiB: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn release_files_match(installed: &Path, staged: &Path) -> io::Result<bool> {
+    let mut installed = open_release_file(installed)?;
+    let mut staged = open_release_file(staged)?;
+    let installed_len = installed.metadata()?.len();
+    let staged_len = staged.metadata()?.len();
+    if installed_len > MAX_STAGED_HELPER_BYTES || staged_len > MAX_STAGED_HELPER_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Wroid helper release exceeds the 64 MiB safety limit",
+        ));
+    }
+    if installed_len != staged_len {
+        return Ok(false);
+    }
+
+    let mut installed_bytes = [0_u8; 8192];
+    let mut staged_bytes = [0_u8; 8192];
+    loop {
+        let installed_read = installed.read(&mut installed_bytes)?;
+        let staged_read = staged.read(&mut staged_bytes)?;
+        if installed_read != staged_read
+            || installed_bytes[..installed_read] != staged_bytes[..staged_read]
+        {
+            return Ok(false);
+        }
+        if installed_read == 0 {
+            return Ok(true);
+        }
     }
 }
 
@@ -498,6 +580,7 @@ fn helper_arguments(event_node: &Path) -> Vec<OsString> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+    use std::os::unix::fs::symlink;
 
     #[test]
     fn helper_protocol_parses_only_fixed_line_commands() {
@@ -646,6 +729,55 @@ mod tests {
         assert!(!helper_metadata_is_safe(
             true, 0, 0o104755, true, 0, 0o040755
         ));
+    }
+
+    #[test]
+    fn staged_release_requires_a_user_owned_non_writable_regular_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let staged = directory.path().join("wroid-helper");
+        fs::write(&staged, b"paired helper release").unwrap();
+        fs::set_permissions(&staged, fs::Permissions::from_mode(0o555)).unwrap();
+        // SAFETY: geteuid takes no arguments and has no preconditions.
+        let uid = unsafe { libc::geteuid() };
+
+        validate_staged_helper_release(&staged, uid).unwrap();
+
+        fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            validate_staged_helper_release(&staged, uid)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+
+        fs::set_permissions(&staged, fs::Permissions::from_mode(0o555)).unwrap();
+        let link = directory.path().join("wroid-helper-link");
+        symlink(&staged, &link).unwrap();
+        assert!(validate_staged_helper_release(&link, uid).is_err());
+        assert!(validate_staged_helper_release(&staged, uid.saturating_add(1)).is_err());
+    }
+
+    #[test]
+    fn staged_release_match_is_bounded_and_byte_exact() {
+        let directory = tempfile::tempdir().unwrap();
+        let installed = directory.path().join("installed");
+        let staged = directory.path().join("staged");
+        fs::write(&installed, b"same helper bytes").unwrap();
+        fs::write(&staged, b"same helper bytes").unwrap();
+
+        assert!(release_files_match(&installed, &staged).unwrap());
+
+        fs::write(&installed, b"same helper byte!").unwrap();
+        assert!(!release_files_match(&installed, &staged).unwrap());
+        fs::write(&installed, b"short").unwrap();
+        assert!(!release_files_match(&installed, &staged).unwrap());
+
+        let oversized = fs::File::create(&staged).unwrap();
+        oversized.set_len(MAX_STAGED_HELPER_BYTES + 1).unwrap();
+        assert_eq!(
+            release_files_match(&installed, &staged).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     #[test]
