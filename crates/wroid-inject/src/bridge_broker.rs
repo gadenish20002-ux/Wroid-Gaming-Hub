@@ -103,6 +103,7 @@ enum BridgeResponse {
     Error { code: String, detail: String },
 }
 
+#[derive(Debug)]
 pub struct BridgeBrokerClient {
     reader: BufReader<UnixStream>,
     writer: UnixStream,

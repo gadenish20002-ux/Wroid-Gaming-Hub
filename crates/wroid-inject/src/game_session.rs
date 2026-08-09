@@ -10,9 +10,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::{
     ensure_container_stopped, ensure_root, remove_default_bridge, wait_for_android_input_device,
-    BridgeHelperCommand, DesktopUser, DesktopWaydroidSession, DeviceConfig, InputDeviceNode,
-    InstalledWaydroidBridge, PrivilegedBridgeHelper, UinputTouchInjector, WaydroidBridgeLease,
-    WROID_TOUCHSCREEN_NAME,
+    BridgeBrokerClient, DesktopUser, DesktopWaydroidSession, DeviceConfig, InputDeviceNode,
+    InstalledWaydroidBridge, UinputTouchInjector, WaydroidBridgeLease, WROID_TOUCHSCREEN_NAME,
 };
 use wroid_core::profile_v2::{InputV2, JoystickMode, ProfileV2};
 use wroid_core::{Point, Resolution};
@@ -86,8 +85,9 @@ pub fn run_game_session_cli(args: impl IntoIterator<Item = String>) -> GameSessi
     run_game_session(options).map(|_| ())
 }
 
-pub fn run_game_session(options: GameSessionOptions) -> GameSessionResult<GameSessionReport> {
+pub fn run_game_session(mut options: GameSessionOptions) -> GameSessionResult<GameSessionReport> {
     let is_root = ensure_root("Wroid unified game session").is_ok();
+    let bridge_broker = select_bridge_broker(is_root, options.bridge_broker.take())?;
     let lease_owner = format!(
         "game session {}",
         options
@@ -140,17 +140,13 @@ pub fn run_game_session(options: GameSessionOptions) -> GameSessionResult<GameSe
                     .is_some_and(|name| name.starts_with("event"))
         })
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "uinput event node not found"))?;
-    let input_node = InputDeviceNode::from_path(&event_node)?;
     let mut bridge = if is_root {
+        let input_node = InputDeviceNode::from_path(&event_node)?;
         SessionBridge::InProcess(InstalledWaydroidBridge::install_default(&input_node)?)
     } else {
-        let helper = options.bridge_helper.as_ref().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "rootless game session requires the typed Wroid bridge helper",
-            )
-        })?;
-        SessionBridge::Helper(PrivilegedBridgeHelper::start(helper, &event_node)?)
+        let mut broker = bridge_broker.expect("rootless bridge was validated before setup");
+        broker.open(&event_node)?;
+        SessionBridge::Broker(broker)
     };
     let desktop_user = DesktopUser::from_session_environment()?;
     let mut waydroid = DesktopWaydroidSession::start(desktop_user)?;
@@ -300,23 +296,38 @@ pub fn run_game_session(options: GameSessionOptions) -> GameSessionResult<GameSe
 
 enum SessionBridge {
     InProcess(InstalledWaydroidBridge),
-    Helper(PrivilegedBridgeHelper),
+    Broker(BridgeBrokerClient),
 }
 
 impl SessionBridge {
     fn verify_android_input(&mut self) -> io::Result<()> {
         match self {
             Self::InProcess(_) => wait_for_android_input_device(WROID_TOUCHSCREEN_NAME),
-            Self::Helper(helper) => helper.verify_android_input(),
+            Self::Broker(broker) => broker.verify_android_input(),
         }
     }
 
     fn cleanup(self, waydroid_stopped: bool) -> io::Result<()> {
         match self {
             Self::InProcess(bridge) => bridge.cleanup(),
-            Self::Helper(helper) => helper.finish(waydroid_stopped),
+            Self::Broker(broker) => broker.finish(waydroid_stopped),
         }
     }
+}
+
+fn select_bridge_broker(
+    is_root: bool,
+    broker: Option<BridgeBrokerClient>,
+) -> io::Result<Option<BridgeBrokerClient>> {
+    if is_root {
+        return Ok(None);
+    }
+    broker.map(Some).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "rootless game session requires a daemon-owned bridge channel",
+        )
+    })
 }
 
 fn combine_session_results<T>(
@@ -2075,7 +2086,7 @@ pub struct GameSessionOptions {
     pub trace_input: bool,
     pub exit_after: Option<Duration>,
     pub focus_socket: Option<PathBuf>,
-    pub bridge_helper: Option<BridgeHelperCommand>,
+    pub bridge_broker: Option<BridgeBrokerClient>,
     pub cleanup: bool,
 }
 
@@ -2102,7 +2113,7 @@ impl GameSessionOptions {
             trace_input: false,
             exit_after: None,
             focus_socket: None,
-            bridge_helper: None,
+            bridge_broker: None,
             cleanup: false,
         })
     }
@@ -2121,7 +2132,7 @@ impl GameSessionOptions {
             trace_input: false,
             exit_after: None,
             focus_socket: None,
-            bridge_helper: None,
+            bridge_broker: None,
             cleanup: false,
         };
         let mut args = args.into_iter();
@@ -2223,7 +2234,14 @@ fn print_usage() {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
 
+    use crate::{
+        serve_bridge_broker, BridgeBrokerClient, BridgeHelperFactory, BridgeHelperSession,
+    };
     use wroid_core::profile_v2::{
         ActionV2, BindingV2, JoystickMode, LayerActivation, LayerV2, NormalizedPoint,
         NormalizedRect, ProfileV2,
@@ -2234,6 +2252,52 @@ mod tests {
     struct RecordingInjector {
         frames: Vec<TouchFrame>,
         fail_next: bool,
+    }
+
+    struct RecordingBridgeFactory {
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct RecordingBridgeSession {
+        calls: Arc<Mutex<Vec<String>>>,
+        finished: bool,
+    }
+
+    impl BridgeHelperFactory for RecordingBridgeFactory {
+        fn start(&self, event_node: &Path) -> io::Result<Box<dyn BridgeHelperSession>> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("open:{}", event_node.display()));
+            Ok(Box::new(RecordingBridgeSession {
+                calls: self.calls.clone(),
+                finished: false,
+            }))
+        }
+    }
+
+    impl BridgeHelperSession for RecordingBridgeSession {
+        fn verify_android_input(&mut self) -> io::Result<()> {
+            self.calls.lock().unwrap().push("verify".to_owned());
+            Ok(())
+        }
+
+        fn finish(mut self: Box<Self>, waydroid_stopped: bool) -> io::Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("finish:{waydroid_stopped}"));
+            self.finished = true;
+            Ok(())
+        }
+    }
+
+    impl Drop for RecordingBridgeSession {
+        fn drop(&mut self) {
+            if !self.finished {
+                self.calls.lock().unwrap().push("drop".to_owned());
+            }
+        }
     }
 
     impl TouchInjector for RecordingInjector {
@@ -2262,6 +2326,41 @@ mod tests {
         assert!(options.trace_input);
         assert!(!options.grab);
         assert_eq!(options.profile_path, Some(PathBuf::from("profile.json")));
+    }
+
+    #[test]
+    fn rootless_session_requires_daemon_bridge_before_runtime_setup() {
+        let result = select_bridge_broker(false, None);
+        let error = match result {
+            Ok(_) => panic!("rootless session unexpectedly accepted no broker"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("daemon-owned bridge channel"));
+        assert!(select_bridge_broker(true, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn session_bridge_delegates_verify_and_forced_cleanup_to_broker() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let factory = Arc::new(RecordingBridgeFactory {
+            calls: calls.clone(),
+        });
+        let broker = thread::spawn(move || serve_bridge_broker(server, factory));
+        let owned: OwnedFd = client.into();
+        let mut client = BridgeBrokerClient::from_owned_fd(owned).unwrap();
+        client.open(Path::new("/dev/input/event17")).unwrap();
+        let mut bridge = SessionBridge::Broker(client);
+
+        bridge.verify_android_input().unwrap();
+        bridge.cleanup(false).unwrap();
+        broker.join().unwrap().unwrap();
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["open:/dev/input/event17", "verify", "finish:false"]
+        );
     }
 
     #[test]
