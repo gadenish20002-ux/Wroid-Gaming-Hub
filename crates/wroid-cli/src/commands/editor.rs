@@ -18,6 +18,7 @@ use super::terminal::spawn_terminal;
 
 const INDEX_HTML: &str = include_str!("../../assets/editor/index.html");
 const STYLES_CSS: &str = include_str!("../../assets/editor/styles.css");
+const PROFILE_MODEL_JS: &str = include_str!("../../assets/editor/profile-model.js");
 const APP_JS: &str = include_str!("../../assets/editor/app.js");
 const MAX_HEADER_BYTES: usize = 32 * 1024;
 const MAX_PROFILE_BYTES: usize = 2 * 1024 * 1024;
@@ -197,6 +198,7 @@ fn handle_request(request: &Request, profile_path: &Path, token: &str) -> (Respo
 
     match (request.method.as_str(), route) {
         ("GET", "/styles.css") => (Response::css(STYLES_CSS), false),
+        ("GET", "/profile-model.js") => (Response::javascript(PROFILE_MODEL_JS), false),
         ("GET", "/app.js") => (Response::javascript(APP_JS), false),
         ("GET", "/") if authorized => (Response::html(INDEX_HTML), false),
         ("GET", "/api/profile") if authorized => match fs::read_to_string(profile_path) {
@@ -635,6 +637,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn serves_the_profile_model_asset() {
+        let request = Request {
+            method: "GET".to_owned(),
+            target: "/profile-model.js".to_owned(),
+            body: Vec::new(),
+        };
+
+        let (response, close) = handle_request(&request, Path::new("/missing"), "secret");
+
+        assert_eq!(response.status, 200);
+        assert!(!close);
+        assert!(String::from_utf8(response.body)
+            .unwrap()
+            .contains("WroidProfileModel"));
+    }
+
+    #[test]
     fn rejects_requests_without_editor_token() {
         let request = Request {
             method: "GET".to_owned(),
@@ -687,7 +706,8 @@ mod tests {
         let request = Request {
             method: "PUT".to_owned(),
             target: "/api/profile?token=secret".to_owned(),
-            body: br#"{"schema_version":2,"name":"","package_name":"","bindings":[]}"#.to_vec(),
+            body: br#"{"schema_version":2,"name":"","package_name":"","layers":[],"bindings":[]}"#
+                .to_vec(),
         };
         let (response, _) = handle_request(&request, &path, "secret");
         assert_eq!(response.status, 422);

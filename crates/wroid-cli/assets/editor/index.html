@@ -70,9 +70,18 @@
           <div class="section-heading">
             <div>
               <p class="section-index">02 / LAYERS</p>
-              <h2>Control map</h2>
+              <h2>Layer stack</h2>
             </div>
             <span class="count-chip" id="bindingCount">0</span>
+          </div>
+          <div class="layer-rail" id="layerRail" role="tablist" aria-label="Profile control layers"></div>
+          <button class="add-layer-button" id="addLayerButton" type="button" aria-label="Add a control layer">
+            <span>＋</span> Add layer
+          </button>
+          <div class="layer-editor" id="layerEditor" aria-live="polite"></div>
+          <div class="binding-subheading">
+            <span>Selected layer bindings</span>
+            <span>VISIBLE / TOTAL</span>
           </div>
           <div class="search-wrap">
             <span aria-hidden="true">⌕</span>
@@ -242,6 +251,7 @@
     </div>
 
     <div class="toast-stack" id="toastStack" aria-live="polite"></div>
+    <script src="/profile-model.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

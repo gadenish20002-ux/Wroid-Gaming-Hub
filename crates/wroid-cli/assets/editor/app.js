@@ -1,15 +1,10 @@
 (() => {
   "use strict";
 
+  const Model = window.WroidProfileModel;
   const token = new URLSearchParams(window.location.search).get("token") || "";
   const api = (path) => `${path}?token=${encodeURIComponent(token)}`;
-  const supportedKeys = new Set([
-    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
-    "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
-    "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
-    "space", "tab", "shift", "ctrl", "alt", "up", "left", "down", "right", "esc",
-  ]);
-  const supportedButtons = new Set(["left", "right", "middle", "side", "extra"]);
+  const supportedKeys = Model.supportedKeys;
   const resolutionPresets = Object.freeze({
     "1280x720": Object.freeze({ width: 1280, height: 720, label: "720" }),
     "1600x900": Object.freeze({ width: 1600, height: 900, label: "900" }),
@@ -23,6 +18,9 @@
     profileName: document.querySelector("#profileName"),
     packageName: document.querySelector("#packageName"),
     orientation: document.querySelector("#orientation"),
+    layerRail: document.querySelector("#layerRail"),
+    layerEditor: document.querySelector("#layerEditor"),
+    addLayerButton: document.querySelector("#addLayerButton"),
     bindingCount: document.querySelector("#bindingCount"),
     bindingSearch: document.querySelector("#bindingSearch"),
     bindingList: document.querySelector("#bindingList"),
@@ -75,6 +73,7 @@
   const state = {
     profile: null,
     selected: -1,
+    selectedLayer: null,
     history: [],
     future: [],
     dirty: false,
@@ -89,8 +88,7 @@
     launchingLiveTest: false,
     backupAvailable: false,
     resolutionKey: "1600x900",
-    pressedKeys: new Set(),
-    pressedButtons: new Set(),
+    preview: Model.createPreviewState(),
     mouseMoving: false,
     mouseMoveTimer: null,
     keyCapture: null,
@@ -119,36 +117,8 @@
     return binding?.action?.kind || "unknown";
   }
 
-  function inputSummary(input) {
-    if (!input) return "NO INPUT";
-    if (input.kind === "key") return `KEY / ${input.key || "—"}`;
-    if (input.kind === "key_cluster") {
-      return `CLUSTER / ${[input.up, input.left, input.down, input.right].join(" ")}`;
-    }
-    if (input.kind === "mouse_button") return `MOUSE / ${input.button || "—"}`;
-    if (input.kind === "mouse_move") return "MOUSE / RELATIVE";
-    return input.kind;
-  }
-
-  function controlKey(binding) {
-    const input = binding.input;
-    if (input.kind === "key") return input.key;
-    if (input.kind === "key_cluster") {
-      if ([input.up, input.left, input.down, input.right].join("") === "wasd") return "WASD";
-      if ([input.up, input.left, input.down, input.right].join(",") === "up,left,down,right") return "ARROWS";
-      return "4 KEY";
-    }
-    if (input.kind === "mouse_button") {
-      return {
-        left: "M1",
-        right: "M2",
-        middle: "M3",
-        side: "M4",
-        extra: "M5",
-      }[input.button] || "M?";
-    }
-    return "MOUSE";
-  }
+  const inputSummary = Model.inputSummary;
+  const controlKey = Model.controlKey;
 
   function actionLabel(kind) {
     return {
@@ -183,26 +153,12 @@
       || target?.isContentEditable;
   }
 
-  function bindingIsTestActive(binding) {
-    const input = binding.input;
-    if (input.kind === "key") return state.pressedKeys.has(input.key);
-    if (input.kind === "key_cluster") {
-      return [input.up, input.left, input.down, input.right]
-        .some((key) => state.pressedKeys.has(key));
-    }
-    if (input.kind === "mouse_button") return state.pressedButtons.has(input.button);
-    if (input.kind === "mouse_move") {
-      return state.mouseMoving
-        || Boolean(binding.action.toggle_key && state.pressedKeys.has(binding.action.toggle_key));
-    }
-    return false;
-  }
-
   function activeTestBindings() {
     if (!state.testing) return [];
+    const active = new Set(Model.activePreviewBindingIndexes(state.profile, state.preview));
     return state.profile.bindings
       .map((binding, index) => ({ binding, index }))
-      .filter(({ binding }) => bindingIsTestActive(binding));
+      .filter(({ index }) => active.has(index));
   }
 
   function updateTestPreview() {
@@ -220,26 +176,37 @@
       node.classList.toggle("is-test-active", activeIndexes.has(node.dataset.bindingIndex));
     });
 
+    document.querySelectorAll(".layer-tab[data-layer-name]").forEach((node) => {
+      const runtimeActive = node.dataset.layerName === "base"
+        || state.preview.activeLayers.has(node.dataset.layerName);
+      node.classList.toggle("is-preview-active", state.testing && runtimeActive);
+      node.dataset.runtimeState = state.testing && runtimeActive ? "active" : "inactive";
+    });
+
     if (!state.testing) return;
     const sources = [
-      ...state.pressedKeys,
-      ...state.pressedButtons,
-      ...(state.mouseMoving ? ["mouse move"] : []),
+      ...state.preview.pressedKeys,
+      ...state.preview.pressedButtons,
+      ...(state.preview.mouseMoving ? ["mouse move"] : []),
     ].map((value) => value.toUpperCase());
+    const layers = [...state.preview.activeLayers];
     elements.inputTestReadout.textContent = sources.length
       ? sources.join(" + ")
-      : "Press a mapped key or mouse button";
+      : layers.length
+        ? `LAYERS: ${layers.join(" + ").toUpperCase()}`
+        : "Press a mapped key or mouse button";
     elements.inputTestMatches.textContent = active.length
-      ? `Matched: ${active.map(({ binding }) => binding.name).join(" · ")}`
+      ? `Matched: ${active.map(({ binding }) => binding.name).join(" · ")}${layers.length ? ` · Active layers: ${layers.join(", ")}` : ""}`
       : sources.length
-        ? "No binding matches this input."
-        : "Browser preview only · no Android events are sent.";
+        ? `No binding matches this input.${layers.length ? ` Active layers: ${layers.join(", ")}.` : ""}`
+        : layers.length
+          ? `Active layers: ${layers.join(", ")}. Browser preview only.`
+          : "Browser preview only · no Android events are sent.";
   }
 
   function setTesting(enabled) {
     state.testing = enabled;
-    state.pressedKeys.clear();
-    state.pressedButtons.clear();
+    state.preview = Model.createPreviewState();
     state.mouseMoving = false;
     window.clearTimeout(state.mouseMoveTimer);
     state.mouseMoveTimer = null;
@@ -250,9 +217,11 @@
   function pulseMouseMovement() {
     if (!state.testing) return;
     state.mouseMoving = true;
+    state.preview.mouseMoving = true;
     window.clearTimeout(state.mouseMoveTimer);
     state.mouseMoveTimer = window.setTimeout(() => {
       state.mouseMoving = false;
+      state.preview.mouseMoving = false;
       updateTestPreview();
     }, 180);
     updateTestPreview();
@@ -262,8 +231,7 @@
     if (!state.testing || isTextEditor(event.target)) return false;
     const key = browserKeyName(event.key);
     if (!supportedKeys.has(key)) return false;
-    if (pressed) state.pressedKeys.add(key);
-    else state.pressedKeys.delete(key);
+    Model.setPreviewKey(state.preview, state.profile, key, pressed);
     updateTestPreview();
     event.preventDefault();
     return true;
@@ -273,9 +241,8 @@
     if (!state.testing) return;
     const button = browserButtonName(event.button);
     if (!button) return;
-    if (!pressed && !state.pressedButtons.has(button)) return;
-    if (pressed) state.pressedButtons.add(button);
-    else state.pressedButtons.delete(button);
+    if (!pressed && !state.preview.pressedButtons.has(button)) return;
+    Model.setPreviewButton(state.preview, button, pressed);
     updateTestPreview();
     event.preventDefault();
     event.stopImmediatePropagation();
@@ -296,6 +263,7 @@
     if (!previous) return;
     state.future.push(clone(state.profile));
     state.profile = previous;
+    ensureSelectedLayer();
     state.selected = Math.min(state.selected, state.profile.bindings.length - 1);
     state.dirty = true;
     renderAll();
@@ -306,6 +274,7 @@
     if (!next) return;
     state.history.push(clone(state.profile));
     state.profile = next;
+    ensureSelectedLayer();
     state.selected = Math.min(state.selected, state.profile.bindings.length - 1);
     state.dirty = true;
     renderAll();
@@ -319,8 +288,26 @@
     updateStatus();
   }
 
+  function ensureSelectedLayer() {
+    if (state.selectedLayer !== null && !state.profile.layers.some((layer) => layer.name === state.selectedLayer)) {
+      state.selectedLayer = null;
+    }
+  }
+
+  function bindingInSelectedLayer(binding) {
+    return Model.layerName(binding) === (state.selectedLayer === null ? "base" : state.selectedLayer);
+  }
+
+  function selectLayer(name) {
+    state.selectedLayer = name;
+    const match = state.profile.bindings.findIndex(bindingInSelectedLayer);
+    state.selected = match;
+    renderAll();
+  }
+
   function renderAll() {
     renderMeta();
+    renderLayers();
     renderBindingList();
     renderOverlay();
     renderInspector();
@@ -332,17 +319,132 @@
     elements.profileName.value = state.profile.name || "";
     elements.packageName.value = state.profile.package_name || "";
     elements.orientation.value = state.profile.orientation || "landscape";
-    elements.bindingCount.textContent = String(state.profile.bindings.length).padStart(2, "0");
+    const visible = state.profile.bindings.filter(bindingInSelectedLayer).length;
+    elements.bindingCount.textContent = `${String(visible).padStart(2, "0")}/${String(state.profile.bindings.length).padStart(2, "0")}`;
+  }
+
+  function renderLayers() {
+    disarmKeyCapture();
+    elements.layerRail.replaceChildren();
+    const layers = [{ name: null, activation: null }, ...state.profile.layers];
+    layers.forEach((layer, index) => {
+      const name = layer.name;
+      const isBase = name === null;
+      const selected = name === state.selectedLayer;
+      const count = state.profile.bindings.filter((binding) => Model.layerName(binding) === (name === null ? "base" : name)).length;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.layerName = isBase ? "base" : name;
+      button.className = `layer-tab${selected ? " is-selected" : ""}`;
+      button.setAttribute("role", "tab");
+      button.setAttribute("aria-selected", String(selected));
+      button.setAttribute("aria-label", !isBase
+        ? `${name} layer, ${layer.activation.kind}, ${count} bindings`
+        : `Base layer, always active, ${count} bindings`);
+      const mode = !isBase ? layer.activation.kind.toUpperCase() : "ALWAYS";
+      const key = !isBase ? String(layer.activation.key).toUpperCase() : "LIVE";
+      button.innerHTML = `
+        <span class="layer-sequence">${String(index).padStart(2, "0")}</span>
+        <span class="layer-tab-copy"><strong>${escapeHtml(isBase ? "Base" : name || "Unnamed layer")}</strong><small>${escapeHtml(mode)} · ${escapeHtml(key)}</small></span>
+        <span class="layer-count">${String(count).padStart(2, "0")}</span>
+      `;
+      button.addEventListener("click", () => selectLayer(name));
+      elements.layerRail.append(button);
+    });
+
+    if (state.selectedLayer === null) {
+      elements.layerEditor.innerHTML = `
+        <div class="base-layer-note">
+          <span class="layer-chip base">BASE</span>
+          <span><strong>Always active</strong><small>Bindings without a named layer live here.</small></span>
+        </div>`;
+      return;
+    }
+
+    const layer = state.profile.layers.find((entry) => entry.name === state.selectedLayer);
+    if (!layer) return;
+    elements.layerEditor.innerHTML = `
+      <div class="layer-edit-grid">
+        <label><span>Name</span><input class="text-input mono-input" id="layerName" value="${escapeHtml(layer.name)}" autocomplete="off" spellcheck="false" aria-label="Selected layer name"></label>
+        <label><span>Mode</span><select class="select-input" id="layerMode" aria-label="Selected layer activation mode"><option value="hold"${layer.activation.kind === "hold" ? " selected" : ""}>Hold</option><option value="toggle"${layer.activation.kind === "toggle" ? " selected" : ""}>Toggle</option></select></label>
+        <div class="layer-key-cell">${keyCaptureField("layerKey", "Activation", layer.activation.key, "")}</div>
+        <button class="layer-delete" id="deleteLayerButton" type="button" aria-label="Delete layer ${escapeHtml(layer.name)} and move its bindings to Base">MOVE TO BASE + DELETE</button>
+      </div>`;
+    document.querySelector("#layerName").addEventListener("change", (event) => {
+      const previous = state.selectedLayer;
+      const next = event.currentTarget.value.trim();
+      const error = Model.layerRenameError(state.profile, previous, next);
+      if (error) {
+        toast(error, true);
+        renderLayers();
+        return;
+      }
+      mutate(() => {
+        Model.renameLayer(state.profile, previous, next);
+        state.selectedLayer = next;
+      });
+    });
+    wireChange("layerMode", (value) => { layer.activation.kind = value; });
+    wireKeyCapture("layerKey", (value) => { layer.activation.key = value; });
+    document.querySelector("#deleteLayerButton").addEventListener("click", () => {
+      const deleted = state.selectedLayer;
+      let moved = 0;
+      mutate(() => {
+        moved = Model.deleteLayer(state.profile, deleted);
+        state.selectedLayer = null;
+        state.selected = state.profile.bindings.findIndex(bindingInSelectedLayer);
+      });
+      toast(`Layer ${deleted} deleted. ${moved} binding${moved === 1 ? "" : "s"} moved to Base; Undo restores it.`);
+    });
+  }
+
+  function availableActivationKey() {
+    const used = new Set(state.profile.layers.map((layer) => String(layer.activation.key).toLowerCase()));
+    state.profile.bindings.forEach((binding) => {
+      if (binding.layer != null || binding.modifier != null) return;
+      if (binding.input.kind === "key") used.add(String(binding.input.key).toLowerCase());
+      if (binding.input.kind === "key_cluster") {
+        [binding.input.up, binding.input.left, binding.input.down, binding.input.right]
+          .forEach((key) => used.add(String(key).toLowerCase()));
+      }
+    });
+    return ["g", "v", "b", "n", "m", "z", "x", "q", "e", "t", "y"]
+      .find((key) => !used.has(key)) || "g";
+  }
+
+  function uniqueLayerName() {
+    const names = new Set(state.profile.layers.map((layer) => layer.name));
+    if (!names.has("layer")) return "layer";
+    let suffix = 2;
+    while (names.has(`layer_${suffix}`)) suffix += 1;
+    return `layer_${suffix}`;
+  }
+
+  function addLayer() {
+    if (state.profile.layers.length >= 64) {
+      toast("A profile may declare at most 64 layers.", true);
+      return;
+    }
+    mutate(() => {
+      const name = uniqueLayerName();
+      state.profile.layers.push({
+        name,
+        activation: { kind: "hold", key: availableActivationKey() },
+      });
+      state.selectedLayer = name;
+      state.selected = -1;
+    });
   }
 
   function renderBindingList() {
     const query = elements.bindingSearch.value.trim().toLowerCase();
     elements.bindingList.replaceChildren();
     state.profile.bindings.forEach((binding, index) => {
+      if (!bindingInSelectedLayer(binding)) return;
       if (
         query &&
         !binding.name.toLowerCase().includes(query) &&
-        !inputSummary(binding.input).toLowerCase().includes(query)
+        !inputSummary(binding).toLowerCase().includes(query)
       ) {
         return;
       }
@@ -355,7 +457,8 @@
         <span class="binding-symbol ${escapeHtml(kind)}">${escapeHtml(controlKey(binding))}</span>
         <span class="binding-copy">
           <strong>${escapeHtml(binding.name || "Untitled binding")}</strong>
-          <small>${escapeHtml(actionLabel(kind))} · ${escapeHtml(inputSummary(binding.input))}</small>
+          <small>${escapeHtml(actionLabel(kind))} · ${escapeHtml(inputSummary(binding))}</small>
+          <span class="binding-chips"><i class="layer-chip">${escapeHtml(Model.layerDisplayName(binding))}</i>${binding.modifier ? `<i class="modifier-chip">MOD · ${escapeHtml(String(binding.modifier).toUpperCase())}</i>` : ""}${binding.input.kind === "mouse_move" ? '<i class="layer-chip base">ALWAYS LIVE</i>' : ""}</span>
         </span>
         <span class="binding-index">${String(index + 1).padStart(2, "0")}</span>
       `;
@@ -368,6 +471,7 @@
   function renderOverlay() {
     elements.controlLayer.replaceChildren();
     state.profile.bindings.forEach((binding, index) => {
+      if (!bindingInSelectedLayer(binding)) return;
       const node = createControlNode(binding, index);
       if (node) elements.controlLayer.append(node);
     });
@@ -385,7 +489,7 @@
     node.className = `control-node ${action.kind === "tap" ? "tap-node" : action.kind === "hold" ? "hold-node" : action.kind === "virtual_joystick" ? "joystick-node" : "aim-node"}${index === state.selected ? " is-selected" : ""}`;
     node.innerHTML = `
       ${pointAction ? `<span class="node-key">${escapeHtml(controlKey(binding))}</span>` : ""}
-      <span class="control-label">${escapeHtml(binding.name)} / ${escapeHtml(controlKey(binding))}</span>
+      <span class="control-label">${escapeHtml(binding.name)} / ${escapeHtml(controlKey(binding))} / ${escapeHtml(Model.layerDisplayName(binding))}</span>
       ${!pointAction && index === state.selected ? '<span class="resize-handle" data-resize="true"></span>' : ""}
     `;
     applyNodeGeometry(node, action);
@@ -539,7 +643,7 @@
   function selectField(id, label, value, options) {
     return `<label class="field-label" for="${id}">${label}</label>
       <select class="select-input" id="${id}">
-        ${options.map(([key, title]) => `<option value="${key}"${key === value ? " selected" : ""}>${title}</option>`).join("")}
+        ${options.map(([key, title]) => `<option value="${escapeHtml(key)}"${key === value ? " selected" : ""}>${escapeHtml(title)}</option>`).join("")}
       </select>`;
   }
 
@@ -562,10 +666,22 @@
       `<div class="binding-type-banner"><strong>${escapeHtml(actionLabel(kind))}</strong><span>${escapeHtml(kind)}</span></div>
        ${textField("bindingName", "Binding name", binding.name, "Names must be unique inside this profile.")}`,
     );
-    html += section("Host input", renderInputEditor(binding.input, binding.action.kind));
+    html += section("Layer routing", renderBindingLayerEditor(binding));
+    html += section("Host input", renderInputEditor(binding));
     html += section("Android action", renderActionEditor(binding.action));
     elements.inspectorBody.innerHTML = html;
     wireInspector(binding);
+  }
+
+  function renderBindingLayerEditor(binding) {
+    if (binding.input.kind === "mouse_move") {
+      const authoredRouting = binding.layer != null || binding.modifier != null;
+      return `<div class="always-live-card"><span class="layer-chip base">BASE</span><span><strong>Always live mouse aim</strong><small>Mouse motion is layer-independent in this runtime.</small></span></div>
+        ${authoredRouting ? `<div class="routing-warning"><strong>Ignored authored routing</strong><small>${binding.layer ? `Layer: ${escapeHtml(binding.layer)}. ` : ""}${binding.modifier ? `Modifier: ${escapeHtml(binding.modifier)}. ` : ""}A modifier is invalid and blocks saving.</small><button id="clearMouseRouting" type="button">CLEAR ROUTING TO BASE</button></div>` : ""}`;
+    }
+    const layerOptions = [["", "Base · always active"], ...state.profile.layers.map((layer) => [layer.name, layer.name])];
+    return `${selectField("bindingLayer", "Layer", binding.layer || "", layerOptions)}
+      <div class="routing-readout"><span class="layer-chip">${escapeHtml(Model.layerDisplayName(binding))}</span><span class="routing-copy">Higher active layers win when inputs overlap.</span></div>`;
   }
 
   function inputOptionsForAction(kind) {
@@ -585,7 +701,9 @@
     ];
   }
 
-  function renderInputEditor(input, actionKind) {
+  function renderInputEditor(binding) {
+    const input = binding.input;
+    const actionKind = binding.action.kind;
     const options = inputOptionsForAction(actionKind);
     let html = options.length === 1
       ? `<label class="field-label">Input source</label>
@@ -617,6 +735,9 @@
       ]);
     } else {
       html += '<p class="hint">Relative X/Y motion drives a persistent Android touch contact while mouse aim is active.</p>';
+    }
+    if (input.kind !== "mouse_move") {
+      html += `<div class="input-modifier-field">${keyCaptureField("bindingModifier", "Optional modifier", binding.modifier || "", "Capture a chord modifier; Backspace/Delete clears it.")}</div>`;
     }
     return html;
   }
@@ -724,8 +845,29 @@
 
   function wireInspector(binding) {
     wireChange("bindingName", (value) => { binding.name = value.trim(); });
+    if (binding.input.kind !== "mouse_move") {
+      wireChange("bindingLayer", (value) => {
+        if (value) binding.layer = value;
+        else delete binding.layer;
+        state.selectedLayer = value || null;
+      });
+      wireKeyCapture("bindingModifier", (value) => {
+        if (value) binding.modifier = value;
+        else delete binding.modifier;
+      }, { allowEmpty: true });
+    } else {
+      document.querySelector("#clearMouseRouting")?.addEventListener("click", () => {
+        mutate(() => Model.clearMouseMoveRouting(binding));
+        toast("Mouse aim routing cleared. It remains always live on Base.");
+      });
+    }
     wireChange("inputKind", (value) => {
       binding.input = defaultInput(value);
+      if (value === "mouse_move") {
+        delete binding.layer;
+        delete binding.modifier;
+        state.selectedLayer = null;
+      }
     });
     if (binding.input.kind === "key") {
       wireKeyCapture("inputKey", (value) => { binding.input.key = value; });
@@ -846,6 +988,7 @@
           },
         };
       }
+      if (kind !== "mouse_aim" && state.selectedLayer !== null) binding.layer = state.selectedLayer;
       state.profile.bindings.push(binding);
       state.selected = state.profile.bindings.length - 1;
     });
@@ -881,44 +1024,7 @@
   }
 
   function validateProfile() {
-    const errors = [];
-    if (state.profile.schema_version !== 2) errors.push("Schema version must be 2.");
-    if (!state.profile.name.trim()) errors.push("Profile name is required.");
-    if (!state.profile.package_name.trim()) errors.push("Android package is required.");
-    const names = new Set();
-    state.profile.bindings.forEach((binding, index) => {
-      const label = binding.name || `Binding ${index + 1}`;
-      if (!binding.name.trim()) errors.push(`Binding ${index + 1} needs a name.`);
-      if (names.has(binding.name)) errors.push(`Duplicate binding name: ${binding.name}.`);
-      names.add(binding.name);
-      const input = binding.input;
-      if (input.kind === "key" && !supportedKeys.has(input.key)) errors.push(`${label}: unsupported key '${input.key}'.`);
-      if (input.kind === "key_cluster") {
-        [input.up, input.left, input.down, input.right].forEach((key) => {
-          if (!supportedKeys.has(key)) errors.push(`${label}: unsupported cluster key '${key}'.`);
-        });
-      }
-      if (input.kind === "mouse_button" && !supportedButtons.has(input.button)) {
-        errors.push(`${label}: unsupported mouse button.`);
-      }
-      const action = binding.action;
-      const allowedInputs = inputOptionsForAction(action.kind).map(([kind]) => kind);
-      if (!allowedInputs.includes(input.kind)) {
-        errors.push(`${label}: ${actionLabel(action.kind)} cannot use ${input.kind}.`);
-      }
-      if (action.kind === "virtual_joystick" && action.dead_zone >= action.radius) {
-        errors.push(`${label}: dead zone must be smaller than radius.`);
-      }
-      if (action.kind === "mouse_aim") {
-        if (action.region.x + action.region.w > 1.00001 || action.region.y + action.region.h > 1.00001) {
-          errors.push(`${label}: aim region leaves the viewport.`);
-        }
-        if (action.toggle_key && !supportedKeys.has(action.toggle_key)) {
-          errors.push(`${label}: unsupported toggle key '${action.toggle_key}'.`);
-        }
-      }
-    });
-    return errors;
+    return Model.validateProfile(state.profile);
   }
 
   function updateStatus() {
@@ -1015,9 +1121,8 @@
       state.history.push(clone(state.profile));
       if (state.history.length > 80) state.history.shift();
       state.future.length = 0;
-      state.profile = result.profile;
-      state.profile.orientation ||= "landscape";
-      state.profile.bindings ||= [];
+      state.profile = Model.normalizeProfile(result.profile);
+      ensureSelectedLayer();
       state.selected = state.profile.bindings.length
         ? Math.min(Math.max(state.selected, 0), state.profile.bindings.length - 1)
         : -1;
@@ -1403,6 +1508,7 @@
     elements.orientation.addEventListener("change", () => mutate(() => {
       state.profile.orientation = elements.orientation.value;
     }));
+    elements.addLayerButton.addEventListener("click", addLayer);
     elements.bindingSearch.addEventListener("input", renderBindingList);
     document.querySelectorAll("[data-add]").forEach((button) => {
       button.addEventListener("click", () => addControl(button.dataset.add));
@@ -1489,8 +1595,7 @@
     window.addEventListener("blur", () => {
       disarmKeyCapture();
       if (!state.testing) return;
-      state.pressedKeys.clear();
-      state.pressedButtons.clear();
+      state.preview = Model.createPreviewState();
       state.mouseMoving = false;
       updateTestPreview();
     });
@@ -1508,10 +1613,9 @@
     try {
       const response = await fetch(api("/api/profile"), { cache: "no-store" });
       if (!response.ok) throw new Error(`Editor authorization failed (${response.status}).`);
-      state.profile = await response.json();
-      state.profile.orientation ||= "landscape";
-      state.profile.bindings ||= [];
-      state.selected = state.profile.bindings.length ? 0 : -1;
+      state.profile = Model.normalizeProfile(await response.json());
+      state.selectedLayer = null;
+      state.selected = state.profile.bindings.findIndex(bindingInSelectedLayer);
       const startupWarnings = [];
       try {
         await loadPreferences();
