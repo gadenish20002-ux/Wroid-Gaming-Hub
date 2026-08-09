@@ -27,30 +27,46 @@ pub(crate) trait RuntimePlatformBackend: Send {
 }
 
 pub(crate) struct PlatformAttachment {
-    completion: Receiver<io::Result<RuntimeAttachmentReport>>,
+    completion: Option<Receiver<io::Result<RuntimeAttachmentReport>>>,
     runtime_shutdown: RuntimeChannelShutdown,
 }
 
 impl PlatformAttachment {
-    pub(crate) fn finish(self) -> io::Result<RuntimeAttachmentReport> {
-        match self.completion.try_recv() {
-            Ok(result) => return result,
+    pub(crate) fn try_finish(&mut self) -> Option<io::Result<RuntimeAttachmentReport>> {
+        let completion = self.completion.as_ref()?;
+        match completion.try_recv() {
+            Ok(result) => {
+                self.completion = None;
+                return Some(result);
+            }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "platform attachment thread ended before reporting completion",
-                ));
+                self.completion = None;
+                return Some(Err(attachment_completion_disconnected_error()));
             }
         }
-        let _ = self.runtime_shutdown.shutdown();
-        self.completion.recv().map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "platform attachment thread ended before reporting completion",
-            )
-        })?
+        None
     }
+
+    pub(crate) fn finish(mut self) -> io::Result<RuntimeAttachmentReport> {
+        if let Some(result) = self.try_finish() {
+            return result;
+        }
+        let _ = self.runtime_shutdown.shutdown();
+        let Some(completion) = self.completion.take() else {
+            return Err(attachment_completion_disconnected_error());
+        };
+        completion
+            .recv()
+            .map_err(|_| attachment_completion_disconnected_error())?
+    }
+}
+
+fn attachment_completion_disconnected_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::BrokenPipe,
+        "platform attachment thread ended before reporting completion",
+    )
 }
 
 pub(crate) struct PersistentPlatform {
@@ -103,7 +119,7 @@ impl PersistentPlatform {
                 )
             })?;
         Ok(PlatformAttachment {
-            completion: result,
+            completion: Some(result),
             runtime_shutdown,
         })
     }

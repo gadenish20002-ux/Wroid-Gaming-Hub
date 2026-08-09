@@ -56,6 +56,7 @@ struct LaunchProgram {
 struct ManagedProcess {
     child: Child,
     attachment: Option<PlatformAttachment>,
+    attachment_result: Option<io::Result<RuntimeAttachmentReport>>,
     stop_requested: bool,
 }
 
@@ -230,6 +231,7 @@ impl ManagedProcesses {
             ManagedProcess {
                 child,
                 attachment: Some(attachment),
+                attachment_result: None,
                 stop_requested: false,
             },
         );
@@ -258,9 +260,28 @@ impl ManagedProcesses {
     pub(crate) fn reap(&mut self) -> Result<Vec<ReapedProcess>, ProcessError> {
         let mut completed = Vec::new();
         let mut exited = Vec::new();
+        let mut failed_attachments = Vec::new();
         for (session_id, process) in &mut self.children {
             if let Some(status) = process.child.try_wait()? {
                 exited.push((session_id.clone(), status));
+                continue;
+            }
+            if process
+                .attachment_result
+                .as_ref()
+                .is_some_and(Result::is_err)
+            {
+                failed_attachments.push(session_id.clone());
+                continue;
+            }
+            if let Some(attachment) = process.attachment.as_mut() {
+                if let Some(result) = attachment.try_finish() {
+                    let failed = result.is_err();
+                    process.attachment_result = Some(result);
+                    if failed {
+                        failed_attachments.push(session_id.clone());
+                    }
+                }
             }
         }
         for (session_id, status) in exited {
@@ -268,7 +289,30 @@ impl ManagedProcesses {
                 .children
                 .remove(&session_id)
                 .expect("exited managed process remains owned");
-            let attachment_result = finish_attachment(process.attachment.take());
+            let attachment_result =
+                finish_attachment(process.attachment.take(), process.attachment_result.take());
+            let (success, detail) =
+                combine_reaped_detail(status, attachment_result, process.stop_requested);
+            completed.push(ReapedProcess {
+                session_id,
+                success,
+                detail,
+            });
+        }
+        for session_id in failed_attachments {
+            let status = {
+                let process = self
+                    .children
+                    .get_mut(&session_id)
+                    .expect("failed attachment remains owned");
+                terminate_and_reap_child(&mut process.child)?
+            };
+            let mut process = self
+                .children
+                .remove(&session_id)
+                .expect("terminated managed process remains owned");
+            let attachment_result =
+                finish_attachment(process.attachment.take(), process.attachment_result.take());
             let (success, detail) =
                 combine_reaped_detail(status, attachment_result, process.stop_requested);
             completed.push(ReapedProcess {
@@ -374,7 +418,7 @@ impl Drop for ManagedProcesses {
         let children = std::mem::take(&mut self.children);
         for (_, mut process) in children {
             let _ = wait_for_terminated_child(&mut process.child);
-            let _ = finish_attachment(process.attachment.take());
+            let _ = finish_attachment(process.attachment.take(), process.attachment_result.take());
         }
         drop(self.platform.take());
     }
@@ -415,7 +459,11 @@ impl RuntimePlatformBackend for NoopTestPlatformBackend {
 
 fn finish_attachment(
     attachment: Option<PlatformAttachment>,
+    attachment_result: Option<io::Result<RuntimeAttachmentReport>>,
 ) -> io::Result<RuntimeAttachmentReport> {
+    if let Some(result) = attachment_result {
+        return result;
+    }
     match attachment {
         Some(attachment) => attachment.finish(),
         None => Ok(empty_attachment_report()),
@@ -981,6 +1029,7 @@ mod tests {
         ManagedProcess {
             child,
             attachment: None,
+            attachment_result: None,
             stop_requested: false,
         }
     }
@@ -1164,6 +1213,7 @@ mod tests {
             ManagedProcess {
                 child,
                 attachment: Some(attachment),
+                attachment_result: None,
                 stop_requested: false,
             },
         );
@@ -1202,6 +1252,7 @@ mod tests {
             ManagedProcess {
                 child,
                 attachment: Some(attachment),
+                attachment_result: None,
                 stop_requested: false,
             },
         );
@@ -1222,6 +1273,58 @@ mod tests {
         assert!(!completed[0].success);
         assert!(completed[0].detail.contains("owned attachment failed"));
         drop(platform);
+    }
+
+    #[test]
+    fn attachment_failure_terminates_live_worker_and_marks_session_failed() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile_path = write_profile(directory.path());
+        let worker = sleeping_worker(directory.path());
+        let calls = shared_platform_calls();
+        let mut processes = ManagedProcesses::with_game_log_and_platform(
+            directory.path().join("state/wroid/game-session.log"),
+            fake_platform_with_serve_error(calls.clone(), Some("helper exited after readiness")),
+        );
+        let session_id = SessionId::new("attachment-live-failure").unwrap();
+
+        processes
+            .launch_with_worker_for_test(
+                session_id.clone(),
+                &request_for_profile(&profile_path, "attachment-live-failure"),
+                &worker,
+                // SAFETY: geteuid takes no arguments and has no preconditions.
+                unsafe { libc::geteuid() },
+            )
+            .unwrap();
+
+        let completed = (0..100)
+            .find_map(|_| {
+                let completed = processes.reap().unwrap();
+                if completed.is_empty() {
+                    thread::sleep(Duration::from_millis(5));
+                    None
+                } else {
+                    Some(completed)
+                }
+            })
+            .expect("live worker was not failed after its runtime attachment ended");
+
+        assert_eq!(completed[0].session_id, session_id);
+        assert!(!completed[0].success);
+        assert!(completed[0]
+            .detail
+            .contains("runtime attachment failed: helper exited after readiness"));
+        assert!(processes.children.is_empty());
+        drop(processes);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                "factory",
+                "prepare:com.example.process",
+                "serve",
+                "shutdown"
+            ]
+        );
     }
 
     #[test]
