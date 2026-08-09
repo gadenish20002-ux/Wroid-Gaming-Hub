@@ -3,12 +3,23 @@ use std::env;
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use thiserror::Error;
+#[cfg(test)]
+use wroid_inject::BridgeHelperSession;
+use wroid_inject::{
+    serve_bridge_broker, BridgeHelperCommand, BridgeHelperFactory, ProductionBridgeHelperFactory,
+    BRIDGE_WORKER_FD, BRIDGE_WORKER_PROTOCOL_GENERATION,
+};
 use wroid_runtime::SessionId;
 
 use crate::ipc::GameLaunchRequest;
@@ -40,15 +51,25 @@ struct LaunchProgram {
     game_mode_active: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
+struct ManagedProcess {
+    child: Child,
+    broker: Option<JoinHandle<io::Result<()>>>,
+}
+
 pub(crate) struct ManagedProcesses {
-    children: BTreeMap<SessionId, Child>,
+    children: BTreeMap<SessionId, ManagedProcess>,
     game_log_override: Option<PathBuf>,
+    bridge_factory_override: Option<Arc<dyn BridgeHelperFactory>>,
 }
 
 impl ManagedProcesses {
     pub(crate) fn new() -> Self {
-        Self::default()
+        Self {
+            children: BTreeMap::new(),
+            game_log_override: None,
+            bridge_factory_override: None,
+        }
     }
 
     #[cfg(test)]
@@ -56,6 +77,7 @@ impl ManagedProcesses {
         Self {
             children: BTreeMap::new(),
             game_log_override: Some(path),
+            bridge_factory_override: Some(Arc::new(TestBridgeFactory)),
         }
     }
 
@@ -69,17 +91,27 @@ impl ManagedProcesses {
         if !self.children.is_empty() {
             return Err(ProcessError::AlreadyActive);
         }
+        if request.worker_protocol_generation != BRIDGE_WORKER_PROTOCOL_GENERATION {
+            return Err(ProcessError::UnsafeRequest(format!(
+                "worker protocol generation {} does not match {}",
+                request.worker_protocol_generation, BRIDGE_WORKER_PROTOCOL_GENERATION
+            )));
+        }
         let executable = peer_executable(peer_pid, expected_uid)?;
         let profile_path = validated_profile_path(&request.profile_path, expected_uid)?;
         validate_input_path(request.keyboard.as_deref(), "keyboard")?;
         validate_input_path(request.mouse.as_deref(), "mouse")?;
-        let arguments = launch_arguments(
-            &profile_path,
-            request.width,
-            request.height,
-            request.keyboard.as_deref(),
-            request.mouse.as_deref(),
-        );
+        let factory = match &self.bridge_factory_override {
+            Some(factory) => factory.clone(),
+            None => production_bridge_factory(expected_uid)?,
+        };
+        let (worker_stream, broker_stream) = UnixStream::pair()?;
+        set_close_on_exec(&worker_stream)?;
+        set_close_on_exec(&broker_stream)?;
+        let broker = thread::Builder::new()
+            .name(format!("wroid-bridge-{}", session_id.as_str()))
+            .spawn(move || serve_bridge_broker(broker_stream, factory))?;
+        let arguments = launch_arguments(&profile_path, request, std::process::id());
         let program = launch_program(
             &executable,
             arguments,
@@ -98,17 +130,40 @@ impl ManagedProcesses {
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(stderr))
             .process_group(0);
-        let child = command.spawn()?;
+        configure_worker_child(
+            &mut command,
+            worker_stream.as_raw_fd(),
+            std::process::id() as libc::pid_t,
+        )?;
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(spawn_error) => {
+                drop(worker_stream);
+                return match join_broker(Some(broker)) {
+                    Ok(()) => Err(ProcessError::Io(spawn_error)),
+                    Err(broker_error) => Err(ProcessError::Io(io::Error::other(format!(
+                        "worker spawn failed: {spawn_error}; bridge broker also failed: {broker_error}"
+                    )))),
+                };
+            }
+        };
+        drop(worker_stream);
         let pid = child.id();
-        self.children.insert(session_id, child);
+        self.children.insert(
+            session_id,
+            ManagedProcess {
+                child,
+                broker: Some(broker),
+            },
+        );
         Ok(pid)
     }
 
     pub(crate) fn request_stop(&mut self, session_id: &SessionId) -> Result<bool, ProcessError> {
-        let Some(child) = self.children.get(session_id) else {
+        let Some(process) = self.children.get(session_id) else {
             return Ok(false);
         };
-        let pid = i32::try_from(child.id())
+        let pid = i32::try_from(process.child.id())
             .map_err(|_| ProcessError::UnsafeRequest("child PID is out of range".to_owned()))?;
         // SAFETY: the Child handle is still owned and unreaped, so this PID
         // cannot have been recycled for an unrelated process.
@@ -124,21 +179,24 @@ impl ManagedProcesses {
 
     pub(crate) fn reap(&mut self) -> Result<Vec<ReapedProcess>, ProcessError> {
         let mut completed = Vec::new();
-        for (session_id, child) in &mut self.children {
-            if let Some(status) = child.try_wait()? {
-                let detail = match status.signal() {
-                    Some(signal) => format!("game worker terminated by signal {signal}"),
-                    None => format!("game worker exited with {status}"),
-                };
-                completed.push(ReapedProcess {
-                    session_id: session_id.clone(),
-                    success: status.success(),
-                    detail,
-                });
+        let mut exited = Vec::new();
+        for (session_id, process) in &mut self.children {
+            if let Some(status) = process.child.try_wait()? {
+                exited.push((session_id.clone(), status));
             }
         }
-        for process in &completed {
-            self.children.remove(&process.session_id);
+        for (session_id, status) in exited {
+            let mut process = self
+                .children
+                .remove(&session_id)
+                .expect("exited managed process remains owned");
+            let broker_result = join_broker(process.broker.take());
+            let (success, detail) = combine_reaped_detail(status, broker_result);
+            completed.push(ReapedProcess {
+                session_id,
+                success,
+                detail,
+            });
         }
         Ok(completed)
     }
@@ -228,39 +286,175 @@ fn validate_game_mode_wrapper(
 
 impl Drop for ManagedProcesses {
     fn drop(&mut self) {
-        for child in self.children.values() {
-            if let Ok(pid) = i32::try_from(child.id()) {
+        for process in self.children.values() {
+            if let Ok(pid) = i32::try_from(process.child.id()) {
                 // SAFETY: each Child is still owned and unreaped here.
                 let _ = unsafe { libc::kill(pid, libc::SIGTERM) };
             }
         }
+        let children = std::mem::take(&mut self.children);
+        for (_, mut process) in children {
+            wait_for_terminated_child(&mut process.child);
+            let _ = join_broker(process.broker.take());
+        }
+    }
+}
+
+fn production_bridge_factory(
+    expected_uid: u32,
+) -> Result<Arc<dyn BridgeHelperFactory>, ProcessError> {
+    let executable = env::current_exe()?;
+    let release_directory = executable.parent().ok_or_else(|| {
+        ProcessError::UnsafeRequest("wroidd executable has no release directory".to_owned())
+    })?;
+    let staged = release_directory.join("wroid-helper");
+    let command = BridgeHelperCommand::production_release(&staged, expected_uid)?;
+    Ok(Arc::new(ProductionBridgeHelperFactory::new(command)))
+}
+
+fn set_close_on_exec(stream: &UnixStream) -> io::Result<()> {
+    let fd = stream.as_raw_fd();
+    // SAFETY: fcntl only inspects and updates the valid borrowed descriptor.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn join_broker(broker: Option<JoinHandle<io::Result<()>>>) -> io::Result<()> {
+    match broker {
+        Some(handle) => handle
+            .join()
+            .map_err(|_| io::Error::other("bridge broker thread panicked"))?,
+        None => Ok(()),
+    }
+}
+
+fn wait_for_terminated_child(child: &mut Child) {
+    for _ in 0..100 {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(_) => return,
+        }
+    }
+    if let Ok(pid) = i32::try_from(child.id()) {
+        // SAFETY: the exact unreaped Child is still owned here.
+        let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    let _ = child.wait();
+}
+
+#[cfg(test)]
+struct TestBridgeFactory;
+
+#[cfg(test)]
+impl BridgeHelperFactory for TestBridgeFactory {
+    fn start(&self, _event_node: &Path) -> io::Result<Box<dyn BridgeHelperSession>> {
+        Err(io::Error::other(
+            "test worker unexpectedly requested bridge activation",
+        ))
     }
 }
 
 pub(crate) fn launch_arguments(
     profile_path: &Path,
-    width: u32,
-    height: u32,
-    keyboard: Option<&Path>,
-    mouse: Option<&Path>,
+    request: &GameLaunchRequest,
+    daemon_pid: u32,
 ) -> Vec<OsString> {
     let mut arguments = vec![
         OsString::from("launch-v2"),
         profile_path.as_os_str().to_owned(),
+        OsString::from("--daemon-worker"),
+        OsString::from("--bridge-fd"),
+        OsString::from(BRIDGE_WORKER_FD.to_string()),
+        OsString::from("--daemon-parent-pid"),
+        OsString::from(daemon_pid.to_string()),
         OsString::from("--width"),
-        OsString::from(width.to_string()),
+        OsString::from(request.width.to_string()),
         OsString::from("--height"),
-        OsString::from(height.to_string()),
+        OsString::from(request.height.to_string()),
     ];
-    if let Some(path) = keyboard {
+    if let Some(path) = request.keyboard.as_deref() {
         arguments.push(OsString::from("--keyboard"));
         arguments.push(path.as_os_str().to_owned());
     }
-    if let Some(path) = mouse {
+    if let Some(path) = request.mouse.as_deref() {
         arguments.push(OsString::from("--mouse"));
         arguments.push(path.as_os_str().to_owned());
     }
+    if !request.grab {
+        arguments.push(OsString::from("--no-grab"));
+    }
+    if !request.show_ui {
+        arguments.push(OsString::from("--no-ui"));
+    }
+    if !request.launch_package {
+        arguments.push(OsString::from("--no-launch"));
+    }
+    if request.trace_input {
+        arguments.push(OsString::from("--trace-input"));
+    }
+    if let Some(milliseconds) = request.exit_after_millis {
+        arguments.push(OsString::from("--exit-after-ms"));
+        arguments.push(OsString::from(milliseconds.to_string()));
+    }
     arguments
+}
+
+fn configure_worker_child(
+    command: &mut Command,
+    source_fd: libc::c_int,
+    daemon_pid: libc::pid_t,
+) -> io::Result<()> {
+    // SAFETY: the closure uses only async-signal-safe Linux syscalls between
+    // fork and exec and captures plain integer descriptors/PIDs.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::getppid() != daemon_pid {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "Wroid daemon parent changed before worker exec",
+                ));
+            }
+            if source_fd == BRIDGE_WORKER_FD {
+                let flags = libc::fcntl(source_fd, libc::F_GETFD);
+                if flags < 0
+                    || libc::fcntl(source_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) != 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+            } else {
+                if libc::dup3(source_fd, BRIDGE_WORKER_FD, 0) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                libc::close(source_fd);
+            }
+            Ok(())
+        });
+    }
+    Ok(())
+}
+
+fn combine_reaped_detail(
+    status: std::process::ExitStatus,
+    broker_result: io::Result<()>,
+) -> (bool, String) {
+    let detail = match status.signal() {
+        Some(signal) => format!("game worker terminated by signal {signal}"),
+        None => format!("game worker exited with {status}"),
+    };
+    match broker_result {
+        Ok(()) => (status.success(), detail),
+        Err(error) => (
+            false,
+            format!("{detail}; bridge broker cleanup failed: {error}"),
+        ),
+    }
 }
 
 fn peer_executable(peer_pid: libc::pid_t, expected_uid: u32) -> Result<PathBuf, ProcessError> {
@@ -372,6 +566,8 @@ fn game_log_path() -> Result<PathBuf, ProcessError> {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
     use std::thread;
     use std::time::Duration;
 
@@ -393,22 +589,42 @@ mod tests {
             keyboard: None,
             mouse: None,
             game_mode: false,
+            worker_protocol_generation: BRIDGE_WORKER_PROTOCOL_GENERATION,
+            grab: true,
+            show_ui: true,
+            launch_package: true,
+            trace_input: false,
+            exit_after_millis: None,
+        }
+    }
+
+    fn test_process(child: Child) -> ManagedProcess {
+        ManagedProcess {
+            child,
+            broker: None,
         }
     }
 
     #[test]
     fn launch_arguments_are_fixed_and_typed() {
+        let mut request = launch_request();
+        request.keyboard = Some(PathBuf::from("/dev/input/event3"));
+        request.mouse = Some(PathBuf::from("/dev/input/event5"));
+        request.grab = false;
+        request.show_ui = false;
+        request.launch_package = false;
+        request.trace_input = true;
+        request.exit_after_millis = Some(20_000);
         assert_eq!(
-            launch_arguments(
-                Path::new("/profiles/pubg-v2.json"),
-                1600,
-                900,
-                Some(Path::new("/dev/input/event3")),
-                Some(Path::new("/dev/input/event5")),
-            ),
+            launch_arguments(Path::new("/profiles/pubg-v2.json"), &request, 4242,),
             [
                 "launch-v2",
                 "/profiles/pubg-v2.json",
+                "--daemon-worker",
+                "--bridge-fd",
+                "198",
+                "--daemon-parent-pid",
+                "4242",
                 "--width",
                 "1600",
                 "--height",
@@ -417,9 +633,90 @@ mod tests {
                 "/dev/input/event3",
                 "--mouse",
                 "/dev/input/event5",
+                "--no-grab",
+                "--no-ui",
+                "--no-launch",
+                "--trace-input",
+                "--exit-after-ms",
+                "20000",
             ]
             .map(OsString::from)
         );
+    }
+
+    #[test]
+    fn worker_arguments_never_contain_a_helper_path() {
+        let arguments = launch_arguments(Path::new("/profiles/game.json"), &launch_request(), 7);
+        assert!(!arguments
+            .iter()
+            .any(|argument| argument.to_string_lossy().contains("wroid-helper")));
+    }
+
+    #[test]
+    fn configured_worker_inherits_the_fixed_bridge_socket() {
+        let (worker_stream, broker_stream) = UnixStream::pair().unwrap();
+        let mut command = Command::new("/usr/bin/sh");
+        command.args(["-c", "test -S /proc/self/fd/198"]);
+        configure_worker_child(
+            &mut command,
+            worker_stream.as_raw_fd(),
+            std::process::id() as libc::pid_t,
+        )
+        .unwrap();
+
+        let status = command.status().unwrap();
+
+        assert!(status.success());
+        drop(worker_stream);
+        drop(broker_stream);
+    }
+
+    #[test]
+    fn reaped_detail_preserves_worker_and_broker_failures() {
+        let status = Command::new("/usr/bin/sh")
+            .args(["-c", "exit 7"])
+            .status()
+            .unwrap();
+        let (success, detail) =
+            combine_reaped_detail(status, Err(io::Error::other("bridge cleanup failed")));
+
+        assert!(!success);
+        assert!(detail.contains("exit status: 7"));
+        assert!(detail.contains("bridge cleanup failed"));
+    }
+
+    #[test]
+    fn managed_reaper_joins_the_owned_broker() {
+        let session_id = SessionId::new("broker-reap").unwrap();
+        let child = Command::new("/usr/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let broker = thread::spawn(|| Err(io::Error::other("owned broker failed")));
+        let mut processes = ManagedProcesses::new();
+        processes.children.insert(
+            session_id.clone(),
+            ManagedProcess {
+                child,
+                broker: Some(broker),
+            },
+        );
+
+        let completed = (0..100)
+            .find_map(|_| {
+                let completed = processes.reap().unwrap();
+                if completed.is_empty() {
+                    thread::sleep(Duration::from_millis(5));
+                    None
+                } else {
+                    Some(completed)
+                }
+            })
+            .expect("short-lived managed worker was not reaped");
+
+        assert_eq!(completed[0].session_id, session_id);
+        assert!(!completed[0].success);
+        assert!(completed[0].detail.contains("owned broker failed"));
     }
 
     #[test]
@@ -515,7 +812,9 @@ mod tests {
         let session_id = SessionId::new("reap-clean").unwrap();
         let child = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
         let mut processes = ManagedProcesses::new();
-        processes.children.insert(session_id.clone(), child);
+        processes
+            .children
+            .insert(session_id.clone(), test_process(child));
 
         let completed = (0..100)
             .find_map(|_| {
@@ -540,7 +839,7 @@ mod tests {
         let session_id = SessionId::new("active-one").unwrap();
         let child = Command::new("sleep").arg("30").spawn().unwrap();
         let mut processes = ManagedProcesses::new();
-        processes.children.insert(session_id, child);
+        processes.children.insert(session_id, test_process(child));
 
         let error = processes
             .launch(
@@ -560,7 +859,9 @@ mod tests {
         let session_id = SessionId::new("stop-owned").unwrap();
         let child = Command::new("sleep").arg("30").spawn().unwrap();
         let mut processes = ManagedProcesses::new();
-        processes.children.insert(session_id.clone(), child);
+        processes
+            .children
+            .insert(session_id.clone(), test_process(child));
 
         assert!(processes.request_stop(&session_id).unwrap());
         let completed = (0..100)

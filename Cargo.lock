@@ -713,6 +713,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "wroid-core",
+ "wroid-inject",
  "wroid-runtime",
 ]
 

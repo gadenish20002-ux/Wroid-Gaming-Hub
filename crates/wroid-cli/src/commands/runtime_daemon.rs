@@ -158,6 +158,12 @@ fn game_launch_request(
             keyboard,
             mouse,
             game_mode,
+            worker_protocol_generation: wroid_inject::BRIDGE_WORKER_PROTOCOL_GENERATION,
+            grab: true,
+            show_ui: true,
+            launch_package: true,
+            trace_input: false,
+            exit_after_millis: None,
         },
     }
 }

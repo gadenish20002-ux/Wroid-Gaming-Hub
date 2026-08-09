@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use wroid_core::profile_v2::ProfileV2;
 use wroid_core::Resolution;
+use wroid_inject::BRIDGE_WORKER_PROTOCOL_GENERATION;
 use wroid_runtime::{DisplayInfo, SessionId, SessionLifecycle, SessionState, StopReason};
 
 use crate::process::ManagedProcesses;
@@ -84,6 +85,22 @@ pub struct GameLaunchRequest {
     pub mouse: Option<PathBuf>,
     #[serde(default)]
     pub game_mode: bool,
+    #[serde(default)]
+    pub worker_protocol_generation: u32,
+    #[serde(default = "default_true")]
+    pub grab: bool,
+    #[serde(default = "default_true")]
+    pub show_ui: bool,
+    #[serde(default = "default_true")]
+    pub launch_package: bool,
+    #[serde(default)]
+    pub trace_input: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_after_millis: Option<u64>,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -494,8 +511,22 @@ fn dispatch(
         }
         DaemonRequest::LaunchProfileV2 { launch } => {
             let session_id = validated_session_id(launch.session_id.clone())?;
+            if launch.worker_protocol_generation != BRIDGE_WORKER_PROTOCOL_GENERATION {
+                return Err(format!(
+                    "worker protocol generation {} is incompatible with daemon generation {}",
+                    launch.worker_protocol_generation, BRIDGE_WORKER_PROTOCOL_GENERATION
+                ));
+            }
             if !(1..=8192).contains(&launch.width) || !(1..=8192).contains(&launch.height) {
                 return Err("resolution dimensions must each be between 1 and 8192".to_owned());
+            }
+            if launch
+                .exit_after_millis
+                .is_some_and(|value| !(1..=3_600_000).contains(&value))
+            {
+                return Err(
+                    "diagnostic timeout must be between 1 and 3600000 milliseconds".to_owned(),
+                );
             }
             let resolution = Resolution {
                 width: launch.width,
@@ -506,7 +537,7 @@ fn dispatch(
                     session_id.clone(),
                     launch.profile.clone(),
                     DisplayInfo::new(resolution),
-                    true,
+                    launch.launch_package,
                 )
                 .map_err(|error| error.to_string())?;
             let pid = match processes.launch(
@@ -972,6 +1003,12 @@ mod tests {
                 keyboard: Some(PathBuf::from("/dev/input/event3")),
                 mouse: Some(PathBuf::from("/dev/input/event5")),
                 game_mode: true,
+                worker_protocol_generation: 1,
+                grab: false,
+                show_ui: false,
+                launch_package: false,
+                trace_input: true,
+                exit_after_millis: Some(20_000),
             },
         });
 
@@ -979,6 +1016,12 @@ mod tests {
         assert_eq!(value["method"], "launch_profile_v2");
         assert_eq!(value["params"]["launch"]["width"], 1600);
         assert_eq!(value["params"]["launch"]["gameMode"], true);
+        assert_eq!(value["params"]["launch"]["workerProtocolGeneration"], 1);
+        assert_eq!(value["params"]["launch"]["grab"], false);
+        assert_eq!(value["params"]["launch"]["showUi"], false);
+        assert_eq!(value["params"]["launch"]["launchPackage"], false);
+        assert_eq!(value["params"]["launch"]["traceInput"], true);
+        assert_eq!(value["params"]["launch"]["exitAfterMillis"], 20_000);
         assert!(value["params"]["launch"].get("executable").is_none());
         assert!(value["params"]["launch"].get("arguments").is_none());
 
@@ -987,11 +1030,64 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("gameMode");
+        legacy_value["params"]["launch"]
+            .as_object_mut()
+            .unwrap()
+            .remove("workerProtocolGeneration");
         let legacy: ProtocolRequest = serde_json::from_value(legacy_value).unwrap();
         let DaemonRequest::LaunchProfileV2 { launch } = legacy.request else {
             panic!("unexpected legacy request method");
         };
         assert!(!launch.game_mode);
+        assert_eq!(launch.worker_protocol_generation, 0);
+    }
+
+    #[test]
+    fn launch_rejects_worker_generation_and_timeout_before_session_mutation() {
+        let request = |generation, timeout| GameLaunchRequest {
+            session_id: "invalid-worker".to_owned(),
+            profile_path: PathBuf::from("/path/is/not/used"),
+            profile: profile(),
+            width: 1600,
+            height: 900,
+            keyboard: None,
+            mouse: None,
+            game_mode: false,
+            worker_protocol_generation: generation,
+            grab: true,
+            show_ui: true,
+            launch_package: false,
+            trace_input: true,
+            exit_after_millis: timeout,
+        };
+        let credentials = PeerCredentials {
+            pid: std::process::id() as libc::pid_t,
+        };
+
+        for (launch, expected) in [
+            (request(0, Some(20_000)), "worker protocol generation"),
+            (
+                request(BRIDGE_WORKER_PROTOCOL_GENERATION, Some(0)),
+                "diagnostic timeout",
+            ),
+            (
+                request(BRIDGE_WORKER_PROTOCOL_GENERATION, Some(3_600_001)),
+                "diagnostic timeout",
+            ),
+        ] {
+            let mut manager = DaemonSessionManager::new();
+            let mut processes = ManagedProcesses::new();
+            let error = dispatch(
+                &mut manager,
+                &mut processes,
+                DaemonRequest::LaunchProfileV2 { launch },
+                credentials,
+                effective_uid(),
+            )
+            .unwrap_err();
+            assert!(error.contains(expected));
+            assert_eq!(manager.session_count(), 0);
+        }
     }
 
     #[test]
@@ -1026,6 +1122,12 @@ mod tests {
                     keyboard: None,
                     mouse: None,
                     game_mode: false,
+                    worker_protocol_generation: BRIDGE_WORKER_PROTOCOL_GENERATION,
+                    grab: true,
+                    show_ui: true,
+                    launch_package: true,
+                    trace_input: false,
+                    exit_after_millis: None,
                 },
             })
             .unwrap();
