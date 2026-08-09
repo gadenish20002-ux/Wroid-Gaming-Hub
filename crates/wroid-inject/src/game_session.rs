@@ -328,7 +328,6 @@ fn combine_session_results<T>(
     let bridge_error = bridge_result.err();
     let error_count = usize::from(session_error.is_some())
         + usize::from(stop_error.is_some())
-        + usize::from(stop_error.is_some())
         + usize::from(bridge_error.is_some());
 
     if error_count == 0 {
@@ -2475,6 +2474,18 @@ mod tests {
         assert!(error.contains("game session failed: runtime injection failed"));
         assert!(error.contains("Waydroid shutdown failed: container did not stop"));
         assert!(error.contains("input bridge cleanup failed: managed include could not be removed"));
+    }
+
+    #[test]
+    fn single_waydroid_stop_failure_is_returned_directly() {
+        let error = combine_session_results(
+            Ok("session report"),
+            Err(io::Error::other("container did not stop")),
+            Ok(()),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "container did not stop");
     }
 
     #[test]
