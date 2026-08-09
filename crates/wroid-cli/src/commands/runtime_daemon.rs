@@ -15,6 +15,8 @@ use wroid_daemon::ipc::{
     PROTOCOL_VERSION,
 };
 
+use super::play_v2::PlayV2Options;
+
 const START_ATTEMPTS: usize = 40;
 const START_POLL: Duration = Duration::from_millis(50);
 static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -63,6 +65,41 @@ pub(crate) fn launch_game(
     mouse: Option<&Path>,
     game_mode: bool,
 ) -> Result<String> {
+    let options = PlayV2Options {
+        keyboard: keyboard.map(Path::to_path_buf),
+        mouse: mouse.map(Path::to_path_buf),
+        resolution: wroid_core::Resolution { width, height },
+        grab: true,
+        show_ui: true,
+        launch_package: true,
+        trace_input: false,
+        exit_after: None,
+        focus_socket: None,
+    };
+    let launch = start_managed_game(profile_path, profile, &options, game_mode)?;
+    let pid = launch.process_id;
+    let performance = if game_mode {
+        "GameMode Auto requested"
+    } else {
+        "GameMode Off"
+    };
+    Ok(format!(
+        "Started the game at {width}×{height} via wroidd PID {pid}; {performance}; Ctrl+Esc or Hub Stop ends it"
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManagedLaunch {
+    pub(crate) session_id: String,
+    pub(crate) process_id: u32,
+}
+
+pub(crate) fn start_managed_game(
+    profile_path: &Path,
+    profile: &ProfileV2,
+    options: &PlayV2Options,
+    game_mode: bool,
+) -> Result<ManagedLaunch> {
     let profile_path = profile_path
         .canonicalize()
         .with_context(|| format!("failed to resolve profile {}", profile_path.display()))?;
@@ -71,11 +108,7 @@ pub(crate) fn launch_game(
         session_id.clone(),
         profile_path,
         profile.clone(),
-        (width, height),
-        (
-            keyboard.map(Path::to_path_buf),
-            mouse.map(Path::to_path_buf),
-        ),
+        options,
         game_mode,
     );
     let client = ensure_running().context("failed to start the per-user Wroid runtime daemon")?;
@@ -88,14 +121,23 @@ pub(crate) fn launch_game(
     let pid = session
         .process_id
         .context("wroidd launched a session without a worker PID")?;
-    let performance = if game_mode {
-        "GameMode Auto requested"
-    } else {
-        "GameMode Off"
+    Ok(ManagedLaunch {
+        session_id,
+        process_id: pid,
+    })
+}
+
+pub(crate) fn managed_session_state(
+    session_id: &str,
+) -> Result<wroid_daemon::ipc::SessionSnapshot> {
+    let client = DaemonClient::connect_default().context("wroidd is not running")?;
+    let DaemonResult::Session { session } = client.request(DaemonRequest::State {
+        session_id: session_id.to_owned(),
+    })?
+    else {
+        bail!("wroidd returned an unexpected response to session state");
     };
-    Ok(format!(
-        "Started the game at {width}×{height} via wroidd PID {pid}; {performance}; Ctrl+Esc or Hub Stop ends it"
-    ))
+    Ok(session)
 }
 
 pub(crate) fn stop_game() -> Result<Option<String>> {
@@ -142,28 +184,27 @@ fn game_launch_request(
     session_id: String,
     profile_path: PathBuf,
     profile: ProfileV2,
-    resolution: (u32, u32),
-    devices: (Option<PathBuf>, Option<PathBuf>),
+    options: &PlayV2Options,
     game_mode: bool,
 ) -> DaemonRequest {
-    let (width, height) = resolution;
-    let (keyboard, mouse) = devices;
     DaemonRequest::LaunchProfileV2 {
         launch: GameLaunchRequest {
             session_id,
             profile_path,
             profile,
-            width,
-            height,
-            keyboard,
-            mouse,
+            width: options.resolution.width,
+            height: options.resolution.height,
+            keyboard: options.keyboard.clone(),
+            mouse: options.mouse.clone(),
             game_mode,
             worker_protocol_generation: wroid_inject::BRIDGE_WORKER_PROTOCOL_GENERATION,
-            grab: true,
-            show_ui: true,
-            launch_package: true,
-            trace_input: false,
-            exit_after_millis: None,
+            grab: options.grab,
+            show_ui: options.show_ui,
+            launch_package: options.launch_package,
+            trace_input: options.trace_input,
+            exit_after_millis: options
+                .exit_after
+                .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX)),
         },
     }
 }
@@ -362,11 +403,20 @@ mod tests {
             "hub-42-7".to_owned(),
             PathBuf::from("/profiles/pubg-v2.json"),
             profile,
-            (1600, 900),
-            (
-                Some(PathBuf::from("/dev/input/event3")),
-                Some(PathBuf::from("/dev/input/event5")),
-            ),
+            &PlayV2Options {
+                keyboard: Some(PathBuf::from("/dev/input/event3")),
+                mouse: Some(PathBuf::from("/dev/input/event5")),
+                resolution: wroid_core::Resolution {
+                    width: 1600,
+                    height: 900,
+                },
+                grab: true,
+                show_ui: true,
+                launch_package: true,
+                trace_input: false,
+                exit_after: None,
+                focus_socket: None,
+            },
             true,
         );
 
@@ -382,5 +432,55 @@ mod tests {
         );
         assert_eq!(value["params"]["launch"]["gameMode"], true);
         assert!(value["params"]["launch"].get("arguments").is_none());
+    }
+
+    #[test]
+    fn managed_launch_maps_every_worker_option() {
+        let profile: ProfileV2 = serde_json::from_str(
+            r#"{
+                "schema_version": 2,
+                "name": "Input test",
+                "package_name": "com.example.input",
+                "bindings": []
+            }"#,
+        )
+        .unwrap();
+        let options = super::super::play_v2::PlayV2Options {
+            keyboard: Some(PathBuf::from("/dev/input/event3")),
+            mouse: Some(PathBuf::from("/dev/input/event5")),
+            resolution: wroid_core::Resolution {
+                width: 1280,
+                height: 720,
+            },
+            grab: false,
+            show_ui: false,
+            launch_package: false,
+            trace_input: true,
+            exit_after: Some(Duration::from_millis(25)),
+            focus_socket: None,
+        };
+
+        let request = game_launch_request(
+            "managed-42".to_owned(),
+            PathBuf::from("/profiles/input-v2.json"),
+            profile,
+            &options,
+            false,
+        );
+        let DaemonRequest::LaunchProfileV2 { launch } = request else {
+            panic!("expected managed launch");
+        };
+        assert_eq!((launch.width, launch.height), (1280, 720));
+        assert_eq!(launch.keyboard, options.keyboard);
+        assert_eq!(launch.mouse, options.mouse);
+        assert!(!launch.grab);
+        assert!(!launch.show_ui);
+        assert!(!launch.launch_package);
+        assert!(launch.trace_input);
+        assert_eq!(launch.exit_after_millis, Some(25));
+        assert_eq!(
+            launch.worker_protocol_generation,
+            wroid_inject::BRIDGE_WORKER_PROTOCOL_GENERATION
+        );
     }
 }

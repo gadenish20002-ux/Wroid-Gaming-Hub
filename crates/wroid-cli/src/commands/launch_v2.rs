@@ -10,13 +10,17 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::process::ExitStatus;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use wroid_core::profile_v2::ProfileV2;
-use wroid_inject::{GameSessionReport, LatencyMetrics};
+use wroid_daemon::ipc::{
+    DaemonClient, DaemonRequest, DaemonResult, SessionSnapshot, SessionStateWire, StopReasonWire,
+};
+use wroid_inject::{BridgeBrokerClient, GameSessionReport, LatencyMetrics, BRIDGE_WORKER_FD};
 
 use super::compatibility::CompatibilityReport;
 use super::graphics::GraphicsReport;
@@ -34,9 +38,25 @@ const LAST_SESSION_MAX_BYTES: u64 = 64 * 1024;
 const LAST_SESSION_DETAIL_CHARS: usize = 4096;
 const STOP_WAIT_ATTEMPTS: usize = 30;
 const SIGTERM: i32 = 15;
+const MANAGED_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const GAME_SESSION_LOG_FILE: &str = "game-session.log";
+static FOREGROUND_INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
-pub(crate) fn launch_v2(profile_path: PathBuf, options: PlayV2Options) -> Result<()> {
-    let result = launch_v2_inner(profile_path.clone(), options);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DaemonWorkerInvocation {
+    pub(crate) bridge_fd: i32,
+    pub(crate) daemon_parent_pid: u32,
+}
+
+pub(crate) fn launch_v2(
+    profile_path: PathBuf,
+    options: PlayV2Options,
+    daemon_worker: Option<DaemonWorkerInvocation>,
+) -> Result<()> {
+    let Some(invocation) = daemon_worker else {
+        return launch_v2_managed(profile_path, options);
+    };
+    let result = launch_v2_worker(profile_path.clone(), options, invocation);
     let outcome = session_outcome_from_result(&profile_path, std::process::id(), &result);
     if let Err(error) = write_last_game_session(&outcome) {
         eprintln!("Warning: could not save the last game session report: {error:#}");
@@ -44,15 +64,58 @@ pub(crate) fn launch_v2(profile_path: PathBuf, options: PlayV2Options) -> Result
     result.map(|_| ())
 }
 
-fn launch_v2_inner(profile_path: PathBuf, mut options: PlayV2Options) -> Result<GameSessionReport> {
+fn launch_v2_managed(profile_path: PathBuf, options: PlayV2Options) -> Result<()> {
     let profile_path = profile_path
         .canonicalize()
         .with_context(|| format!("failed to resolve profile {}", profile_path.display()))?;
-    let profile = ProfileV2::load_from_path(&profile_path)
-        .with_context(|| format!("failed to load profile v2 {}", profile_path.display()))?;
-    profile
-        .validate()
-        .map_err(|error| anyhow::anyhow!("invalid profile v2: {}", error.errors.join("; ")))?;
+    let profile = load_validated_profile(&profile_path)?;
+    ensure_input_bridge_available()?;
+    print_launch_preflight(&profile, options.launch_package)?;
+    let _interrupt_handler = ForegroundInterruptHandler::install()?;
+    let launch =
+        super::runtime_daemon::start_managed_game(&profile_path, &profile, &options, false)?;
+    let mut cleanup = ManagedSessionCleanup::new(&launch.session_id);
+    println!(
+        "Managed session {} started via wroidd (worker PID {}). Ctrl+Esc or Ctrl+C stops it.",
+        launch.session_id, launch.process_id
+    );
+    let result = wait_for_managed_session(&launch.session_id);
+    if result.is_ok() {
+        cleanup.disarm();
+    }
+    result
+}
+
+fn launch_v2_worker(
+    profile_path: PathBuf,
+    options: PlayV2Options,
+    invocation: DaemonWorkerInvocation,
+) -> Result<GameSessionReport> {
+    let actual_parent = u32::try_from(unsafe { libc::getppid() }).unwrap_or(0);
+    validate_daemon_worker_parent(invocation.daemon_parent_pid, actual_parent)?;
+    if invocation.bridge_fd != BRIDGE_WORKER_FD {
+        bail!(
+            "daemon worker bridge descriptor must be {BRIDGE_WORKER_FD}, got {}",
+            invocation.bridge_fd
+        );
+    }
+    // SAFETY: clap accepted a non-standard descriptor, the daemon contract
+    // assigns its sole ownership to this worker, and this is the only adoption.
+    let owned_fd = unsafe { OwnedFd::from_raw_fd(invocation.bridge_fd) };
+    let bridge_broker = BridgeBrokerClient::from_owned_fd(owned_fd)
+        .context("failed to adopt the daemon-owned bridge channel")?;
+    launch_v2_worker_inner(profile_path, options, bridge_broker)
+}
+
+fn launch_v2_worker_inner(
+    profile_path: PathBuf,
+    mut options: PlayV2Options,
+    bridge_broker: BridgeBrokerClient,
+) -> Result<GameSessionReport> {
+    let profile_path = profile_path
+        .canonicalize()
+        .with_context(|| format!("failed to resolve profile {}", profile_path.display()))?;
+    let profile = load_validated_profile(&profile_path)?;
     let is_root = effective_uid_from_proc().unwrap_or(u32::MAX) == 0;
     let _launch_lease = if is_root {
         None
@@ -60,29 +123,7 @@ fn launch_v2_inner(profile_path: PathBuf, mut options: PlayV2Options) -> Result<
         Some(acquire_launch_lease(&profile.name)?)
     };
     ensure_input_bridge_available()?;
-
-    let graphics = GraphicsReport::probe();
-    graphics.ensure_launch_ready()?;
-    println!(
-        "Performance preflight: {} — {}",
-        graphics.health().to_ascii_uppercase(),
-        graphics
-            .host
-            .renderer
-            .as_deref()
-            .unwrap_or("renderer unknown")
-    );
-    let compatibility = CompatibilityReport::probe();
-    if options.launch_package {
-        compatibility.ensure_package_installed_if_known(&profile.package_name)?;
-    }
-    if let Some(game) = compatibility.game(&profile.package_name) {
-        println!(
-            "Game compatibility: {} — {}",
-            compatibility.health().to_ascii_uppercase(),
-            game.detail
-        );
-    }
+    print_launch_preflight(&profile, options.launch_package)?;
     let _active_session = if is_root {
         None
     } else {
@@ -93,7 +134,7 @@ fn launch_v2_inner(profile_path: PathBuf, mut options: PlayV2Options) -> Result<
     };
 
     if is_root {
-        return play_v2::play_v2(profile_path, options);
+        return play_v2::play_v2_with_broker(profile_path, options, Some(bridge_broker));
     }
 
     let focus_relay = if options.grab {
@@ -118,10 +159,224 @@ fn launch_v2_inner(profile_path: PathBuf, mut options: PlayV2Options) -> Result<
             "Starting {} as the desktop user; the verified helper owns only the temporary input bridge…",
             profile.name
         );
-        play_v2::play_v2(profile_path, options)
+        play_v2::play_v2_with_broker(profile_path, options, Some(bridge_broker))
     });
     drop(focus_relay);
     result
+}
+
+fn load_validated_profile(profile_path: &Path) -> Result<ProfileV2> {
+    let profile = ProfileV2::load_from_path(profile_path)
+        .with_context(|| format!("failed to load profile v2 {}", profile_path.display()))?;
+    profile
+        .validate()
+        .map_err(|error| anyhow::anyhow!("invalid profile v2: {}", error.errors.join("; ")))?;
+    Ok(profile)
+}
+
+fn print_launch_preflight(profile: &ProfileV2, launch_package: bool) -> Result<()> {
+    let graphics = GraphicsReport::probe();
+    graphics.ensure_launch_ready()?;
+    println!(
+        "Performance preflight: {} — {}",
+        graphics.health().to_ascii_uppercase(),
+        graphics
+            .host
+            .renderer
+            .as_deref()
+            .unwrap_or("renderer unknown")
+    );
+    let compatibility = CompatibilityReport::probe();
+    if launch_package {
+        compatibility.ensure_package_installed_if_known(&profile.package_name)?;
+    }
+    if let Some(game) = compatibility.game(&profile.package_name) {
+        println!(
+            "Game compatibility: {} — {}",
+            compatibility.health().to_ascii_uppercase(),
+            game.detail
+        );
+    }
+    Ok(())
+}
+
+fn validate_daemon_worker_parent(expected: u32, actual: u32) -> Result<()> {
+    if expected == 0 || actual != expected {
+        bail!("daemon worker parent changed: expected PID {expected}, got {actual}");
+    }
+    Ok(())
+}
+
+fn managed_session_finished(session: &SessionSnapshot) -> bool {
+    matches!(
+        session.state,
+        SessionStateWire::Stopped | SessionStateWire::Failed
+    )
+}
+
+fn managed_stop_request(session_id: &str) -> DaemonRequest {
+    DaemonRequest::Stop {
+        session_id: session_id.to_owned(),
+        reason: StopReasonWire::UserRequested,
+    }
+}
+
+fn wait_for_managed_session(session_id: &str) -> Result<()> {
+    let mut log = open_private_game_session_log()?;
+    let mut stop_sent = false;
+    loop {
+        copy_available_log(&mut log)?;
+        if FOREGROUND_INTERRUPTED.load(Ordering::Relaxed) && !stop_sent {
+            let client = DaemonClient::connect_default().context("wroidd is not running")?;
+            let DaemonResult::Stopped { .. } = client
+                .request(managed_stop_request(session_id))
+                .context("failed to stop the interrupted managed session")?
+            else {
+                bail!("wroidd returned an unexpected response to managed session stop");
+            };
+            stop_sent = true;
+            eprintln!("Stop requested; waiting for cleanup…");
+        }
+        let session = super::runtime_daemon::managed_session_state(session_id)?;
+        if managed_session_finished(&session) {
+            copy_available_log(&mut log)?;
+            return match session.state {
+                SessionStateWire::Stopped => Ok(()),
+                SessionStateWire::Failed if stop_sent => Ok(()),
+                SessionStateWire::Failed => bail!(
+                    "managed game session failed: {}",
+                    session.detail.as_deref().unwrap_or("worker failure")
+                ),
+                _ => unreachable!("terminal state checked above"),
+            };
+        }
+        thread::sleep(MANAGED_POLL_INTERVAL);
+    }
+}
+
+struct ManagedSessionCleanup {
+    session_id: String,
+    armed: bool,
+}
+
+impl ManagedSessionCleanup {
+    fn new(session_id: &str) -> Self {
+        Self {
+            session_id: session_id.to_owned(),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ManagedSessionCleanup {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Ok(client) = DaemonClient::connect_default() {
+            let _ = client.request(managed_stop_request(&self.session_id));
+        }
+    }
+}
+
+fn game_session_log_path() -> Result<PathBuf> {
+    let state_home = env::var_os("XDG_STATE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .map(|home| home.join(".local").join("state"))
+        })
+        .context("HOME and XDG_STATE_HOME are unavailable for the game log")?;
+    Ok(state_home.join("wroid").join(GAME_SESSION_LOG_FILE))
+}
+
+fn open_private_game_session_log() -> Result<fs::File> {
+    let path = game_session_log_path()?;
+    open_private_game_session_log_at(&path, effective_uid_from_proc().unwrap_or(u32::MAX))
+}
+
+fn open_private_game_session_log_at(path: &Path, uid: u32) -> Result<fs::File> {
+    let directory = path.parent().context("game log path has no parent")?;
+    let directory_metadata = fs::symlink_metadata(directory)
+        .with_context(|| format!("failed to inspect {}", directory.display()))?;
+    if !directory_metadata.is_dir()
+        || directory_metadata.uid() != uid
+        || directory_metadata.permissions().mode() & 0o077 != 0
+    {
+        bail!("game log directory is not private and current-user-owned");
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != uid
+        || metadata.nlink() != 1
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        bail!("game log is not a private current-user file");
+    }
+    Ok(file)
+}
+
+fn copy_available_log(log: &mut fs::File) -> Result<()> {
+    let mut buffer = [0_u8; 8192];
+    let mut stdout = std::io::stdout().lock();
+    loop {
+        match log.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => stdout.write_all(&buffer[..count])?,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error).context("failed to read the managed game log"),
+        }
+    }
+    stdout.flush()?;
+    Ok(())
+}
+
+struct ForegroundInterruptHandler {
+    previous: libc::sigaction,
+}
+
+impl ForegroundInterruptHandler {
+    fn install() -> Result<Self> {
+        FOREGROUND_INTERRUPTED.store(false, Ordering::Relaxed);
+        // SAFETY: zeroed sigaction is initialized below before the syscall.
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = foreground_interrupt as *const () as usize;
+        // SAFETY: sigemptyset initializes the embedded mask.
+        unsafe { libc::sigemptyset(&mut action.sa_mask) };
+        action.sa_flags = 0;
+        // SAFETY: storage for the previous handler is valid and both action
+        // structures live through sigaction.
+        let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
+        if unsafe { libc::sigaction(libc::SIGINT, &action, &mut previous) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("failed to install Ctrl+C handler");
+        }
+        Ok(Self { previous })
+    }
+}
+
+impl Drop for ForegroundInterruptHandler {
+    fn drop(&mut self) {
+        // SAFETY: previous was populated by sigaction and remains valid.
+        unsafe { libc::sigaction(libc::SIGINT, &self.previous, std::ptr::null_mut()) };
+        FOREGROUND_INTERRUPTED.store(false, Ordering::Relaxed);
+    }
+}
+
+extern "C" fn foreground_interrupt(_signal: libc::c_int) {
+    FOREGROUND_INTERRUPTED.store(true, Ordering::Relaxed);
 }
 
 fn ensure_input_bridge_available() -> Result<()> {
@@ -133,6 +388,78 @@ fn ensure_input_bridge_available() -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod daemon_worker_contract_tests {
+    use super::*;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use wroid_daemon::ipc::{DaemonRequest, SessionSnapshot, SessionStateWire, StopReasonWire};
+
+    #[test]
+    fn worker_parent_must_still_be_the_authenticated_daemon() {
+        assert!(validate_daemon_worker_parent(42, 42).is_ok());
+        assert!(validate_daemon_worker_parent(42, 7).is_err());
+        assert!(validate_daemon_worker_parent(0, 0).is_err());
+    }
+
+    #[test]
+    fn foreground_wait_recognizes_only_terminal_states() {
+        for state in [
+            SessionStateWire::Preparing,
+            SessionStateWire::Running,
+            SessionStateWire::Stopping,
+        ] {
+            assert!(!managed_session_finished(&snapshot(state)));
+        }
+        assert!(managed_session_finished(&snapshot(
+            SessionStateWire::Stopped
+        )));
+        assert!(managed_session_finished(&snapshot(
+            SessionStateWire::Failed
+        )));
+    }
+
+    #[test]
+    fn foreground_interrupt_targets_only_its_managed_session() {
+        assert_eq!(
+            managed_stop_request("launch-42"),
+            DaemonRequest::Stop {
+                session_id: "launch-42".to_owned(),
+                reason: StopReasonWire::UserRequested,
+            }
+        );
+    }
+
+    #[test]
+    fn foreground_log_reader_rejects_links_and_public_files() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let log = directory.path().join("game-session.log");
+        fs::write(&log, b"worker output\n").unwrap();
+        fs::set_permissions(&log, fs::Permissions::from_mode(0o600)).unwrap();
+        let uid = effective_uid_from_proc().unwrap();
+        assert!(open_private_game_session_log_at(&log, uid).is_ok());
+
+        fs::set_permissions(&log, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(open_private_game_session_log_at(&log, uid).is_err());
+        fs::set_permissions(&log, fs::Permissions::from_mode(0o600)).unwrap();
+        let link = directory.path().join("linked.log");
+        symlink(&log, &link).unwrap();
+        assert!(open_private_game_session_log_at(&link, uid).is_err());
+    }
+
+    fn snapshot(state: SessionStateWire) -> SessionSnapshot {
+        SessionSnapshot {
+            session_id: "launch-42".to_owned(),
+            state,
+            package_name: "com.example.game".to_owned(),
+            launch_package: true,
+            control_count: 0,
+            process_id: Some(42),
+            detail: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

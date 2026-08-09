@@ -55,6 +55,7 @@ struct LaunchProgram {
 struct ManagedProcess {
     child: Child,
     broker: Option<JoinHandle<io::Result<()>>>,
+    stop_requested: bool,
 }
 
 pub(crate) struct ManagedProcesses {
@@ -154,13 +155,14 @@ impl ManagedProcesses {
             ManagedProcess {
                 child,
                 broker: Some(broker),
+                stop_requested: false,
             },
         );
         Ok(pid)
     }
 
     pub(crate) fn request_stop(&mut self, session_id: &SessionId) -> Result<bool, ProcessError> {
-        let Some(process) = self.children.get(session_id) else {
+        let Some(process) = self.children.get_mut(session_id) else {
             return Ok(false);
         };
         let pid = i32::try_from(process.child.id())
@@ -174,6 +176,7 @@ impl ManagedProcesses {
                 return Err(error.into());
             }
         }
+        process.stop_requested = true;
         Ok(true)
     }
 
@@ -191,7 +194,8 @@ impl ManagedProcesses {
                 .remove(&session_id)
                 .expect("exited managed process remains owned");
             let broker_result = join_broker(process.broker.take());
-            let (success, detail) = combine_reaped_detail(status, broker_result);
+            let (success, detail) =
+                combine_reaped_detail(status, broker_result, process.stop_requested);
             completed.push(ReapedProcess {
                 session_id,
                 success,
@@ -443,13 +447,15 @@ fn configure_worker_child(
 fn combine_reaped_detail(
     status: std::process::ExitStatus,
     broker_result: io::Result<()>,
+    stop_requested: bool,
 ) -> (bool, String) {
     let detail = match status.signal() {
         Some(signal) => format!("game worker terminated by signal {signal}"),
         None => format!("game worker exited with {status}"),
     };
+    let expected_stop = stop_requested && status.signal() == Some(libc::SIGTERM);
     match broker_result {
-        Ok(()) => (status.success(), detail),
+        Ok(()) => (status.success() || expected_stop, detail),
         Err(error) => (
             false,
             format!("{detail}; bridge broker cleanup failed: {error}"),
@@ -602,6 +608,7 @@ mod tests {
         ManagedProcess {
             child,
             broker: None,
+            stop_requested: false,
         }
     }
 
@@ -677,8 +684,11 @@ mod tests {
             .args(["-c", "exit 7"])
             .status()
             .unwrap();
-        let (success, detail) =
-            combine_reaped_detail(status, Err(io::Error::other("bridge cleanup failed")));
+        let (success, detail) = combine_reaped_detail(
+            status,
+            Err(io::Error::other("bridge cleanup failed")),
+            false,
+        );
 
         assert!(!success);
         assert!(detail.contains("exit status: 7"));
@@ -699,6 +709,7 @@ mod tests {
             ManagedProcess {
                 child,
                 broker: Some(broker),
+                stop_requested: false,
             },
         );
 
@@ -877,7 +888,7 @@ mod tests {
             .expect("signalled child was not reaped");
 
         assert_eq!(completed[0].session_id, session_id);
-        assert!(!completed[0].success);
+        assert!(completed[0].success);
         assert!(completed[0].detail.contains("signal 15"));
     }
 

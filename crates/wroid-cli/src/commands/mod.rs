@@ -297,6 +297,10 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
             no_launch,
             trace_input,
             exit_after_seconds,
+            daemon_worker,
+            bridge_fd,
+            daemon_parent_pid,
+            exit_after_ms,
         } => launch_v2::launch_v2(
             profile_path,
             play_v2::PlayV2Options {
@@ -307,9 +311,15 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
                 show_ui: !no_ui,
                 launch_package: !no_launch,
                 trace_input,
-                exit_after: exit_after_seconds.map(std::time::Duration::from_secs),
+                exit_after: exit_after_ms
+                    .map(std::time::Duration::from_millis)
+                    .or_else(|| exit_after_seconds.map(std::time::Duration::from_secs)),
                 focus_socket: None,
             },
+            daemon_worker.then(|| launch_v2::DaemonWorkerInvocation {
+                bridge_fd: bridge_fd.expect("clap requires the daemon bridge descriptor"),
+                daemon_parent_pid: daemon_parent_pid.expect("clap requires the daemon parent PID"),
+            }),
         ),
         Commands::RestoreDesktopSession { parent_pid, ticket } => {
             launch_v2::restore_desktop_session(parent_pid, &ticket)

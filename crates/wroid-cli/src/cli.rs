@@ -161,8 +161,40 @@ pub(crate) enum Commands {
         #[arg(long)]
         trace_input: bool,
         /// Stop automatically after the live diagnostic interval.
-        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=3600))]
+        #[arg(
+            long,
+            value_parser = clap::value_parser!(u64).range(1..=3600),
+            conflicts_with = "exit_after_ms"
+        )]
         exit_after_seconds: Option<u64>,
+        #[arg(
+            long,
+            hide = true,
+            requires_all = ["bridge_fd", "daemon_parent_pid"]
+        )]
+        daemon_worker: bool,
+        #[arg(
+            long,
+            hide = true,
+            value_parser = clap::value_parser!(i32).range(3..=1024),
+            requires = "daemon_worker"
+        )]
+        bridge_fd: Option<i32>,
+        #[arg(
+            long,
+            hide = true,
+            value_parser = clap::value_parser!(u32).range(1..),
+            requires = "daemon_worker"
+        )]
+        daemon_parent_pid: Option<u32>,
+        #[arg(
+            long,
+            hide = true,
+            value_parser = clap::value_parser!(u64).range(1..=3_600_000),
+            requires = "daemon_worker",
+            conflicts_with = "exit_after_seconds"
+        )]
+        exit_after_ms: Option<u64>,
     },
     /// Internal crash-recovery watchdog for launch-v2.
     #[command(hide = true)]
@@ -1025,6 +1057,61 @@ mod tests {
             "profiles/examples/pubg-v2.json",
             "--exit-after-seconds",
             "0",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn launch_v2_daemon_worker_requires_complete_private_invocation() {
+        for incomplete in [
+            vec!["--daemon-worker"],
+            vec!["--daemon-worker", "--bridge-fd", "198"],
+            vec!["--bridge-fd", "198", "--daemon-parent-pid", "42"],
+        ] {
+            let mut arguments = vec!["wroid", "launch-v2", "profiles/examples/pubg-v2.json"];
+            arguments.extend(incomplete);
+            assert!(Cli::try_parse_from(arguments).is_err());
+        }
+
+        let cli = Cli::try_parse_from([
+            "wroid",
+            "launch-v2",
+            "profiles/examples/pubg-v2.json",
+            "--daemon-worker",
+            "--bridge-fd",
+            "198",
+            "--daemon-parent-pid",
+            "42",
+            "--exit-after-ms",
+            "25",
+        ])
+        .unwrap();
+        let Commands::LaunchV2 {
+            daemon_worker,
+            bridge_fd,
+            daemon_parent_pid,
+            exit_after_ms,
+            ..
+        } = cli.command
+        else {
+            panic!("expected launch-v2 command");
+        };
+        assert!(daemon_worker);
+        assert_eq!(bridge_fd, Some(198));
+        assert_eq!(daemon_parent_pid, Some(42));
+        assert_eq!(exit_after_ms, Some(25));
+    }
+
+    #[test]
+    fn launch_v2_public_timeout_cannot_mix_with_worker_timeout() {
+        assert!(Cli::try_parse_from([
+            "wroid",
+            "launch-v2",
+            "profiles/examples/pubg-v2.json",
+            "--exit-after-seconds",
+            "20",
+            "--exit-after-ms",
+            "25",
         ])
         .is_err());
     }
