@@ -84,6 +84,9 @@ const MAX_FRAME_EVENTS: usize = 10;
 const HEADER_BYTES: usize = 20;
 const EVENT_BYTES: usize = 12;
 const MAX_PACKET_BYTES: usize = HEADER_BYTES + MAX_FRAME_EVENTS * EVENT_BYTES;
+const STARTUP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(300);
+const FRAME_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
+const SERVER_IDLE_POLL: Duration = Duration::from_millis(250);
 
 pub fn runtime_socket_pair() -> io::Result<(OwnedFd, OwnedFd)>;
 
@@ -132,7 +135,7 @@ pub fn serve_runtime_attachment<I: TouchInjector>(
 ) -> io::Result<RuntimeAttachmentReport>;
 ```
 
-`serve_runtime_attachment` sends `ready`, scales every decoded frame to the canonical axes, submits it through the daemon `TouchEngine`, sends the matching result, and on `finish`, EOF, or protocol failure calls `engine.cancel_all()` before returning. Client startup/acknowledgment waits and all writes have 2-second deadlines. The server uses a 250 ms read poll: timeout calls `health_check` and resumes waiting, so idle gameplay duration is unbounded while helper death is detected promptly.
+`serve_runtime_attachment` sends `ready`, scales every decoded frame to the canonical axes, submits it through the daemon `TouchEngine`, sends the matching result, and on `finish`, EOF, or protocol failure calls `engine.cancel_all()` before returning. Initial platform readiness is bounded to 300 seconds so one boot plus a required resolution restart can finish. Gameplay acknowledgments and all writes have 2-second deadlines. The server uses a 250 ms read poll: timeout calls `health_check` and resumes waiting, so idle gameplay duration is unbounded while helper death is detected promptly.
 
 - [ ] **Step 4: Add RED atomic-state and cleanup tests, then make them GREEN**
 

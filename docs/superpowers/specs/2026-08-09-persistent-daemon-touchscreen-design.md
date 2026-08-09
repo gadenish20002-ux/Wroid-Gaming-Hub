@@ -110,12 +110,13 @@ contacts, invalid contact transitions, or frames beyond 10 active contacts fail
 closed.
 
 The daemon scales logical coordinates to `0..=65535` with endpoint-preserving
-integer rounding immediately before injection. Client startup/acknowledgment
-waits and all writes have bounded I/O deadlines. The daemon polls the socket at
-250 ms while idle so it can detect helper death without imposing a total
-gameplay or idle timeout. Normal gameplay uses preallocated packet and event
-buffers and performs no process spawn, shell call, JSON parse, or heap
-allocation per frame.
+integer rounding immediately before injection. Initial platform readiness is
+bounded to 300 seconds so one Android boot plus a required resolution restart
+can finish. Gameplay acknowledgments and all writes are bounded to two seconds.
+The daemon polls the socket at 250 ms while idle so it can detect helper death
+without imposing a total gameplay or idle timeout. Normal gameplay uses
+preallocated packet and event buffers and performs no process spawn, shell call,
+JSON parse, or heap allocation per frame.
 
 The worker waits for the matching acknowledgment before committing its local
 `TouchEngine` state. The daemon also validates and commits its independent
