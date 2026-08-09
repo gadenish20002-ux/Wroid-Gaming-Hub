@@ -705,7 +705,7 @@ git commit -m "Runtime: retire per-launch bridge lifecycle"
 - Consumes: the final runtime channel and persistent uinput implementation.
 - Produces: a no-Waydroid benchmark executable, current operator docs, and completed plan/status evidence.
 
-- [ ] **Step 1: Add the deterministic headless benchmark**
+- [x] **Step 1: Add the deterministic headless benchmark**
 
 The binary creates a real `UinputTouchInjector` at canonical range, a real seqpacket client/server pair, and a server thread. It submits 10 Down contacts, distributes at least 20,000 acknowledged Move frames across them, sends 10 Up contacts, finishes cleanly, and prints machine-readable totals and p50/p95/p99/max microseconds.
 
@@ -725,44 +725,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```text
 runtime_channel_frames=20002
+runtime_channel_server_frames=20002
 runtime_channel_peak_contacts=10
 runtime_channel_released_contacts=10
-runtime_channel_p99_micros=...
+runtime_channel_active_contacts=0
+runtime_channel_p50_micros=7
+runtime_channel_p95_micros=7
+runtime_channel_p99_micros=20
+runtime_channel_max_micros=216
 runtime_channel_result=PASS
 ```
 
 Exit non-zero unless frames are at least 20,000, peak/released contacts are exactly 10, no contact remains, and p99 is below 5,000 microseconds.
 
-- [ ] **Step 2: Run the benchmark and focused release tests**
+- [x] **Step 2: Run the benchmark and focused release tests**
 
 ```bash
-CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 cargo run --release -p wroid-inject --bin wroid-runtime-channel-bench
-CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 cargo test --release -p wroid-inject runtime_channel
-CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 cargo test --release -p wroid-daemon platform
+taskset -c 0,1 nice -n 15 env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 cargo run --release -j 1 -p wroid-inject --bin wroid-runtime-channel-bench
+taskset -c 0,1 nice -n 15 env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 cargo test --release -j 1 -p wroid-inject runtime_channel
+taskset -c 0,1 nice -n 15 env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 cargo test --release -j 1 -p wroid-daemon platform
 ```
 
-Expected: benchmark `PASS`, 20,000+ acknowledged frames, 10/10 released, p99 below 5 ms.
+Observed with the CPU-throttled commands above: benchmark `PASS`, 20,002
+acknowledged frames, peak/release 10/10, no active contacts, p50/p95/p99/max
+7/7/20/216 us; `wroid-inject runtime_channel` release tests 19 passed;
+`wroid-daemon platform` release tests 24 passed.
 
-- [ ] **Step 3: Update architecture, bridge guide, roadmap, and README**
+- [x] **Step 3: Update architecture, bridge guide, roadmap, and README**
 
 Document daemon ownership, first-use controlled restart, no per-game shutdown, runtime protocol generation 2, root diagnostic exception, crash cleanup, benchmark command/result, and the deferred live-hotplug reconcile. Check off roadmap “Productionize bridge lifecycle, reconciliation, and stable device discovery” only for persistence within a daemon lifetime; leave live hot-plug after abrupt replacement explicitly open.
 
-- [ ] **Step 4: Run the full non-GUI release gate**
+- [x] **Step 4: Run the full non-GUI release gate**
 
 ```bash
-CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 cargo test --workspace --all-targets --all-features
-CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 RUSTFLAGS='-D warnings' cargo clippy --workspace --all-targets --all-features
+taskset -c 0,1 nice -n 15 env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 cargo test --workspace --all-targets --all-features -j 1
+taskset -c 0,1 nice -n 15 env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 RUSTFLAGS='-D warnings' cargo clippy --workspace --all-targets --all-features -j 1
 cargo fmt --all -- --check
 find apps -type f -name '*.js' -print0 | xargs -0 -n1 node --check
 node --test apps/controls-studio/web/tests/*.test.js apps/hub/web/tests/*.test.js
-for profile in examples/profiles/v2/*.json; do cargo run --quiet -p wroid-cli -- profile validate "$profile"; done
+for profile in examples/profiles/v2/*.json; do taskset -c 0,1 nice -n 15 env CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 cargo run --quiet -j 1 -p wroid-cli -- profile validate "$profile"; done
 git diff --check
 git status --short
 ```
 
 Expected: every test/check passes; only intended task files are changed.
 
-- [ ] **Step 5: Commit Task 7**
+Observed in this worktree: workspace Rust tests passed with 576 passed, 0
+failed, and 1 live-KDE test ignored; strict Clippy passed after replacing a
+manual percentile ceiling division with `div_ceil`; rustfmt passed. The generic
+`apps/...` JavaScript paths and `examples/profiles/v2` directory are absent in
+this worktree, so shipped profiles were validated via the actual
+`profiles/examples` paths: six `*-v2.json` profiles with
+`wroid-profile-v2-validate`, and two legacy `*basic.json` profiles with
+`wroid profile validate`.
+
+- [x] **Step 5: Commit Task 7**
 
 ```bash
 git add crates/wroid-inject/Cargo.toml crates/wroid-inject/src/bin/wroid-runtime-channel-bench.rs README.md docs/architecture-v2.md docs/waydroid-input-bridge.md docs/roadmap.md docs/superpowers/specs/2026-08-09-persistent-daemon-touchscreen-design.md docs/superpowers/plans/2026-08-09-persistent-daemon-touchscreen.md

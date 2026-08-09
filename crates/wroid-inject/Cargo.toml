@@ -12,5 +12,9 @@ wroid-core = { path = "../wroid-core" }
 wroid-input = { path = "../wroid-input" }
 wroid-runtime = { path = "../wroid-runtime" }
 
+[[bin]]
+name = "wroid-runtime-channel-bench"
+path = "src/bin/wroid-runtime-channel-bench.rs"
+
 [dev-dependencies]
 tempfile.workspace = true

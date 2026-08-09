@@ -39,6 +39,13 @@ runtime for profile-driven Android gaming.
 - Measure the injection hot path without root or Waydroid using
   `wroid-inject-latency`, which reports per-frame p50/p95/p99/max against the
   5 ms budget and verifies ten simultaneous contacts.
+- Route normal Hub/CLI managed sessions through `wroidd` protocol generation 2:
+  the daemon owns the persistent uinput touchscreen, helper bridge, and
+  Waydroid session while workers send acknowledged touch frames over inherited
+  descriptor `198`.
+- Measure that daemon runtime channel without Waydroid using
+  `wroid-runtime-channel-bench`, which submits 20,002 acknowledged frames,
+  verifies peak/release 10/10 contacts, and gates p99 below 5 ms.
 - Use shipped starter profiles for Brawl Stars, Standoff 2, PUBG Mobile, and
   Free Fire. FPS starters include mouse fire/ADS, reload, movement, camera aim,
   and editable game-specific actions.
@@ -106,7 +113,9 @@ tail an order of magnitude worse.
 ### Injection latency benchmark
 
 ```sh
-cargo build --release --bin wroid-inject-latency
+taskset -c 0,1 nice -n 15 env CARGO_BUILD_JOBS=1 \
+  CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 \
+  cargo build --release -j 1 --bin wroid-inject-latency
 target/release/wroid-inject-latency --samples 20000
 ```
 
@@ -116,6 +125,33 @@ it, and reports per-frame mean/p50/p95/p99/max against the 5 ms budget. It then
 holds all ten advertised slots at once and releases them, which fails loudly if
 the kernel does not accept the full contact count. Baseline on the RX 6600 XT /
 7.1.5-cachyos / KDE Wayland development host is p99 ≈ 1 µs over 20 000 frames.
+
+### Runtime channel benchmark
+
+```sh
+taskset -c 0,1 nice -n 15 env CARGO_BUILD_JOBS=1 \
+  CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 \
+  cargo run --release -j 1 -p wroid-inject --bin wroid-runtime-channel-bench
+```
+
+This is the no-Waydroid gate for the daemon-owned touchscreen path. It creates
+a real uinput device and a real private seqpacket client/server pair, submits
+one 10-contact down frame, 20,000 acknowledged move frames, one 10-contact up
+frame, and a clean finish. The binary prints key-value output and exits non-zero
+unless p99 is below 5,000 us, peak/released contacts are 10/10, and no daemon
+contact remains active. Task 7 measured:
+
+```text
+runtime_channel_frames=20002
+runtime_channel_peak_contacts=10
+runtime_channel_released_contacts=10
+runtime_channel_active_contacts=0
+runtime_channel_p50_micros=7
+runtime_channel_p95_micros=7
+runtime_channel_p99_micros=20
+runtime_channel_max_micros=216
+runtime_channel_result=PASS
+```
 
 ## Gaming Hub
 
@@ -162,7 +198,8 @@ can fail silently.
 launching its Android package. After the one-time helper setup, focus Waydroid and
 exercise WASD, mouse aim, and mapped buttons; the trace and latency report are
 printed in the terminal. The diagnostic stops after 20 seconds of live input,
-then restores the prior Waydroid state and bridge automatically. This permits
+then detaches the worker, cancels contacts, and leaves the daemon-owned
+Waydroid bridge ready for the next same-resolution managed session. This permits
 end-to-end validation before any game or Google account is installed.
 When the browser regains focus after Play Store, Controls Studio, a game
 session, or Waydroid, Hub refreshes package, profile, and lease state
@@ -185,17 +222,32 @@ sessions expose a compact performance readout with input/kernel p95 latency,
 submitted touch frames, and peak simultaneous contacts; input p95 above the
 5 ms target is highlighted.
 
-Wroid stops the current desktop Waydroid session and keeps input capture,
-mapping, uinput, telemetry, and package lifecycle in the desktop-user process.
-`wroidd` alone activates and owns the installed root-owned helper through a
-private, bounded bridge channel inherited by the worker; no helper path or
-reusable credential is sent to the worker. The helper must match the staged
-release byte-for-byte before it validates and mounts the virtual touchscreen.
-The worker retains the latency-sensitive profile/input dispatch and restores
-the bridge configuration and previous desktop Waydroid session when play ends.
-A detached per-launch watchdog performs the same restoration if the worker
-crashes. If Waydroid was already stopped, Wroid leaves it stopped. The Hub,
-daemon, worker, and Controls Studio remain unprivileged.
+For normal Hub and CLI launches, `wroidd` owns one lazy persistent platform for
+its process lifetime. The daemon creates the canonical 10-slot uinput
+touchscreen, starts the exact root-owned helper, owns the desktop Waydroid
+session, and validates/ACKs every runtime frame only after the uinput write
+succeeds. The worker retains latency-sensitive profile/input dispatch and sends
+fixed binary touch frames over inherited runtime descriptor `198`; it never
+receives a helper path, reusable credential, host physical input path, touch
+device path, package override, or display-property authority.
+
+The first managed launch may perform one controlled Waydroid restart to install
+or reconcile the bridge. Later same-resolution launches in the same daemon
+lifetime reuse the same event node, helper bridge, and Waydroid owner. Worker
+exit, Stop, and Hub closure preserve that platform for the next game. Orderly
+daemon shutdown terminates/reaps workers first, cancels contacts, stops
+Waydroid, asks the helper to remove the bridge, and drops uinput last. If the
+daemon crashes, the helper sees EOF, force-stops Waydroid, removes the managed
+bridge include, and uinput disappears with the daemon process. Root-only smoke
+and recovery binaries keep the older temporary in-process bridge path for
+diagnostics; normal gameplay does not. Live LXC hot-plug reconciliation after
+abrupt daemon replacement remains deferred, so the next managed launch may
+still need the one controlled restart before reuse resumes.
+
+The Hub, daemon, worker, and Controls Studio remain unprivileged; only
+`/usr/lib/wroid/wroid-helper` runs as root, and it never receives touch frames,
+profiles, packages, display properties, shell text, or physical input-device
+paths.
 
 The same safe launch workflow is available without the UI:
 
@@ -350,8 +402,10 @@ target/release/wroid play-v2 profiles/examples/standoff2-v2.json \
 shortcuts such as `Alt+Tab` remain available. `Ctrl+Esc` stops the session and
 cancels every active touch; plain `Esc` remains available for profile bindings.
 FPS profiles use `Tab` to enable/disable mouse aim.
-Stopping from the Hub, pressing `Ctrl+Esc`, or terminating the session runs the
-same contact, device-grab, bridge, and Waydroid cleanup.
+Stopping from the Hub, pressing `Ctrl+Esc`, or terminating the session disables
+capture first, sends the runtime `finish` when possible, cancels any remaining
+daemon contacts, and releases host grabs. For normal managed sessions this is a
+per-worker detach, not a per-game Waydroid shutdown.
 Only one Wroid game session can own the Waydroid input bridge. Hub, Controls
 Studio, CLI launches, diagnostics, and recovery all detect the active PID/owner
 before touching Waydroid; the kernel releases this lease automatically if the
@@ -381,9 +435,9 @@ game's HUD controls. Available profiles:
 The managed input bridge needs one `sudo` authorization during helper
 installation only. The separately installed typed helper runs as root while the
 gameplay runtime remains unprivileged; launches themselves need no password.
-`launch-v2` handles the stopped Waydroid precondition and restores
-the LXC configuration, desktop session, and input grabs on normal exit. If
-privileged bridge setup itself was interrupted, recover with:
+`launch-v2` attaches to the daemon-owned platform and releases input grabs on
+normal exit without stopping Waydroid per game. If privileged bridge setup
+itself was interrupted in a diagnostic path, recover with:
 
 ```sh
 sudo target/release/wroid-waydroid-game-session --cleanup

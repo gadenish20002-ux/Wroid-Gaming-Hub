@@ -204,7 +204,26 @@ Automated tests must prove:
 The release gate includes full workspace tests, strict Clippy, rustfmt,
 JavaScript model/syntax tests, example validation, and `git diff --check`. A
 headless host benchmark must submit at least 20,000 acknowledged frames with
-p99 reader-to-inject latency below 5 ms and verify 10/10 contact release.
+p99 reader-to-inject latency below 5 ms and verify peak/release 10/10 contacts
+with no active daemon contacts at finish.
+
+Task 7 added that no-Waydroid benchmark as
+`wroid-runtime-channel-bench`. It creates a real canonical uinput touchscreen,
+a real private seqpacket client/server pair, and one server thread. Measured
+release output in this worktree:
+
+```text
+runtime_channel_frames=20002
+runtime_channel_server_frames=20002
+runtime_channel_peak_contacts=10
+runtime_channel_released_contacts=10
+runtime_channel_active_contacts=0
+runtime_channel_p50_micros=7
+runtime_channel_p95_micros=7
+runtime_channel_p99_micros=20
+runtime_channel_max_micros=216
+runtime_channel_result=PASS
+```
 
 One final live acceptance may visibly touch Waydroid. It must be announced
 before execution and run only after all non-GUI gates pass. The acceptance

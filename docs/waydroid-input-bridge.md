@@ -42,22 +42,73 @@ terminal.
 
 ## Production daemon ownership
 
-Normal Hub launches, foreground `launch-v2`, and the bounded input self-test use
-the same daemon-owned helper lifecycle. `wroidd` validates that the helper
-staged beside its own executable is a protected current-user file and is
-byte-identical to `/usr/lib/wroid/wroid-helper`. It then creates a private Unix
-socket pair, starts the helper from a daemon-owned broker, and gives the worker
-only fixed inherited descriptor 198.
+Normal Hub launches, foreground `launch-v2`, and the bounded input self-test now
+use one lazy daemon-owned platform for the `wroidd` lifetime. `wroidd` validates
+that the helper staged beside its own executable is a protected current-user
+file and is byte-identical to `/usr/lib/wroid/wroid-helper`. The daemon creates
+the canonical 10-slot `Wroid Gaming Touchscreen`, starts the exact helper, owns
+the Waydroid desktop session, and gives the worker only fixed inherited runtime
+descriptor `198`.
 
-The internal protocol is bounded, versioned, and ordered:
-`open(eventN) -> verify_android_input -> finish`. The worker still creates the
-virtual touchscreen and runs physical-input/profile dispatch, but it cannot
-choose a helper executable or reuse bridge authority outside that one session.
-Worker exit, Stop, daemon shutdown, protocol failure, and helper failure all
-close the broker and converge on helper cleanup. A daemon release with an
-active worker is not replaced. An idle stale daemon is bound to a pidfd at
-socket authentication, frozen and rechecked for worker children, then
-terminated; a detached watchdog resumes it if the upgrader disappears.
+There are two private protocols. The helper protocol remains bounded,
+versioned, and ordered: `open(eventN) -> verify_android_input -> finish`, with
+health checks performed by observing the helper process rather than sending
+gameplay data to root. The worker protocol is generation `2` and carries only
+fixed binary `SOCK_SEQPACKET` touch frames plus ACK/error/finish messages. The
+worker still runs physical-input/profile dispatch, but it cannot choose a helper
+executable, helper command, bridge path, package, display property, or reusable
+credential.
+
+The first managed launch may stop an unrelated pre-existing Waydroid session
+once so the bridge can be installed against the daemon-owned event node. Later
+same-resolution launches in the same daemon lifetime reuse the same event node,
+helper bridge, and Waydroid owner. Worker exit, Stop, and Hub closure close only
+the runtime attachment, cancel any active contacts, and release host grabs; they
+do not stop Waydroid or remove the bridge per game. Orderly daemon shutdown
+terminates/reaps workers first, finishes runtime attachments, cancels contacts,
+stops Waydroid, asks the helper to clean the bridge, and drops uinput last. If
+the daemon crashes, private descriptor EOF makes the helper force-stop Waydroid
+and remove the managed include while the kernel destroys uinput.
+
+Root-only smoke and recovery binaries retain the temporary in-process bridge
+path described below. That diagnostic exception is intentionally separate from
+normal Hub/CLI gameplay. A daemon release with an active worker is not replaced.
+An idle stale daemon is bound to a pidfd at socket authentication, frozen and
+rechecked for worker children, then terminated; a detached watchdog resumes it
+if the upgrader disappears. Live LXC hot-plug reconciliation after abrupt daemon
+replacement is still deferred, so the next managed launch may require the one
+controlled restart before reuse resumes.
+
+## Headless runtime-channel benchmark
+
+The no-Waydroid performance gate creates a real uinput touchscreen and a real
+daemon/client runtime channel, then submits one 10-contact down frame, 20,000
+acknowledged move frames, one 10-contact up frame, and a clean finish:
+
+```bash
+taskset -c 0,1 nice -n 15 env CARGO_BUILD_JOBS=1 \
+  CARGO_INCREMENTAL=0 RUST_MIN_STACK=16777216 \
+  cargo run --release -j 1 -p wroid-inject --bin wroid-runtime-channel-bench
+```
+
+Measured Task 7 output on this worktree:
+
+```text
+runtime_channel_frames=20002
+runtime_channel_server_frames=20002
+runtime_channel_peak_contacts=10
+runtime_channel_released_contacts=10
+runtime_channel_active_contacts=0
+runtime_channel_p50_micros=7
+runtime_channel_p95_micros=7
+runtime_channel_p99_micros=20
+runtime_channel_max_micros=216
+runtime_channel_result=PASS
+```
+
+The binary exits non-zero unless it records at least 20,000 acknowledged frames,
+peak/released contacts are 10/10, no daemon contact remains active at finish,
+and p99 is below 5,000 microseconds.
 
 ## Build
 
@@ -112,13 +163,12 @@ The binary performs the complete sequence itself:
 8. removes the temporary bridge.
 
 The production game-session workflow additionally applies the selected Android
-render width and height after boot. The desktop worker waits for a fresh
-user-ready event captured from its owned `waydroid session start` process,
-forwards that process's stdout/stderr, verifies property readback through the
-user D-Bus API, and restarts Waydroid once only when the size changed. The
-installed helper then accepts one fixed, argument-free request to confirm that Android
-`getevent -pl` lists `Wroid Gaming Touchscreen`; it does not expose a general
-root shell to the worker.
+render width and height through the daemon-owned platform. The first launch
+waits for Android readiness and may restart Waydroid once only when the size or
+bridge state requires it; later same-resolution launches reuse the already
+ready session. The installed helper accepts one fixed, argument-free request to
+confirm that Android `getevent -pl` lists `Wroid Gaming Touchscreen`; it does
+not expose a general root shell to the worker.
 
 Wait until the shell prompt returns. Expected result:
 

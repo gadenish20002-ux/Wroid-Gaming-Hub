@@ -17,7 +17,10 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 
 - [x] Implement a Type-B multitouch `uinput` injector.
 - [x] Make the virtual touchscreen visible inside Waydroid and verify events with Android `getevent`.
-- [ ] Productionize bridge lifecycle, reconciliation, and stable device discovery.
+- [x] Productionize bridge lifecycle, reconciliation, and stable device discovery
+  for consecutive sessions within one daemon lifetime.
+- [ ] Reconcile live LXC hot-plug after abrupt daemon replacement without the
+  one controlled restart on the next managed launch.
 - [x] Make bridge install transactional and preserve unrelated LXC config
   changes during rollback and cleanup.
 - [x] Serialize every privileged bridge workflow with a crash-safe kernel lease;
@@ -56,6 +59,9 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
   for the injection hot path.
 - [x] Measure injection-path p50/p95/p99/max on hardware with
   `wroid-inject-latency` (release p99 1.3 us over 20 000 frames).
+- [x] Measure the no-Waydroid daemon runtime channel on real uinput with
+  `wroid-runtime-channel-bench` (release p50/p95/p99/max 7/7/20/216 us over
+  20 002 acknowledged frames, peak/release 10/10, no active contacts).
 - [ ] Measure kernel event timestamp-to-inject p50/p95/p99 latency on hardware.
 
 ## Phase 2: Runtime daemon and security boundary
@@ -200,15 +206,17 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - The visual editor can calibrate over a user-authorized live Waydroid window,
   but it is not an always-on overlay during gameplay.
 - No production daemon-managed global input capture.
-- The transactional bridge lifecycle, standalone root-owned helper, and
-  daemon-owned helper activation are implemented. Stable bridge discovery and
-  daemon-native reconciliation are not.
+- The transactional bridge lifecycle, standalone root-owned helper,
+  daemon-owned helper activation, stable same-daemon bridge discovery, and
+  same-daemon runtime reconciliation are implemented. Live LXC hot-plug
+  reconciliation after abrupt daemon replacement is not.
 - Profile preparation and normal Hub process ownership use per-user daemon IPC;
   live profile controls still execute inside the daemon-supervised desktop-user
   `play-v2` worker until capture and cleanup move into daemon-native components.
 - The LXC bridge helper needs one graphical Polkit authorization during its
-  one-time installation. Gameplay later stops Waydroid automatically for
-  temporary bridge setup and does not prompt again.
+  one-time installation. The first managed launch may perform one controlled
+  Waydroid restart for bridge setup; later same-resolution launches in the same
+  daemon lifetime do not stop Waydroid per game.
 - No gamepad mapping.
 - No macro execution.
 - No XAPK/APKM/OBB install flow.
@@ -216,10 +224,13 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 
 ## Next Useful Milestones
 
-1. Productionize the persistent touchscreen bridge.
+1. Run the final announced live acceptance for the persistent touchscreen bridge.
    - Keep the successful Android `getevent` integration path.
-   - Add stable device discovery and bridge reconciliation.
-   - Verify ten simultaneous contacts and deterministic cleanup.
+   - Prove two bounded no-APK sessions reuse the same daemon-owned bridge
+     without closing the UI.
+   - Verify ten simultaneous contacts and deterministic final daemon cleanup.
+   - Keep live hot-plug after abrupt daemon replacement as explicit deferred
+     work unless it is separately designed and tested.
 
 2. Integrate safe host input capture with the managed session.
    - Reuse the completed evdev keyboard reader, relative mouse reader, WASD normalizer, live Android smoke path, hold reaffirmation loop, runtime joystick dead zones, and persistent mouse-aim primitive.

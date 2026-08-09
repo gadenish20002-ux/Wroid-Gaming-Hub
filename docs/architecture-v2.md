@@ -38,13 +38,14 @@ wroidd (per-user runtime daemon)
     |-- telemetry
     |
     +--> wroid-helper (minimal privileged service)
-    |       |-- evdev access and grabs
-    |       |-- uinput device creation
-    |       `-- restricted Waydroid system operations
+    |       |-- authenticated Wroid event-node bridge install/cleanup
+    |       |-- fixed Android input-device readiness probe
+    |       `-- bridge crash rollback
     |
-    +--> persistent input injector
-    |       |-- virtual multitouch touchscreen
-    |       `-- virtual gamepad
+    +--> persistent input platform
+    |       |-- canonical 10-slot uinput touchscreen
+    |       |-- private runtime touch channel
+    |       `-- daemon-side TouchEngine cleanup
     |
     `--> Waydroid session/container
             |-- Android package lifecycle
@@ -55,15 +56,21 @@ wroidd (per-user runtime daemon)
 The CLI becomes another client of `wroidd`. Direct ADB and Waydroid shell
 wrappers remain available for diagnostics and compatibility mode.
 
-The current production boundary is an incremental form of this target.
-`wroidd` protocol v2 owns the managed worker and a private per-launch bridge
-broker. The desktop-user worker owns evdev/uinput, profile evaluation, the input
-hot path, telemetry, and Waydroid user-level lifecycle. The daemon alone starts
-the root-owned typed helper, which owns only the validated LXC event-node
-bridge, one fixed Android input-device readiness probe, and crash rollback.
-The worker receives an inherited versioned socket rather than a helper path.
-Boot and render-property readiness remain in the desktop worker through
-Waydroid's user API. The helper must match the daemon's paired staged release
+The current production boundary matches the persistent-daemon touchscreen
+milestone. `wroidd` protocol v2 owns the managed worker and one lazy platform
+thread for the daemon lifetime. The worker keeps unprivileged evdev capture,
+profile evaluation, focus handling, and telemetry, but it receives only inherited
+runtime descriptor `198` and submits fixed binary touch frames over the private
+`SOCK_SEQPACKET` channel. The daemon owns the canonical uinput touchscreen, the
+exact-release helper lifecycle, Waydroid user-level lifecycle, coordinate
+scaling, ACK-after-uinput-write semantics, and final contact cleanup.
+
+The first managed launch may perform one controlled Waydroid restart to install
+or reconcile the bridge. Later same-resolution launches in the same daemon
+lifetime reuse the same uinput event node, helper bridge, and Waydroid owner.
+Worker exit, Stop, or Hub closure detaches that attachment, cancels any active
+daemon-side contacts, and releases host grabs; it does not stop Waydroid or drop
+the bridge per game. The helper must match the daemon's paired staged release
 and prove effective root through a side-effect-free check.
 Mode `4750` limits execution to the `input` group and avoids per-game password
 prompts. Its Hub bootstrap uses a detached unprivileged installer,
@@ -74,8 +81,13 @@ installation fails instead of publishing a partial helper. Daemon reuse is
 bound to authenticated peer credentials, a pidfd opened at authentication, and
 exact executable identity. Only an idle stale release may be frozen, checked
 again for worker children, and replaced; a detached watchdog guarantees resume
-if the upgrader dies. Moving profile evaluation, capture, injection, and
-lifecycle cleanup into daemon-native components remains a later migration.
+if the upgrader dies. If `wroidd` crashes instead of shutting down cleanly, the
+private descriptors close, the helper's EOF recovery force-stops Waydroid and
+removes the managed bridge include, and the kernel destroys the daemon-owned
+uinput device. Live LXC hot-plug reconciliation after abrupt daemon replacement
+is deferred; the next managed launch may still need the one controlled restart.
+Moving profile evaluation and physical capture into daemon-native components
+remains a later migration.
 
 ## Workspace direction
 
@@ -104,8 +116,10 @@ physical input
   -> normalized host event
   -> profile/binding engine
   -> logical touch frame
-  -> TouchEngine validation
-  -> persistent injector
+  -> worker TouchEngine validation
+  -> inherited runtime channel generation 2
+  -> daemon TouchEngine validation and canonical scaling
+  -> persistent uinput injector
   -> Linux evdev/uinput device
   -> Android EventHub/InputReader/InputDispatcher
 ```
@@ -128,27 +142,32 @@ Stopped -> Preparing -> Running -> Stopping -> Stopped
 ```
 
 `Preparing` validates the profile, verifies renderer and device capabilities,
-creates virtual devices, and starts input capture. `Running` owns all active
-contact state. `Stopping` disables capture first, cancels all contacts, restores
-per-game Waydroid properties, and then removes virtual devices.
+attaches to the daemon-owned platform, and starts input capture only after the
+runtime channel reports ready. `Running` has mirrored contact state: the worker
+commits local state only after the daemon ACK, and the daemon commits only after
+the uinput write succeeds. `Stopping` disables capture first, sends `finish`
+when possible, cancels any remaining daemon contacts, and releases host input
+grabs. It does not tear down Waydroid, the helper bridge, or the uinput device
+for ordinary game exits.
 
-A watchdog must perform the same contact cleanup when the UI disconnects or the
-runtime crashes.
+Orderly daemon shutdown performs the broader cleanup: terminate/reap workers,
+finish their runtime attachments, cancel contacts, stop Waydroid, ask the helper
+to remove the managed bridge, and drop uinput last. A watchdog or helper EOF
+path performs equivalent bridge cleanup if the daemon/runtime crashes.
 
-The user-side `launch-v2` transaction separately records whether a desktop
-Waydroid session was running before privileged setup. It restores that state
-after success or failure. A detached, token-scoped watchdog monitors the parent
-PID and performs the same restore if the launcher process disappears before it
-can disarm the recovery ticket. A Hub launch detaches this transaction from the
-browser and writes a mode-`0600` active-session record under the user's
-mode-`0700` runtime directory. Stop revalidates UID, Linux start ticks,
-executable, and the `launch-v2` command, then signals the opened process through
-pidfd so numeric PID reuse cannot affect another process. Session output goes to
-the user's private state log instead of a terminal. On return, `launch-v2`
-atomically publishes a bounded clean/failed outcome in the private user state
-directory. The Hub child reaper writes only a missing, launch-correlated
-fallback after hard process death, preserving any report already committed by
-the session itself.
+The user-side `launch-v2` worker is now the daemon-supervised input/profile
+executor, not the owner of Waydroid or the bridge. A Hub launch writes a
+mode-`0600` active-session record under the user's mode-`0700` runtime
+directory. Stop revalidates UID, Linux start ticks, executable, and the
+`launch-v2` command, then signals the opened process through pidfd so numeric
+PID reuse cannot affect another process. Session output goes to the user's
+private state log instead of a terminal. On return, `launch-v2` atomically
+publishes a bounded clean/failed outcome in the private user state directory.
+The Hub child reaper writes only a missing, launch-correlated fallback after
+hard process death, preserving any report already committed by the session
+itself. Platform cleanup belongs to `wroidd`, which keeps the ready platform
+alive after ordinary worker exit and tears it down only on daemon shutdown or a
+poisoned platform failure.
 
 ## Privilege boundary
 
@@ -164,11 +183,15 @@ arguments. Candidate operations are:
 Profiles, package names, APK parsing, UI rendering, network access, and telemetry
 remain outside the privileged process.
 
-The current bridge helper narrows this list further: it accepts only a virtual
-input node whose sysfs location, device name, virtual bus, vendor, and product
-identify the Wroid touchscreen. Its runtime protocol can request only a fixed
-`getevent -pl` readiness probe for that name and cleanup; it never receives a
-profile, Android command, package, property, device name, or shell text.
+The current production helper narrows this list further: it accepts only a
+daemon-created virtual input node whose sysfs location, device name, virtual
+bus, vendor, and product identify the Wroid touchscreen. Its runtime protocol
+can request only bridge open, one fixed `getevent -pl` readiness probe for that
+name, health observation, and cleanup. It never receives a touch frame, profile,
+package, display property, host physical input path, arbitrary device name, or
+shell text. Root-only diagnostic binaries keep the temporary in-process bridge
+path for recovery and low-level smoke testing; that exception is not the normal
+Hub/CLI gameplay lifecycle.
 
 ## Graphics policy
 
