@@ -204,12 +204,16 @@
           : "Browser preview only · no Android events are sent.";
   }
 
-  function setTesting(enabled) {
-    state.testing = enabled;
+  function resetTestInputState() {
     state.preview = Model.createPreviewState();
     state.mouseMoving = false;
     window.clearTimeout(state.mouseMoveTimer);
     state.mouseMoveTimer = null;
+  }
+
+  function setTesting(enabled) {
+    state.testing = enabled;
+    resetTestInputState();
     updateTestPreview();
     if (enabled) toast("Input preview armed. Press keys and mouse buttons over the game surface.");
   }
@@ -242,7 +246,7 @@
     const button = browserButtonName(event.button);
     if (!button) return;
     if (!pressed && !state.preview.pressedButtons.has(button)) return;
-    Model.setPreviewButton(state.preview, button, pressed);
+    Model.setPreviewButton(state.preview, state.profile, button, pressed);
     updateTestPreview();
     event.preventDefault();
     event.stopImmediatePropagation();
@@ -253,6 +257,7 @@
     if (state.history.length > 80) state.history.shift();
     state.future.length = 0;
     operation();
+    if (state.testing) resetTestInputState();
     state.dirty = true;
     if (render) renderAll();
     updateStatus();
@@ -263,8 +268,7 @@
     if (!previous) return;
     state.future.push(clone(state.profile));
     state.profile = previous;
-    ensureSelectedLayer();
-    state.selected = Math.min(state.selected, state.profile.bindings.length - 1);
+    if (state.testing) resetTestInputState();
     state.dirty = true;
     renderAll();
   }
@@ -274,8 +278,7 @@
     if (!next) return;
     state.history.push(clone(state.profile));
     state.profile = next;
-    ensureSelectedLayer();
-    state.selected = Math.min(state.selected, state.profile.bindings.length - 1);
+    if (state.testing) resetTestInputState();
     state.dirty = true;
     renderAll();
   }
@@ -300,12 +303,20 @@
 
   function selectLayer(name) {
     state.selectedLayer = name;
-    const match = state.profile.bindings.findIndex(bindingInSelectedLayer);
-    state.selected = match;
     renderAll();
   }
 
+  function reconcileSelectedBinding() {
+    state.selected = Model.reconcileSelectedBinding(
+      state.profile,
+      state.selectedLayer,
+      state.selected,
+    );
+  }
+
   function renderAll() {
+    ensureSelectedLayer();
+    reconcileSelectedBinding();
     renderMeta();
     renderLayers();
     renderBindingList();
@@ -368,7 +379,7 @@
         <label><span>Name</span><input class="text-input mono-input" id="layerName" value="${escapeHtml(layer.name)}" autocomplete="off" spellcheck="false" aria-label="Selected layer name"></label>
         <label><span>Mode</span><select class="select-input" id="layerMode" aria-label="Selected layer activation mode"><option value="hold"${layer.activation.kind === "hold" ? " selected" : ""}>Hold</option><option value="toggle"${layer.activation.kind === "toggle" ? " selected" : ""}>Toggle</option></select></label>
         <div class="layer-key-cell">${keyCaptureField("layerKey", "Activation", layer.activation.key, "")}</div>
-        <button class="layer-delete" id="deleteLayerButton" type="button" aria-label="Delete layer ${escapeHtml(layer.name)} and move its bindings to Base">MOVE TO BASE + DELETE</button>
+        <button class="layer-delete" id="deleteLayerButton" type="button" title="Move bindings to Base and delete this layer" aria-label="Delete layer ${escapeHtml(layer.name)} and move its bindings to Base">MOVE TO BASE + DELETE</button>
       </div>`;
     document.querySelector("#layerName").addEventListener("change", (event) => {
       const previous = state.selectedLayer;
@@ -392,7 +403,6 @@
       mutate(() => {
         moved = Model.deleteLayer(state.profile, deleted);
         state.selectedLayer = null;
-        state.selected = state.profile.bindings.findIndex(bindingInSelectedLayer);
       });
       toast(`Layer ${deleted} deleted. ${moved} binding${moved === 1 ? "" : "s"} moved to Base; Undo restores it.`);
     });
@@ -988,6 +998,7 @@
           },
         };
       }
+      if (kind === "mouse_aim") state.selectedLayer = null;
       if (kind !== "mouse_aim" && state.selectedLayer !== null) binding.layer = state.selectedLayer;
       state.profile.bindings.push(binding);
       state.selected = state.profile.bindings.length - 1;
@@ -998,7 +1009,6 @@
     if (state.selected < 0) return;
     mutate(() => {
       state.profile.bindings.splice(state.selected, 1);
-      state.selected = Math.min(state.selected, state.profile.bindings.length - 1);
     });
   }
 
@@ -1122,10 +1132,7 @@
       if (state.history.length > 80) state.history.shift();
       state.future.length = 0;
       state.profile = Model.normalizeProfile(result.profile);
-      ensureSelectedLayer();
-      state.selected = state.profile.bindings.length
-        ? Math.min(Math.max(state.selected, 0), state.profile.bindings.length - 1)
-        : -1;
+      if (state.testing) resetTestInputState();
       state.dirty = true;
       renderAll();
       toast("Previous save loaded for review. Save to make it active, or Undo to return.");
@@ -1595,8 +1602,7 @@
     window.addEventListener("blur", () => {
       disarmKeyCapture();
       if (!state.testing) return;
-      state.preview = Model.createPreviewState();
-      state.mouseMoving = false;
+      resetTestInputState();
       updateTestPreview();
     });
     window.addEventListener("beforeunload", (event) => {

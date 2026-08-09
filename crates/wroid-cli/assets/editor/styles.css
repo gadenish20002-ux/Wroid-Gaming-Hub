@@ -2199,7 +2199,7 @@ kbd {
   }
 }
 
-@media (max-height: 760px) {
+@media (max-height: 960px) {
   .profile-identity {
     padding-top: 9px;
     padding-bottom: 9px;
@@ -2258,9 +2258,37 @@ kbd {
   }
 
   .layer-editor {
-    max-height: 86px;
-    overflow: auto;
-    scrollbar-color: var(--line-bright) transparent;
+    max-height: none;
+    overflow: visible;
+  }
+
+  .layer-edit-grid {
+    grid-template-columns: minmax(0, 1.4fr) minmax(52px, 0.85fr) minmax(48px, 0.75fr) 28px;
+    align-items: end;
+  }
+
+  .layer-key-cell,
+  .layer-delete {
+    grid-column: auto;
+  }
+
+  .layer-key-cell .key-capture-button {
+    padding-inline: 6px;
+  }
+
+  .layer-key-cell .key-capture-button small {
+    display: none;
+  }
+
+  .layer-delete {
+    height: 30px;
+    overflow: hidden;
+    font-size: 0;
+  }
+
+  .layer-delete::after {
+    content: "→B";
+    font: 700 8px/1 var(--mono);
   }
 
   .binding-subheading {
@@ -2273,5 +2301,44 @@ kbd {
 
   .stage-zone {
     padding-top: 12px;
+  }
+}
+
+@media (max-height: 760px) {
+  .binding-subheading {
+    margin-top: 5px;
+  }
+
+  .search-wrap {
+    height: 28px;
+    margin-top: 4px;
+    margin-bottom: 4px;
+  }
+
+  .binding-list {
+    padding: 1px 4px;
+  }
+
+  .binding-item {
+    min-height: 28px;
+    grid-template-columns: 28px minmax(0, 1fr) auto;
+    gap: 6px;
+    margin-bottom: 2px;
+    padding: 2px 6px;
+  }
+
+  .binding-symbol {
+    width: 26px;
+    height: 24px;
+    font-size: 6px;
+  }
+
+  .binding-copy strong {
+    font-size: 9px;
+  }
+
+  .binding-copy small,
+  .binding-chips {
+    display: none;
   }
 }

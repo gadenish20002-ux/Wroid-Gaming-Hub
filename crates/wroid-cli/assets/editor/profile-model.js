@@ -358,6 +358,7 @@
       pressedButtons: new Set(),
       activeLayers: new Set(),
       toggledLayers: new Set(),
+      latchedTapIndexes: new Set(),
       mouseMoving: false,
     };
   }
@@ -388,12 +389,23 @@
     if (pressed) preview.pressedKeys.add(canonical);
     else preview.pressedKeys.delete(canonical);
     refreshActiveLayers(preview, profile);
+    const activationKey = (profile.layers || [])
+      .some((layer) => canonicalKey(layer.activation?.key) === canonical);
+    if (pressed && !wasPressed && !activationKey) {
+      latchTapBindingsForSource(preview, profile, "key", canonical);
+    }
+    reconcileTapLatches(preview, profile);
   }
 
-  function setPreviewButton(preview, button, pressed) {
+  function setPreviewButton(preview, profile, button, pressed) {
     const canonical = canonicalKey(button);
+    const wasPressed = preview.pressedButtons.has(canonical);
     if (pressed) preview.pressedButtons.add(canonical);
     else preview.pressedButtons.delete(canonical);
+    if (pressed && !wasPressed) {
+      latchTapBindingsForSource(preview, profile, "mouse_button", canonical);
+    }
+    reconcileTapLatches(preview, profile);
   }
 
   function bindingLayerIndex(profile, binding) {
@@ -436,10 +448,51 @@
     return true;
   }
 
+  function latchTapBindingsForSource(preview, profile, namespace, value) {
+    (profile.bindings || []).forEach((binding, index) => {
+      if (
+        binding.action?.kind === "tap"
+        && bindingHasSource(binding, namespace, value)
+        && bindingAvailableForSource(profile, preview, binding, namespace, value)
+      ) {
+        preview.latchedTapIndexes.add(index);
+      }
+    });
+  }
+
+  function reconcileTapLatches(preview, profile) {
+    preview.latchedTapIndexes.forEach((index) => {
+      const binding = profile.bindings?.[index];
+      if (binding?.action?.kind !== "tap") {
+        preview.latchedTapIndexes.delete(index);
+        return;
+      }
+      const available = scopedInputs(binding.input).some(({ namespace, value }) => {
+        const canonical = canonicalKey(value);
+        const held = namespace === "key"
+          ? preview.pressedKeys.has(canonical)
+          : preview.pressedButtons.has(canonical);
+        return held && bindingAvailableForSource(profile, preview, binding, namespace, canonical);
+      });
+      if (!available) preview.latchedTapIndexes.delete(index);
+    });
+  }
+
+  function reconcileSelectedBinding(profile, selectedLayer, selectedIndex) {
+    const editingLayer = selectedLayer === null ? "base" : selectedLayer;
+    const selected = profile.bindings?.[selectedIndex];
+    if (selected && layerName(selected) === editingLayer) return selectedIndex;
+    return (profile.bindings || []).findIndex((binding) => layerName(binding) === editingLayer);
+  }
+
   function activePreviewBindingIndexes(profile, preview) {
     const result = [];
     const activationKeys = new Set((profile.layers || []).map((layer) => canonicalKey(layer.activation?.key)));
     (profile.bindings || []).forEach((binding, index) => {
+      if (binding.action?.kind === "tap") {
+        if (preview.latchedTapIndexes.has(index)) result.push(index);
+        return;
+      }
       if (binding.input?.kind === "mouse_move") {
         if (preview.mouseMoving || (binding.action?.toggle_key && preview.pressedKeys.has(canonicalKey(binding.action.toggle_key)))) {
           result.push(index);
@@ -476,5 +529,6 @@
     setPreviewKey,
     setPreviewButton,
     activePreviewBindingIndexes,
+    reconcileSelectedBinding,
   });
 });

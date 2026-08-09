@@ -281,14 +281,75 @@ test("preview applies the same layer and modifier precedence to mouse buttons", 
   });
   const preview = Model.createPreviewState();
 
-  Model.setPreviewButton(preview, "left", true);
+  Model.setPreviewButton(preview, document, "left", true);
   assert.deepEqual(Model.activePreviewBindingIndexes(document, preview), [0]);
   Model.setPreviewKey(preview, document, "g", true);
   assert.deepEqual(Model.activePreviewBindingIndexes(document, preview), [1]);
   Model.setPreviewKey(preview, document, "shift", true);
   assert.deepEqual(Model.activePreviewBindingIndexes(document, preview), [2]);
-  Model.setPreviewButton(preview, "left", false);
+  Model.setPreviewButton(preview, document, "left", false);
   assert.deepEqual(Model.activePreviewBindingIndexes(document, preview), []);
+});
+
+test("Tap preview latches only on the action key press edge", () => {
+  const document = profile({
+    layers: [layer("combat", "hold", "g")],
+    bindings: [
+      keyBinding("base", "r"),
+      keyBinding("base_modified", "r", { modifier: "shift" }),
+      keyBinding("layered", "r", { layer: "combat" }),
+      keyBinding("layered_modified", "r", { layer: "combat", modifier: "shift" }),
+    ],
+  });
+  const preview = Model.createPreviewState();
+
+  Model.setPreviewKey(preview, document, "r", true);
+  assert.deepEqual(Model.activePreviewBindingIndexes(document, preview), [0]);
+  Model.setPreviewKey(preview, document, "shift", true);
+  assert.deepEqual(Model.activePreviewBindingIndexes(document, preview), []);
+  Model.setPreviewKey(preview, document, "shift", false);
+  assert.deepEqual(Model.activePreviewBindingIndexes(document, preview), []);
+  Model.setPreviewKey(preview, document, "g", true);
+  assert.deepEqual(Model.activePreviewBindingIndexes(document, preview), []);
+  Model.setPreviewKey(preview, document, "g", false);
+  assert.deepEqual(Model.activePreviewBindingIndexes(document, preview), []);
+  Model.setPreviewKey(preview, document, "r", false);
+
+  Model.setPreviewKey(preview, document, "shift", true);
+  Model.setPreviewKey(preview, document, "r", true);
+  assert.deepEqual(Model.activePreviewBindingIndexes(document, preview), [1]);
+  Model.setPreviewKey(preview, document, "shift", false);
+  assert.deepEqual(Model.activePreviewBindingIndexes(document, preview), []);
+  Model.setPreviewKey(preview, document, "r", false);
+
+  Model.setPreviewKey(preview, document, "g", true);
+  Model.setPreviewKey(preview, document, "r", true);
+  assert.deepEqual(Model.activePreviewBindingIndexes(document, preview), [2]);
+  Model.setPreviewKey(preview, document, "g", false);
+  assert.deepEqual(Model.activePreviewBindingIndexes(document, preview), []);
+  Model.setPreviewKey(preview, document, "r", false);
+});
+
+test("mouse-button Tap preview has the same press-edge latch semantics", () => {
+  const document = profile({
+    bindings: [
+      mouseBinding("base", "left"),
+      mouseBinding("modified", "left", { modifier: "shift" }),
+    ],
+  });
+  const preview = Model.createPreviewState();
+
+  Model.setPreviewButton(preview, document, "left", true);
+  assert.deepEqual(Model.activePreviewBindingIndexes(document, preview), [0]);
+  Model.setPreviewKey(preview, document, "shift", true);
+  assert.deepEqual(Model.activePreviewBindingIndexes(document, preview), []);
+  Model.setPreviewButton(preview, document, "left", false);
+
+  Model.setPreviewButton(preview, document, "left", true);
+  assert.deepEqual(Model.activePreviewBindingIndexes(document, preview), [1]);
+  Model.setPreviewKey(preview, document, "shift", false);
+  assert.deepEqual(Model.activePreviewBindingIndexes(document, preview), []);
+  Model.setPreviewButton(preview, document, "left", false);
 });
 
 test("preview consumes declared activation keys before binding dispatch", () => {
@@ -321,4 +382,31 @@ test("mouse aim preview remains always live outside layer selection", () => {
   const preview = Model.createPreviewState();
   preview.mouseMoving = true;
   assert.deepEqual(Model.activePreviewBindingIndexes(document, preview), [0]);
+});
+
+test("selection reconciliation keeps the inspector inside the editing layer", () => {
+  const document = profile({
+    layers: [layer("combat", "hold", "g")],
+    bindings: [
+      keyBinding("base", "r"),
+      keyBinding("combat_one", "1", { layer: "combat" }),
+      keyBinding("combat_two", "2", { layer: "combat" }),
+      {
+        name: "aim",
+        input: { kind: "mouse_move" },
+        action: {
+          kind: "mouse_aim",
+          region: { x: 0.1, y: 0.1, w: 0.8, h: 0.8 },
+          sensitivity: 1,
+          recenter_threshold: 0.7,
+        },
+      },
+    ],
+  });
+
+  assert.equal(Model.reconcileSelectedBinding(document, "combat", 2), 2);
+  assert.equal(Model.reconcileSelectedBinding(document, "combat", 0), 1);
+  assert.equal(Model.reconcileSelectedBinding(document, null, 3), 3);
+  document.bindings.splice(1, 2);
+  assert.equal(Model.reconcileSelectedBinding(document, "combat", 1), -1);
 });
