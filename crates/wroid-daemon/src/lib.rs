@@ -6,6 +6,9 @@
 //! versioned Unix-socket protocol for the CLI and desktop UI.
 
 pub mod ipc;
+// This coordinator is consumed by the production backend and process owner in the next tasks.
+#[allow(dead_code)]
+mod platform;
 mod process;
 
 use std::collections::BTreeMap;
