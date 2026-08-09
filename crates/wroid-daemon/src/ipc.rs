@@ -421,6 +421,12 @@ pub struct DaemonClient {
     expected_uid: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthenticatedDaemonPeer {
+    pub pid: libc::pid_t,
+    pub uid: u32,
+}
+
 impl DaemonClient {
     pub fn connect_default() -> Result<Self, IpcError> {
         let paths = DaemonPaths::from_environment()?;
@@ -440,8 +446,20 @@ impl DaemonClient {
     }
 
     pub fn request(&self, request: DaemonRequest) -> Result<DaemonResult, IpcError> {
+        self.request_with_peer(request)
+            .map(|(result, _peer)| result)
+    }
+
+    pub fn request_with_peer(
+        &self,
+        request: DaemonRequest,
+    ) -> Result<(DaemonResult, AuthenticatedDaemonPeer), IpcError> {
         let mut stream = UnixStream::connect(&self.socket)?;
-        peer_credentials(&stream, self.expected_uid)?;
+        let credentials = peer_credentials(&stream, self.expected_uid)?;
+        let peer = AuthenticatedDaemonPeer {
+            pid: credentials.pid,
+            uid: self.expected_uid,
+        };
         stream.set_read_timeout(Some(IO_TIMEOUT))?;
         stream.set_write_timeout(Some(IO_TIMEOUT))?;
         serde_json::to_writer(&mut stream, &ProtocolRequest::new(request))
@@ -458,7 +476,7 @@ impl DaemonClient {
             )));
         }
         match (response.result, response.error) {
-            (Some(result), None) => Ok(result),
+            (Some(result), None) => Ok((result, peer)),
             (None, Some(error)) => Err(IpcError::Rejected {
                 code: error.code,
                 message: error.message,
@@ -912,6 +930,24 @@ mod tests {
                 ..
             }
         ));
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn request_with_peer_binds_response_to_authenticated_server() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = DaemonPaths::under(directory.path().join("runtime"));
+        let socket = paths.socket.clone();
+        let mut server = DaemonServer::bind(paths).unwrap();
+        let thread = thread::spawn(move || server.serve_once().unwrap());
+
+        let (result, peer) = DaemonClient::at(socket)
+            .request_with_peer(DaemonRequest::Ping)
+            .unwrap();
+
+        assert!(matches!(result, DaemonResult::Pong { .. }));
+        assert_eq!(peer.pid, std::process::id() as libc::pid_t);
+        assert_eq!(peer.uid, effective_uid());
         thread.join().unwrap();
     }
 

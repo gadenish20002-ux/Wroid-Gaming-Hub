@@ -1,24 +1,26 @@
 use std::env;
 use std::fs::{self, OpenOptions};
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use wroid_core::profile_v2::ProfileV2;
 use wroid_daemon::ipc::{
-    DaemonClient, DaemonRequest, DaemonResult, GameLaunchRequest, SessionStateWire, StopReasonWire,
-    PROTOCOL_VERSION,
+    AuthenticatedDaemonPeer, DaemonClient, DaemonRequest, DaemonResult, GameLaunchRequest,
+    SessionSnapshot, SessionStateWire, StopReasonWire, PROTOCOL_VERSION,
 };
 
 use super::play_v2::PlayV2Options;
 
 const START_ATTEMPTS: usize = 40;
 const START_POLL: Duration = Duration::from_millis(50);
+const RELEASE_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 static SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn start() -> Result<()> {
@@ -219,14 +221,32 @@ fn next_hub_session_id() -> String {
 }
 
 pub(crate) fn ensure_running() -> Result<DaemonClient> {
-    if let Ok(client) = DaemonClient::connect_default() {
-        if ping(&client).is_ok() {
-            return Ok(client);
-        }
-    }
-
     let executable = daemon_executable()?;
     validate_daemon_executable(&executable)?;
+    let desired_identity = daemon_file_identity(&executable)?;
+    if let Ok(client) = DaemonClient::connect_default() {
+        let (_pid, _session_count, peer, running_identity) = authenticated_ping(&client)
+            .context("failed to authenticate the running wroidd release")?;
+        if running_identity == desired_identity {
+            return Ok(client);
+        }
+        let (result, list_peer) = client
+            .request_with_peer(DaemonRequest::List)
+            .context("failed to inspect sessions owned by the stale wroidd release")?;
+        if list_peer != peer {
+            bail!("wroidd peer identity changed while checking the running release");
+        }
+        let DaemonResult::Sessions { sessions } = result else {
+            bail!("wroidd returned an unexpected response to session listing");
+        };
+        if sessions_block_upgrade(&sessions) {
+            bail!(
+                "a game is still running under an older wroidd release; stop it before launching with the updated Wroid"
+            );
+        }
+        stop_authenticated_idle_daemon(peer, running_identity)?;
+    }
+
     let log = daemon_log()?;
     let stderr = log
         .try_clone()
@@ -241,7 +261,9 @@ pub(crate) fn ensure_running() -> Result<DaemonClient> {
 
     for _ in 0..START_ATTEMPTS {
         if let Ok(client) = DaemonClient::connect_default() {
-            if ping(&client).is_ok() {
+            if authenticated_ping(&client)
+                .is_ok_and(|(_, _, _, identity)| identity == desired_identity)
+            {
                 return Ok(client);
             }
         }
@@ -260,6 +282,146 @@ pub(crate) fn ensure_running() -> Result<DaemonClient> {
         "wroidd did not publish its private socket within 2 seconds; inspect {}",
         daemon_log_path()?.display()
     )
+}
+
+fn authenticated_ping(
+    client: &DaemonClient,
+) -> Result<(u32, usize, AuthenticatedDaemonPeer, (u64, u64))> {
+    let (result, peer) = client.request_with_peer(DaemonRequest::Ping)?;
+    let DaemonResult::Pong { pid, session_count } = result else {
+        bail!("wroidd returned an unexpected response to ping");
+    };
+    if i64::from(pid) != i64::from(peer.pid) {
+        bail!(
+            "wroidd response PID {pid} does not match authenticated peer PID {}",
+            peer.pid
+        );
+    }
+    let running_path = PathBuf::from(format!("/proc/{}/exe", peer.pid));
+    let identity = daemon_file_identity(&running_path)
+        .context("failed to identify the authenticated running wroidd")?;
+    Ok((pid, session_count, peer, identity))
+}
+
+fn daemon_file_identity(path: &Path) -> Result<(u64, u64)> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("failed to inspect daemon identity {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("daemon identity is not a regular file: {}", path.display());
+    }
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+fn sessions_block_upgrade(sessions: &[SessionSnapshot]) -> bool {
+    sessions.iter().any(|session| {
+        session.process_id.is_some()
+            && matches!(
+                session.state,
+                SessionStateWire::Preparing
+                    | SessionStateWire::Running
+                    | SessionStateWire::Stopping
+            )
+    })
+}
+
+fn stop_authenticated_idle_daemon(
+    peer: AuthenticatedDaemonPeer,
+    expected_identity: (u64, u64),
+) -> Result<()> {
+    if peer.pid <= 0 || peer.uid != effective_uid() {
+        bail!("refusing to stop an unauthenticated wroidd peer");
+    }
+    let executable = PathBuf::from(format!("/proc/{}/exe", peer.pid));
+    if daemon_file_identity(&executable)? != expected_identity {
+        bail!("authenticated wroidd PID changed before pidfd acquisition");
+    }
+    let pidfd = open_pidfd(peer.pid)?;
+    match daemon_file_identity(&executable) {
+        Ok(identity) if identity == expected_identity => {}
+        Ok(_) => bail!("authenticated wroidd PID was reused before replacement"),
+        Err(_error) if process_is_gone(peer.pid) => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    // SAFETY: pidfd_send_signal targets the task referenced by the owned
+    // pidfd; null siginfo and flags zero are valid for SIGTERM.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            std::os::fd::AsRawFd::as_raw_fd(&pidfd),
+            libc::SIGTERM,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        )
+    };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error).context("failed to stop the authenticated stale wroidd");
+        }
+    }
+    wait_for_pidfd_exit(&pidfd, RELEASE_STOP_TIMEOUT)
+}
+
+fn open_pidfd(pid: libc::pid_t) -> Result<OwnedFd> {
+    if pid <= 0 {
+        bail!("cannot open a pidfd for an invalid PID");
+    }
+    // SAFETY: pidfd_open takes a positive PID and flags zero.
+    let raw_fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    if raw_fd < 0 {
+        return Err(std::io::Error::last_os_error()).context("failed to open wroidd pidfd");
+    }
+    let raw_fd = i32::try_from(raw_fd).context("wroidd pidfd is out of range")?;
+    // SAFETY: pidfd_open returned a new descriptor whose sole ownership is
+    // transferred into OwnedFd exactly once.
+    Ok(unsafe { OwnedFd::from_raw_fd(raw_fd) })
+}
+
+fn wait_for_pidfd_exit(pidfd: &OwnedFd, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            bail!(
+                "stale wroidd did not exit within {} ms",
+                timeout.as_millis()
+            );
+        }
+        let timeout_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+        let mut descriptor = libc::pollfd {
+            fd: std::os::fd::AsRawFd::as_raw_fd(pidfd),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: descriptor points to one initialized pollfd for the duration
+        // of the call and timeout_ms is non-negative.
+        let result = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
+        if result > 0 && descriptor.revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+            return Ok(());
+        }
+        if result > 0 {
+            bail!(
+                "unexpected poll state while waiting for stale wroidd: {}",
+                descriptor.revents
+            );
+        }
+        if result == 0 {
+            bail!(
+                "stale wroidd did not exit within {} ms",
+                timeout.as_millis()
+            );
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error).context("failed while waiting for stale wroidd exit");
+        }
+    }
+}
+
+fn process_is_gone(pid: libc::pid_t) -> bool {
+    // SAFETY: signal zero performs existence/permission checking only.
+    let result = unsafe { libc::kill(pid, 0) };
+    result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
 fn ping(client: &DaemonClient) -> Result<(u32, usize)> {
@@ -366,7 +528,9 @@ fn effective_uid() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::process::ExitStatusExt;
     use wroid_core::profile_v2::ProfileV2;
+    use wroid_daemon::ipc::{AuthenticatedDaemonPeer, SessionSnapshot};
 
     #[test]
     fn rejects_group_writable_daemon_executable() {
@@ -482,5 +646,106 @@ mod tests {
             launch.worker_protocol_generation,
             wroid_inject::BRIDGE_WORKER_PROTOCOL_GENERATION
         );
+    }
+
+    #[test]
+    fn daemon_release_identity_uses_followed_device_and_inode() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first");
+        let hardlink = directory.path().join("hardlink");
+        let different = directory.path().join("different");
+        fs::write(&first, b"one").unwrap();
+        fs::hard_link(&first, &hardlink).unwrap();
+        fs::write(&different, b"two").unwrap();
+
+        assert_eq!(
+            daemon_file_identity(&first).unwrap(),
+            daemon_file_identity(&hardlink).unwrap()
+        );
+        assert_ne!(
+            daemon_file_identity(&first).unwrap(),
+            daemon_file_identity(&different).unwrap()
+        );
+    }
+
+    #[test]
+    fn only_process_bearing_live_states_block_daemon_release() {
+        assert!(!sessions_block_upgrade(&[snapshot(
+            SessionStateWire::Stopped,
+            None
+        )]));
+        assert!(!sessions_block_upgrade(&[snapshot(
+            SessionStateWire::Preparing,
+            None
+        )]));
+        assert!(sessions_block_upgrade(&[snapshot(
+            SessionStateWire::Preparing,
+            Some(98)
+        )]));
+        assert!(sessions_block_upgrade(&[snapshot(
+            SessionStateWire::Running,
+            Some(99)
+        )]));
+        assert!(sessions_block_upgrade(&[snapshot(
+            SessionStateWire::Stopping,
+            Some(99)
+        )]));
+        assert!(!sessions_block_upgrade(&[snapshot(
+            SessionStateWire::Failed,
+            None
+        )]));
+    }
+
+    #[test]
+    fn daemon_release_rejects_changed_pid_identity_without_signalling() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let peer = AuthenticatedDaemonPeer {
+            pid: child.id() as libc::pid_t,
+            uid: effective_uid(),
+        };
+        let unrelated = daemon_file_identity(&env::current_exe().unwrap()).unwrap();
+
+        assert!(stop_authenticated_idle_daemon(peer, unrelated).is_err());
+        assert!(child.try_wait().unwrap().is_none());
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn daemon_release_signals_the_authenticated_pidfd() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let peer = AuthenticatedDaemonPeer {
+            pid: child.id() as libc::pid_t,
+            uid: effective_uid(),
+        };
+        let identity =
+            daemon_file_identity(Path::new(&format!("/proc/{}/exe", child.id()))).unwrap();
+
+        stop_authenticated_idle_daemon(peer, identity).unwrap();
+        let status = child.wait().unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGTERM));
+    }
+
+    #[test]
+    fn daemon_release_pidfd_wait_is_bounded() {
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pidfd = open_pidfd(child.id() as libc::pid_t).unwrap();
+
+        assert!(wait_for_pidfd_exit(&pidfd, Duration::from_millis(10)).is_err());
+
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+
+    fn snapshot(state: SessionStateWire, process_id: Option<u32>) -> SessionSnapshot {
+        SessionSnapshot {
+            session_id: "release-test".to_owned(),
+            state,
+            package_name: "com.example.game".to_owned(),
+            launch_package: true,
+            control_count: 0,
+            process_id,
+            detail: None,
+        }
     }
 }
