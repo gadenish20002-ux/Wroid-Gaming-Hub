@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use wroid_core::profile_v2::{InputV2, ProfileV2};
 use wroid_core::Resolution;
-use wroid_inject::{run_game_session, BridgeBrokerClient, GameSessionOptions, GameSessionReport};
+use wroid_inject::{run_game_session, GameSessionOptions, GameSessionReport, RuntimeChannelClient};
 use wroid_input::{discover_keyboard_path, discover_mouse_path};
 
 pub(crate) struct PlayV2Options {
@@ -20,17 +20,17 @@ pub(crate) struct PlayV2Options {
 }
 
 pub(crate) fn play_v2(profile_path: PathBuf, options: PlayV2Options) -> Result<GameSessionReport> {
-    play_v2_with_broker(profile_path, options, None)
+    play_v2_with_runtime_channel(profile_path, options, None)
 }
 
-pub(crate) fn play_v2_with_broker(
+pub(crate) fn play_v2_with_runtime_channel(
     profile_path: PathBuf,
     options: PlayV2Options,
-    bridge_broker: Option<BridgeBrokerClient>,
+    runtime_channel: Option<RuntimeChannelClient>,
 ) -> Result<GameSessionReport> {
     // SAFETY: geteuid takes no arguments and has no preconditions.
     let is_root = unsafe { libc::geteuid() } == 0;
-    ensure_play_bridge_access(is_root, bridge_broker.is_some())?;
+    ensure_play_runtime_access(is_root, runtime_channel.is_some())?;
     let profile = ProfileV2::load_from_path(&profile_path)
         .with_context(|| format!("failed to load profile v2 {}", profile_path.display()))?;
     profile
@@ -80,13 +80,13 @@ pub(crate) fn play_v2_with_broker(
     session.trace_input = options.trace_input;
     session.exit_after = options.exit_after;
     session.focus_socket = options.focus_socket;
-    session.bridge_broker = bridge_broker;
+    session.runtime_channel = runtime_channel;
     run_game_session(session).map_err(anyhow::Error::msg)
 }
 
-fn ensure_play_bridge_access(is_root: bool, has_broker: bool) -> Result<()> {
-    if !is_root && !has_broker {
-        bail!("unprivileged play-v2 requires the daemon bridge; use `wroid launch-v2` for production sessions");
+fn ensure_play_runtime_access(is_root: bool, has_runtime_channel: bool) -> Result<()> {
+    if !is_root && !has_runtime_channel {
+        bail!("unprivileged play-v2 requires the daemon runtime channel; use `wroid launch-v2` for production sessions");
     }
     Ok(())
 }
@@ -96,9 +96,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn direct_play_requires_root_or_an_inherited_broker() {
-        assert!(ensure_play_bridge_access(false, false).is_err());
-        ensure_play_bridge_access(true, false).unwrap();
-        ensure_play_bridge_access(false, true).unwrap();
+    fn direct_play_requires_root_or_an_inherited_runtime_channel() {
+        assert!(ensure_play_runtime_access(false, false).is_err());
+        ensure_play_runtime_access(true, false).unwrap();
+        ensure_play_runtime_access(false, true).unwrap();
     }
 }

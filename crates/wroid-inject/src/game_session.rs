@@ -10,8 +10,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::{
     ensure_container_stopped, ensure_root, remove_default_bridge, wait_for_android_input_device,
-    BridgeBrokerClient, DesktopUser, DesktopWaydroidSession, DeviceConfig, InputDeviceNode,
-    InstalledWaydroidBridge, UinputTouchInjector, WaydroidBridgeLease, WROID_TOUCHSCREEN_NAME,
+    DesktopUser, DesktopWaydroidSession, DeviceConfig, InputDeviceNode, InstalledWaydroidBridge,
+    RuntimeChannelClient, UinputTouchInjector, WaydroidBridgeLease, WROID_TOUCHSCREEN_NAME,
 };
 use wroid_core::profile_v2::{InputV2, JoystickMode, ProfileV2};
 use wroid_core::{Point, Resolution};
@@ -87,7 +87,36 @@ pub fn run_game_session_cli(args: impl IntoIterator<Item = String>) -> GameSessi
 
 pub fn run_game_session(mut options: GameSessionOptions) -> GameSessionResult<GameSessionReport> {
     let is_root = ensure_root("Wroid unified game session").is_ok();
-    let bridge_broker = select_bridge_broker(is_root, options.bridge_broker.take())?;
+    match select_session_backend(is_root, options.runtime_channel.take())? {
+        SessionBackend::LocalDiagnostic => run_local_game_session(options),
+        SessionBackend::Remote(runtime_channel) => {
+            run_remote_game_session(options, runtime_channel)
+        }
+    }
+}
+
+enum SessionBackend {
+    LocalDiagnostic,
+    Remote(RuntimeChannelClient),
+}
+
+fn select_session_backend(
+    is_root: bool,
+    runtime_channel: Option<RuntimeChannelClient>,
+) -> io::Result<SessionBackend> {
+    if let Some(runtime_channel) = runtime_channel {
+        return Ok(SessionBackend::Remote(runtime_channel));
+    }
+    if is_root {
+        return Ok(SessionBackend::LocalDiagnostic);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "rootless game session requires the daemon runtime channel",
+    ))
+}
+
+fn run_local_game_session(options: GameSessionOptions) -> GameSessionResult<GameSessionReport> {
     let lease_owner = format!(
         "game session {}",
         options
@@ -95,37 +124,12 @@ pub fn run_game_session(mut options: GameSessionOptions) -> GameSessionResult<Ga
             .as_deref()
             .map_or_else(|| "<unknown>".into(), |path| path.display().to_string())
     );
-    let _bridge_lease = is_root
-        .then(|| WaydroidBridgeLease::acquire_default(&lease_owner))
-        .transpose()?;
+    let _bridge_lease = WaydroidBridgeLease::acquire_default(&lease_owner)?;
     install_interrupt_handler()?;
     ensure_container_stopped()?;
-    if is_root {
-        remove_default_bridge()?;
-    }
+    remove_default_bridge()?;
 
-    let profile_path = required_path(&options.profile_path, "profile")?;
-    let keyboard_path = required_path(&options.keyboard_path, "keyboard")?;
-    let resolution = Resolution {
-        width: options.width,
-        height: options.height,
-    };
-
-    let profile = ProfileV2::load_from_path(profile_path)?;
-    if let Err(error) = profile.validate() {
-        return Err(invalid_input(format!(
-            "invalid profile v2: {}",
-            error.errors.join("; ")
-        )));
-    }
-    let plan = RuntimeControlPlan::from_profile_v2(&profile, resolution)?;
-
-    let mut keyboard = EvdevKeyboard::open(keyboard_path)?;
-    let mut mouse = options
-        .mouse_path
-        .as_deref()
-        .map(EvdevMouse::open)
-        .transpose()?;
+    let (plan, keyboard, mouse) = open_session_inputs(&options)?;
     let config = DeviceConfig::new(options.width, options.height)?;
     let mut injector = UinputTouchInjector::open(config)?;
     let event_node = injector
@@ -140,14 +144,8 @@ pub fn run_game_session(mut options: GameSessionOptions) -> GameSessionResult<Ga
                     .is_some_and(|name| name.starts_with("event"))
         })
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "uinput event node not found"))?;
-    let mut bridge = if is_root {
-        let input_node = InputDeviceNode::from_path(&event_node)?;
-        SessionBridge::InProcess(InstalledWaydroidBridge::install_default(&input_node)?)
-    } else {
-        let mut broker = bridge_broker.expect("rootless bridge was validated before setup");
-        broker.open(&event_node)?;
-        SessionBridge::Broker(broker)
-    };
+    let input_node = InputDeviceNode::from_path(&event_node)?;
+    let bridge = InstalledWaydroidBridge::install_default(&input_node)?;
     let desktop_user = DesktopUser::from_session_environment()?;
     let mut waydroid = DesktopWaydroidSession::start(desktop_user)?;
 
@@ -158,7 +156,7 @@ pub fn run_game_session(mut options: GameSessionOptions) -> GameSessionResult<Ga
             waydroid.wait_until_android_ready()?;
         }
         waydroid.confirm_resolution(options.width, options.height)?;
-        bridge.verify_android_input()?;
+        wait_for_android_input_device(WROID_TOUCHSCREEN_NAME)?;
         if options.show_ui {
             waydroid.show_full_ui()?;
         }
@@ -166,168 +164,155 @@ pub fn run_game_session(mut options: GameSessionOptions) -> GameSessionResult<Ga
             waydroid.launch_package(&plan.package_name)?;
             println!("Launched Android package {}.", plan.package_name);
         }
-        let focus_connection = if options.grab {
-            options
-                .focus_socket
-                .as_deref()
-                .and_then(|path| match FocusConnection::connect(path) {
-                    Ok(connection) => Some(connection),
-                    Err(error) => {
-                        eprintln!(
-                            "Focus protection unavailable: could not connect to {}: {error}",
-                            path.display()
-                        );
-                        eprintln!(
-                            "Use F12 to release or recapture input; Ctrl+Esc stops the session."
-                        );
-                        None
-                    }
-                })
-        } else {
-            None
-        };
-        let focus_protected = focus_connection.is_some();
-        let initially_focused = focus_connection
-            .as_ref()
-            .is_none_or(|connection| connection.focused);
-
-        keyboard.set_nonblocking(true)?;
-        if let Some(mouse) = mouse.as_mut() {
-            mouse.set_nonblocking(true)?;
-        }
-        if options.grab && initially_focused {
-            keyboard.grab()?;
-            if let Some(mouse) = mouse.as_mut() {
-                mouse.grab()?;
-            }
-        }
-
-        println!("Unified game session is live.");
-        println!("Profile: {} ({})", plan.profile_name, plan.package_name);
-        println!(
-            "Keyboard: {} ({})",
-            keyboard.name(),
-            keyboard.path().display()
-        );
-        if let Some(mouse) = mouse.as_ref() {
-            println!("Mouse: {} ({})", mouse.name(), mouse.path().display());
-        } else {
-            println!("Mouse: not required by this profile");
-        }
-        println!("Android touchscreen: {}", event_node.display());
-        println!("Controls: {}", plan.controls.len());
-        if options.trace_input {
-            println!("Input tracing: enabled");
-        }
-        if focus_protected {
-            println!(
-                "Focus protection: {}.",
-                if initially_focused {
-                    "Waydroid focused; devices captured"
-                } else {
-                    "Waydroid is not focused; devices released"
-                }
-            );
-        } else if options.grab {
-            println!("Focus protection: compositor fallback; F12 controls capture manually.");
-        } else {
-            println!("Focus protection: capture disabled by --no-grab.");
-        }
-        println!("Press F12 to release/reacquire input. Press Ctrl+Esc to stop.");
-
-        let (sender, receiver) = mpsc::channel();
-        let input_active = !focus_protected || initially_focused;
-        let keyboard_control = spawn_keyboard_reader(keyboard, sender.clone(), input_active);
-        let mut mouse_control = None;
-        if let Some(mouse) = mouse {
-            mouse_control = Some(spawn_mouse_reader(mouse, sender.clone(), input_active));
-        }
-        let focus_receiver = focus_connection.map(|connection| {
-            let (focus_sender, focus_receiver) = mpsc::channel();
-            spawn_focus_reader(connection.reader, focus_sender);
-            focus_receiver
-        });
-        let input_readers = InputReaderControls {
-            keyboard: keyboard_control,
-            mouse: mouse_control,
-        };
-
         let mut runtime = UnifiedRuntime::new(
             plan,
             SessionMetricsInjector::new(injector),
             options.trace_input,
         )?;
-        if initially_focused {
-            runtime.start()?;
-        }
-        let loop_result = run_event_loop(
-            &receiver,
-            &input_readers,
+        let loop_result = run_control_session(
+            &options,
+            keyboard,
+            mouse,
             &mut runtime,
-            EventLoopOptions {
-                trace_input: options.trace_input,
-                exit_after: options.exit_after,
-                focus_protected,
-                focused: initially_focused,
-                focus_receiver: focus_receiver.as_ref(),
-            },
+            &event_node.display().to_string(),
         );
         let cleanup_result = runtime.stop();
         let exit = loop_result?;
         cleanup_result?;
         let report = runtime.report();
-        UnifiedRuntime::print_report(&report);
-        match exit {
-            EventLoopExit::ExitHotkeyRequested => println!("Stop requested by Ctrl+Esc."),
-            EventLoopExit::InterruptRequested => {
-                println!("Stop requested by Ctrl+C or a termination signal.")
-            }
-            EventLoopExit::TimeLimitReached => println!("Diagnostic time limit reached."),
-        }
+        runtime.print_report(&report);
+        print_session_exit(exit);
         Ok(report)
     })();
 
     let stop_result = waydroid.stop();
-    let bridge_result = bridge.cleanup(stop_result.is_ok());
+    let bridge_result = bridge.cleanup();
     let report = combine_session_results(session_result, stop_result, bridge_result)?;
     println!("Unified game session stopped cleanly.");
     Ok(report)
 }
 
-enum SessionBridge {
-    InProcess(InstalledWaydroidBridge),
-    Broker(BridgeBrokerClient),
-}
-
-impl SessionBridge {
-    fn verify_android_input(&mut self) -> io::Result<()> {
-        match self {
-            Self::InProcess(_) => wait_for_android_input_device(WROID_TOUCHSCREEN_NAME),
-            Self::Broker(broker) => broker.verify_android_input(),
-        }
-    }
-
-    fn cleanup(self, waydroid_stopped: bool) -> io::Result<()> {
-        match self {
-            Self::InProcess(bridge) => bridge.cleanup(),
-            Self::Broker(broker) => broker.finish(waydroid_stopped),
-        }
-    }
-}
-
-fn select_bridge_broker(
-    is_root: bool,
-    broker: Option<BridgeBrokerClient>,
-) -> io::Result<Option<BridgeBrokerClient>> {
-    if is_root {
-        return Ok(None);
-    }
-    broker.map(Some).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "rootless game session requires a daemon-owned bridge channel",
-        )
+fn run_remote_game_session(
+    options: GameSessionOptions,
+    runtime_channel: RuntimeChannelClient,
+) -> GameSessionResult<GameSessionReport> {
+    install_interrupt_handler()?;
+    let (plan, keyboard, mouse) = open_session_inputs(&options)?;
+    with_ready_runtime_channel(runtime_channel, |runtime_channel| {
+        let mut runtime = UnifiedRuntime::new(
+            plan,
+            SessionMetricsInjector::new(runtime_channel),
+            options.trace_input,
+        )?;
+        let loop_result = run_control_session(
+            &options,
+            keyboard,
+            mouse,
+            &mut runtime,
+            "persistent daemon runtime channel",
+        );
+        let report = finish_remote_runtime(&mut runtime, loop_result)?;
+        println!("Unified remote game session stopped cleanly.");
+        Ok(report)
     })
+}
+
+fn open_session_inputs(
+    options: &GameSessionOptions,
+) -> GameSessionResult<(RuntimeControlPlan, EvdevKeyboard, Option<EvdevMouse>)> {
+    let profile_path = required_path(&options.profile_path, "profile")?;
+    let keyboard_path = required_path(&options.keyboard_path, "keyboard")?;
+    let resolution = Resolution {
+        width: options.width,
+        height: options.height,
+    };
+    let profile = ProfileV2::load_from_path(profile_path)?;
+    if let Err(error) = profile.validate() {
+        return Err(invalid_input(format!(
+            "invalid profile v2: {}",
+            error.errors.join("; ")
+        )));
+    }
+    let plan = RuntimeControlPlan::from_profile_v2(&profile, resolution)?;
+    let keyboard = EvdevKeyboard::open(keyboard_path)?;
+    let mouse = options
+        .mouse_path
+        .as_deref()
+        .map(EvdevMouse::open)
+        .transpose()?;
+    Ok((plan, keyboard, mouse))
+}
+
+fn with_ready_runtime_channel<T>(
+    mut runtime_channel: RuntimeChannelClient,
+    ready: impl FnOnce(RuntimeChannelClient) -> GameSessionResult<T>,
+) -> GameSessionResult<T> {
+    runtime_channel.wait_until_ready()?;
+    ready(runtime_channel)
+}
+
+fn finish_remote_runtime(
+    runtime: &mut UnifiedRuntime<SessionMetricsInjector<RuntimeChannelClient>>,
+    session_result: GameSessionResult<EventLoopExit>,
+) -> GameSessionResult<GameSessionReport> {
+    let cleanup_result = runtime.stop();
+    let report = runtime.report();
+    let finish_result = runtime.engine.injector_mut().inner_mut().finish();
+    let exit = combine_remote_session_results(session_result, cleanup_result, finish_result)?;
+    runtime.print_report(&report);
+    print_session_exit(exit);
+    Ok(report)
+}
+
+fn combine_remote_session_results<T>(
+    session_result: GameSessionResult<T>,
+    cleanup_result: GameSessionResult<()>,
+    finish_result: io::Result<()>,
+) -> GameSessionResult<T> {
+    let (session_value, session_error) = match session_result {
+        Ok(value) => (Some(value), None),
+        Err(error) => (None, Some(error)),
+    };
+    let cleanup_error = cleanup_result.err();
+    let finish_error = finish_result.err();
+    let error_count = usize::from(session_error.is_some())
+        + usize::from(cleanup_error.is_some())
+        + usize::from(finish_error.is_some());
+    if error_count == 0 {
+        return Ok(session_value.expect("an error-free remote session has a value"));
+    }
+    if error_count == 1 {
+        if let Some(error) = session_error {
+            return Err(error);
+        }
+        if let Some(error) = cleanup_error {
+            return Err(error);
+        }
+        return Err(finish_error
+            .expect("one error exists and it is the runtime finish error")
+            .into());
+    }
+    let mut failures = Vec::with_capacity(error_count);
+    if let Some(error) = session_error {
+        failures.push(format!("game session failed: {error}"));
+    }
+    if let Some(error) = cleanup_error {
+        failures.push(format!("control cleanup failed: {error}"));
+    }
+    if let Some(error) = finish_error {
+        failures.push(format!("runtime channel finish failed: {error}"));
+    }
+    Err(io::Error::other(failures.join("\nAdditionally, ")).into())
+}
+
+fn print_session_exit(exit: EventLoopExit) {
+    match exit {
+        EventLoopExit::ExitHotkeyRequested => println!("Stop requested by Ctrl+Esc."),
+        EventLoopExit::InterruptRequested => {
+            println!("Stop requested by Ctrl+C or a termination signal.")
+        }
+        EventLoopExit::TimeLimitReached => println!("Diagnostic time limit reached."),
+    }
 }
 
 fn combine_session_results<T>(
@@ -342,6 +327,7 @@ fn combine_session_results<T>(
     let stop_error = stop_result.err();
     let bridge_error = bridge_result.err();
     let error_count = usize::from(session_error.is_some())
+        + usize::from(stop_error.is_some())
         + usize::from(stop_error.is_some())
         + usize::from(bridge_error.is_some());
 
@@ -732,6 +718,114 @@ struct EventLoopOptions<'a> {
     focus_protected: bool,
     focused: bool,
     focus_receiver: Option<&'a Receiver<FocusEvent>>,
+}
+
+fn run_control_session<I: TouchInjector>(
+    options: &GameSessionOptions,
+    mut keyboard: EvdevKeyboard,
+    mut mouse: Option<EvdevMouse>,
+    runtime: &mut UnifiedRuntime<I>,
+    touchscreen: &str,
+) -> GameSessionResult<EventLoopExit> {
+    let focus_connection = if options.grab {
+        options
+            .focus_socket
+            .as_deref()
+            .and_then(|path| match FocusConnection::connect(path) {
+                Ok(connection) => Some(connection),
+                Err(error) => {
+                    eprintln!(
+                        "Focus protection unavailable: could not connect to {}: {error}",
+                        path.display()
+                    );
+                    eprintln!("Use F12 to release or recapture input; Ctrl+Esc stops the session.");
+                    None
+                }
+            })
+    } else {
+        None
+    };
+    let focus_protected = focus_connection.is_some();
+    let initially_focused = focus_connection
+        .as_ref()
+        .is_none_or(|connection| connection.focused);
+
+    keyboard.set_nonblocking(true)?;
+    if let Some(mouse) = mouse.as_mut() {
+        mouse.set_nonblocking(true)?;
+    }
+    if options.grab && initially_focused {
+        keyboard.grab()?;
+        if let Some(mouse) = mouse.as_mut() {
+            mouse.grab()?;
+        }
+    }
+
+    println!("Unified game session is live.");
+    println!(
+        "Profile: {} ({})",
+        runtime.plan.profile_name, runtime.plan.package_name
+    );
+    println!(
+        "Keyboard: {} ({})",
+        keyboard.name(),
+        keyboard.path().display()
+    );
+    if let Some(mouse) = mouse.as_ref() {
+        println!("Mouse: {} ({})", mouse.name(), mouse.path().display());
+    } else {
+        println!("Mouse: not required by this profile");
+    }
+    println!("Android touchscreen: {touchscreen}");
+    println!("Controls: {}", runtime.plan.controls.len());
+    if options.trace_input {
+        println!("Input tracing: enabled");
+    }
+    if focus_protected {
+        println!(
+            "Focus protection: {}.",
+            if initially_focused {
+                "Waydroid focused; devices captured"
+            } else {
+                "Waydroid is not focused; devices released"
+            }
+        );
+    } else if options.grab {
+        println!("Focus protection: compositor fallback; F12 controls capture manually.");
+    } else {
+        println!("Focus protection: capture disabled by --no-grab.");
+    }
+    println!("Press F12 to release/reacquire input. Press Ctrl+Esc to stop.");
+
+    let (sender, receiver) = mpsc::channel();
+    let input_active = !focus_protected || initially_focused;
+    let keyboard_control = spawn_keyboard_reader(keyboard, sender.clone(), input_active);
+    let mouse_control = mouse.map(|mouse| spawn_mouse_reader(mouse, sender.clone(), input_active));
+    let focus_receiver = focus_connection.map(|connection| {
+        let (focus_sender, focus_receiver) = mpsc::channel();
+        spawn_focus_reader(connection.reader, focus_sender);
+        focus_receiver
+    });
+    let input_readers = InputReaderControls {
+        keyboard: keyboard_control,
+        mouse: mouse_control,
+    };
+
+    if initially_focused {
+        runtime.start()?;
+    }
+    run_event_loop(
+        &receiver,
+        &input_readers,
+        runtime,
+        EventLoopOptions {
+            trace_input: options.trace_input,
+            exit_after: options.exit_after,
+            focus_protected,
+            focused: initially_focused,
+            focus_receiver: focus_receiver.as_ref(),
+        },
+    )
 }
 
 fn run_event_loop<I: TouchInjector>(
@@ -1919,7 +2013,7 @@ impl<I: TouchInjector> Drop for UnifiedRuntime<I> {
     }
 }
 
-impl UnifiedRuntime<SessionMetricsInjector<UinputTouchInjector>> {
+impl<I: TouchInjector> UnifiedRuntime<SessionMetricsInjector<I>> {
     fn report(&self) -> GameSessionReport {
         let injector = self.engine.injector();
         let recenter_count = self
@@ -1940,7 +2034,7 @@ impl UnifiedRuntime<SessionMetricsInjector<UinputTouchInjector>> {
         }
     }
 
-    fn print_report(report: &GameSessionReport) {
+    fn print_report(&self, report: &GameSessionReport) {
         println!("Session report:");
         println!("  frames submitted: {}", report.frames_submitted);
         println!(
@@ -1993,6 +2087,10 @@ impl<I> SessionMetricsInjector<I> {
             frames_submitted: 0,
             peak_contacts: 0,
         }
+    }
+
+    fn inner_mut(&mut self) -> &mut I {
+        &mut self.inner
     }
 }
 
@@ -2073,7 +2171,6 @@ fn layer_mask_bit(layer: LayerId) -> Option<u64> {
         .map(|index| 1_u64 << index)
 }
 
-#[derive(Debug)]
 pub struct GameSessionOptions {
     pub profile_path: Option<PathBuf>,
     pub keyboard_path: Option<PathBuf>,
@@ -2086,7 +2183,7 @@ pub struct GameSessionOptions {
     pub trace_input: bool,
     pub exit_after: Option<Duration>,
     pub focus_socket: Option<PathBuf>,
-    pub bridge_broker: Option<BridgeBrokerClient>,
+    pub runtime_channel: Option<RuntimeChannelClient>,
     pub cleanup: bool,
 }
 
@@ -2113,7 +2210,7 @@ impl GameSessionOptions {
             trace_input: false,
             exit_after: None,
             focus_socket: None,
-            bridge_broker: None,
+            runtime_channel: None,
             cleanup: false,
         })
     }
@@ -2132,7 +2229,7 @@ impl GameSessionOptions {
             trace_input: false,
             exit_after: None,
             focus_socket: None,
-            bridge_broker: None,
+            runtime_channel: None,
             cleanup: false,
         };
         let mut args = args.into_iter();
@@ -2234,13 +2331,10 @@ fn print_usage() {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
-    use std::os::fd::OwnedFd;
-    use std::os::unix::net::UnixStream;
-    use std::sync::{Arc, Mutex};
     use std::thread;
 
     use crate::{
-        serve_bridge_broker, BridgeBrokerClient, BridgeHelperFactory, BridgeHelperSession,
+        runtime_socket_pair, serve_runtime_attachment, RuntimeChannelClient, RuntimeChannelServer,
     };
     use wroid_core::profile_v2::{
         ActionV2, BindingV2, JoystickMode, LayerActivation, LayerV2, NormalizedPoint,
@@ -2252,56 +2346,6 @@ mod tests {
     struct RecordingInjector {
         frames: Vec<TouchFrame>,
         fail_next: bool,
-    }
-
-    struct RecordingBridgeFactory {
-        calls: Arc<Mutex<Vec<String>>>,
-    }
-
-    struct RecordingBridgeSession {
-        calls: Arc<Mutex<Vec<String>>>,
-        finished: bool,
-    }
-
-    impl BridgeHelperFactory for RecordingBridgeFactory {
-        fn start(&self, event_node: &Path) -> io::Result<Box<dyn BridgeHelperSession>> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("open:{}", event_node.display()));
-            Ok(Box::new(RecordingBridgeSession {
-                calls: self.calls.clone(),
-                finished: false,
-            }))
-        }
-    }
-
-    impl BridgeHelperSession for RecordingBridgeSession {
-        fn verify_android_input(&mut self) -> io::Result<()> {
-            self.calls.lock().unwrap().push("verify".to_owned());
-            Ok(())
-        }
-
-        fn check_health(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-
-        fn finish(mut self: Box<Self>, waydroid_stopped: bool) -> io::Result<()> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(format!("finish:{waydroid_stopped}"));
-            self.finished = true;
-            Ok(())
-        }
-    }
-
-    impl Drop for RecordingBridgeSession {
-        fn drop(&mut self) {
-            if !self.finished {
-                self.calls.lock().unwrap().push("drop".to_owned());
-            }
-        }
     }
 
     impl TouchInjector for RecordingInjector {
@@ -2333,38 +2377,44 @@ mod tests {
     }
 
     #[test]
-    fn rootless_session_requires_daemon_bridge_before_runtime_setup() {
-        let result = select_bridge_broker(false, None);
+    fn rootless_session_selects_remote_runtime_before_platform_mutation() {
+        let result = select_session_backend(false, None);
         let error = match result {
-            Ok(_) => panic!("rootless session unexpectedly accepted no broker"),
+            Ok(_) => panic!("rootless session unexpectedly accepted no runtime channel"),
             Err(error) => error,
         };
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-        assert!(error.to_string().contains("daemon-owned bridge channel"));
-        assert!(select_bridge_broker(true, None).unwrap().is_none());
+        assert!(error.to_string().contains("daemon runtime channel"));
     }
 
     #[test]
-    fn session_bridge_delegates_verify_and_forced_cleanup_to_broker() {
-        let (client, server) = UnixStream::pair().unwrap();
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let factory = Arc::new(RecordingBridgeFactory {
-            calls: calls.clone(),
-        });
-        let broker = thread::spawn(move || serve_bridge_broker(server, factory));
-        let owned: OwnedFd = client.into();
-        let mut client = BridgeBrokerClient::from_owned_fd(owned).unwrap();
-        client.open(Path::new("/dev/input/event17")).unwrap();
-        let mut bridge = SessionBridge::Broker(client);
+    fn root_diagnostic_keeps_local_uinput_backend() {
+        assert!(matches!(
+            select_session_backend(true, None).unwrap(),
+            SessionBackend::LocalDiagnostic
+        ));
+    }
 
-        bridge.verify_android_input().unwrap();
-        bridge.cleanup(false).unwrap();
-        broker.join().unwrap().unwrap();
+    #[test]
+    fn daemon_runtime_must_be_ready_before_input_activation() {
+        let (client, server) = runtime_socket_pair().unwrap();
+        let client = RuntimeChannelClient::from_owned_fd(client).unwrap();
+        let mut server = RuntimeChannelServer::from_owned_fd(server).unwrap();
+        server
+            .send_startup_error("daemon platform did not become ready")
+            .unwrap();
+        let activated = std::cell::Cell::new(false);
 
-        assert_eq!(
-            *calls.lock().unwrap(),
-            ["open:/dev/input/event17", "verify", "finish:false"]
-        );
+        let error = with_ready_runtime_channel(client, |_| {
+            activated.set(true);
+            Ok(())
+        })
+        .unwrap_err();
+
+        assert!(!activated.get());
+        assert!(error
+            .to_string()
+            .contains("daemon platform did not become ready"));
     }
 
     #[test]
@@ -3814,5 +3864,87 @@ mod tests {
         assert!(kernel_event_age(recent).is_some_and(|age| age >= Duration::from_millis(5)));
         assert!(kernel_event_age(SystemTime::UNIX_EPOCH).is_none());
         assert!(kernel_event_age(SystemTime::now() + Duration::from_secs(1)).is_none());
+    }
+
+    #[test]
+    fn generic_session_metrics_report_supports_non_uinput_injectors() {
+        let runtime = UnifiedRuntime::new(
+            empty_runtime_plan(),
+            SessionMetricsInjector::new(RecordingInjector::default()),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(runtime.report(), GameSessionReport::default());
+    }
+
+    #[test]
+    fn remote_cleanup_cancels_controls_then_finishes_without_masking_runtime_failure() {
+        let (client, server) = runtime_socket_pair().unwrap();
+        let mut client = RuntimeChannelClient::from_owned_fd(client).unwrap();
+        let server = RuntimeChannelServer::from_owned_fd(server).unwrap();
+        let attachment = thread::spawn(move || {
+            let mut engine = TouchEngine::new(RecordingInjector::default());
+            serve_runtime_attachment(
+                server,
+                Resolution {
+                    width: 1600,
+                    height: 900,
+                },
+                &mut engine,
+                || Ok(()),
+            )
+        });
+        client.wait_until_ready().unwrap();
+        let mut runtime = UnifiedRuntime::new(
+            empty_runtime_plan(),
+            SessionMetricsInjector::new(client),
+            false,
+        )
+        .unwrap();
+        runtime
+            .engine
+            .begin_contact(ContactId::new(1), Point { x: 10, y: 20 })
+            .unwrap();
+
+        let error = finish_remote_runtime(
+            &mut runtime,
+            Err(io::Error::other("runtime input failed").into()),
+        )
+        .unwrap_err();
+        let attachment = attachment.join().unwrap().unwrap();
+
+        assert!(error.to_string().contains("runtime input failed"));
+        assert_eq!(attachment.frames_submitted, 2);
+        assert_eq!(attachment.contacts_cancelled, 0);
+    }
+
+    #[test]
+    fn remote_cleanup_reports_runtime_stop_and_finish_failures_together() {
+        let error = combine_remote_session_results::<()>(
+            Err(io::Error::other("event loop failed").into()),
+            Err(io::Error::other("control cancellation failed").into()),
+            Err(io::Error::other("runtime finish failed")),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("game session failed: event loop failed"));
+        assert!(error.contains("control cleanup failed: control cancellation failed"));
+        assert!(error.contains("runtime channel finish failed: runtime finish failed"));
+    }
+
+    fn empty_runtime_plan() -> RuntimeControlPlan {
+        RuntimeControlPlan {
+            profile_name: "empty".to_owned(),
+            package_name: "com.example.empty".to_owned(),
+            resolution: Resolution {
+                width: 1600,
+                height: 900,
+            },
+            layers: Vec::new(),
+            modifier_keys: ModifierMask::EMPTY,
+            controls: Vec::new(),
+        }
     }
 }

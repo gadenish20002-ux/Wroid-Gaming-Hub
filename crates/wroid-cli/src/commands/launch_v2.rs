@@ -14,13 +14,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, bail, Context, Result};
+#[cfg(test)]
+use anyhow::anyhow;
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use wroid_core::profile_v2::ProfileV2;
 use wroid_daemon::ipc::{
     DaemonClient, DaemonRequest, DaemonResult, SessionSnapshot, SessionStateWire, StopReasonWire,
 };
-use wroid_inject::{BridgeBrokerClient, GameSessionReport, LatencyMetrics, BRIDGE_WORKER_FD};
+use wroid_inject::{GameSessionReport, LatencyMetrics, RuntimeChannelClient, RUNTIME_WORKER_FD};
 
 use super::compatibility::CompatibilityReport;
 use super::graphics::GraphicsReport;
@@ -44,7 +46,7 @@ static FOREGROUND_INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DaemonWorkerInvocation {
-    pub(crate) bridge_fd: i32,
+    pub(crate) runtime_fd: i32,
     pub(crate) daemon_parent_pid: u32,
 }
 
@@ -94,53 +96,33 @@ fn launch_v2_worker(
     let actual_parent = u32::try_from(unsafe { libc::getppid() }).unwrap_or(0);
     validate_daemon_worker_parent(invocation.daemon_parent_pid, actual_parent)?;
     super::runtime_daemon::validate_daemon_worker_parent_executable(actual_parent)?;
-    if invocation.bridge_fd != BRIDGE_WORKER_FD {
-        bail!(
-            "daemon worker bridge descriptor must be {BRIDGE_WORKER_FD}, got {}",
-            invocation.bridge_fd
-        );
-    }
-    // SAFETY: clap accepted a non-standard descriptor, the daemon contract
-    // assigns its sole ownership to this worker, and this is the only adoption.
-    let owned_fd = unsafe { OwnedFd::from_raw_fd(invocation.bridge_fd) };
-    let bridge_broker = BridgeBrokerClient::from_owned_fd_for_peer(
-        owned_fd,
-        i32::try_from(actual_parent).context("daemon parent PID is out of range")?,
-        effective_uid_from_proc().unwrap_or(u32::MAX),
+    with_authenticated_runtime(
+        || {
+            let runtime_channel = RuntimeChannelClient::from_owned_fd_for_peer(
+                inherited_runtime_fd(invocation.runtime_fd)?,
+                i32::try_from(invocation.daemon_parent_pid)
+                    .context("daemon parent PID is out of range")?,
+                // SAFETY: geteuid takes no arguments and has no preconditions.
+                unsafe { libc::geteuid() },
+            )
+            .context("failed to adopt the daemon runtime channel")?;
+            Ok(runtime_channel)
+        },
+        |runtime_channel| launch_v2_worker_inner(profile_path, options, runtime_channel),
     )
-    .context("failed to adopt the daemon-owned bridge channel")?;
-    launch_v2_worker_inner(profile_path, options, bridge_broker)
 }
 
 fn launch_v2_worker_inner(
     profile_path: PathBuf,
     mut options: PlayV2Options,
-    bridge_broker: BridgeBrokerClient,
+    runtime_channel: RuntimeChannelClient,
 ) -> Result<GameSessionReport> {
     let profile_path = profile_path
         .canonicalize()
         .with_context(|| format!("failed to resolve profile {}", profile_path.display()))?;
     let profile = load_validated_profile(&profile_path)?;
-    let is_root = effective_uid_from_proc().unwrap_or(u32::MAX) == 0;
-    let _launch_lease = if is_root {
-        None
-    } else {
-        Some(acquire_launch_lease(&profile.name)?)
-    };
-    ensure_input_bridge_available()?;
-    print_launch_preflight(&profile, options.launch_package)?;
-    let _active_session = if is_root {
-        None
-    } else {
-        Some(ActiveSessionGuard::register(
-            &profile.name,
-            &profile.package_name,
-        )?)
-    };
-
-    if is_root {
-        return play_v2::play_v2_with_broker(profile_path, options, Some(bridge_broker));
-    }
+    let _launch_lease = acquire_launch_lease(&profile.name)?;
+    let _active_session = ActiveSessionGuard::register(&profile.name, &profile.package_name)?;
 
     let focus_relay = if options.grab {
         match KwinFocusRelay::start() {
@@ -158,16 +140,30 @@ fn launch_v2_worker_inner(
     } else {
         None
     };
-    let mut desktop = SystemDesktopSession;
-    let result = run_with_desktop_restoration(&mut desktop, || {
-        println!(
-            "Starting {} as the desktop user; the verified helper owns only the temporary input bridge…",
-            profile.name
-        );
-        play_v2::play_v2_with_broker(profile_path, options, Some(bridge_broker))
-    });
+    println!(
+        "Starting {} through the daemon runtime channel…",
+        profile.name
+    );
+    let result =
+        play_v2::play_v2_with_runtime_channel(profile_path, options, Some(runtime_channel));
     drop(focus_relay);
     result
+}
+
+fn with_authenticated_runtime<C, T>(
+    authenticate: impl FnOnce() -> Result<C>,
+    play: impl FnOnce(C) -> Result<T>,
+) -> Result<T> {
+    play(authenticate()?)
+}
+
+fn inherited_runtime_fd(runtime_fd: i32) -> Result<OwnedFd> {
+    if runtime_fd != RUNTIME_WORKER_FD {
+        bail!("daemon worker runtime descriptor must be {RUNTIME_WORKER_FD}, got {runtime_fd}");
+    }
+    // SAFETY: the fixed daemon contract assigns sole ownership of descriptor
+    // 198 to this worker, and this function is its only adoption point.
+    Ok(unsafe { OwnedFd::from_raw_fd(runtime_fd) })
 }
 
 fn load_validated_profile(profile_path: &Path) -> Result<ProfileV2> {
@@ -403,12 +399,35 @@ mod daemon_worker_contract_tests {
     use super::*;
     use std::os::unix::fs::{symlink, PermissionsExt};
     use wroid_daemon::ipc::{DaemonRequest, SessionSnapshot, SessionStateWire, StopReasonWire};
+    use wroid_inject::RUNTIME_WORKER_FD;
 
     #[test]
     fn worker_parent_must_still_be_the_authenticated_daemon() {
         assert!(validate_daemon_worker_parent(42, 42).is_ok());
         assert!(validate_daemon_worker_parent(42, 7).is_err());
         assert!(validate_daemon_worker_parent(0, 0).is_err());
+    }
+
+    #[test]
+    fn runtime_peer_authentication_happens_before_play_v2() {
+        let played = std::cell::Cell::new(false);
+        let error = with_authenticated_runtime(
+            || Err::<(), _>(anyhow::anyhow!("runtime peer rejected")),
+            |_| {
+                played.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+
+        assert!(!played.get());
+        assert!(error.to_string().contains("runtime peer rejected"));
+    }
+
+    #[test]
+    fn inherited_runtime_descriptor_is_fixed() {
+        let error = inherited_runtime_fd(RUNTIME_WORKER_FD - 1).unwrap_err();
+        assert!(error.to_string().contains("must be 198"));
     }
 
     #[test]
@@ -1063,6 +1082,7 @@ fn unix_time_millis() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+#[cfg(test)]
 trait DesktopSessionControl {
     fn is_running(&mut self) -> Result<bool>;
     fn stop(&mut self) -> Result<()>;
@@ -1070,27 +1090,7 @@ trait DesktopSessionControl {
     fn arm_watchdog(&mut self) -> Result<Option<RestoreWatchdog>>;
 }
 
-struct SystemDesktopSession;
-
-impl DesktopSessionControl for SystemDesktopSession {
-    fn is_running(&mut self) -> Result<bool> {
-        let status = wroid_waydroid::status().context("failed to inspect the Waydroid session")?;
-        Ok(session_is_running(&status))
-    }
-
-    fn stop(&mut self) -> Result<()> {
-        stop_desktop_waydroid_session()
-    }
-
-    fn start(&mut self) -> Result<()> {
-        start_desktop_waydroid_session()
-    }
-
-    fn arm_watchdog(&mut self) -> Result<Option<RestoreWatchdog>> {
-        RestoreWatchdog::arm().map(Some)
-    }
-}
-
+#[cfg(test)]
 fn run_with_desktop_restoration<C, F, T>(desktop: &mut C, run: F) -> Result<T>
 where
     C: DesktopSessionControl,
@@ -1169,6 +1169,7 @@ where
     }
 }
 
+#[cfg(test)]
 fn mark_watchdog_restoring(watchdog: Option<&RestoreWatchdog>) {
     if let Some(watchdog) = watchdog {
         if let Err(error) = watchdog.begin_restore() {
@@ -1177,6 +1178,7 @@ fn mark_watchdog_restoring(watchdog: Option<&RestoreWatchdog>) {
     }
 }
 
+#[cfg(test)]
 fn combine_lifecycle_errors(
     context: &str,
     primary: anyhow::Error,
@@ -1186,20 +1188,6 @@ fn combine_lifecycle_errors(
         Some(secondary) => anyhow!("{context}: {primary:#}\nRestore also failed: {secondary:#}"),
         None => primary.context(context.to_owned()),
     }
-}
-
-fn stop_desktop_waydroid_session() -> Result<()> {
-    let status = Command::new("waydroid")
-        .args(["session", "stop"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .context("failed to stop the current Waydroid session")?;
-    if !status.success() {
-        bail!("waydroid session stop exited with {status}");
-    }
-    Ok(())
 }
 
 fn start_desktop_waydroid_session() -> Result<()> {
@@ -1250,68 +1238,13 @@ fn session_is_running(status: &str) -> bool {
     })
 }
 
+#[cfg(test)]
 struct RestoreWatchdog {
     ticket_path: PathBuf,
 }
 
+#[cfg(test)]
 impl RestoreWatchdog {
-    fn arm() -> Result<Self> {
-        let parent_pid = std::process::id();
-        let ticket = random_ticket()?;
-        let ticket_path = restore_ticket_path(parent_pid, &ticket)?;
-        if let Some(directory) = ticket_path.parent() {
-            fs::create_dir_all(directory).with_context(|| {
-                format!(
-                    "failed to create lifecycle directory {}",
-                    directory.display()
-                )
-            })?;
-            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).with_context(
-                || {
-                    format!(
-                        "failed to secure lifecycle directory {}",
-                        directory.display()
-                    )
-                },
-            )?;
-        }
-        let mut ticket_file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&ticket_path)
-            .with_context(|| {
-                format!(
-                    "failed to create lifecycle ticket {}",
-                    ticket_path.display()
-                )
-            })?;
-        if let Err(error) = ticket_file.write_all(b"armed\n") {
-            let _ = fs::remove_file(&ticket_path);
-            return Err(error).context("failed to initialize the lifecycle ticket");
-        }
-
-        let executable = env::current_exe().context("failed to locate the wroid executable")?;
-        let mut command = Command::new(executable);
-        command
-            .args([
-                "restore-desktop-session",
-                "--parent-pid",
-                &parent_pid.to_string(),
-                "--ticket",
-                &ticket,
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        command.process_group(0);
-        if let Err(error) = command.spawn() {
-            let _ = fs::remove_file(&ticket_path);
-            return Err(error).context("failed to start the Waydroid lifecycle watchdog");
-        }
-        Ok(Self { ticket_path })
-    }
-
     fn begin_restore(&self) -> Result<()> {
         let mut file = OpenOptions::new()
             .write(true)

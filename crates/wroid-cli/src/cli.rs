@@ -170,16 +170,16 @@ pub(crate) enum Commands {
         #[arg(
             long,
             hide = true,
-            requires_all = ["bridge_fd", "daemon_parent_pid"]
+            requires_all = ["runtime_fd", "daemon_parent_pid"]
         )]
         daemon_worker: bool,
         #[arg(
             long,
             hide = true,
-            value_parser = clap::value_parser!(i32).range(3..=1024),
+            value_parser = clap::value_parser!(i32).range(198..=198),
             requires = "daemon_worker"
         )]
-        bridge_fd: Option<i32>,
+        runtime_fd: Option<i32>,
         #[arg(
             long,
             hide = true,
@@ -1068,8 +1068,8 @@ mod tests {
     fn launch_v2_daemon_worker_requires_complete_private_invocation() {
         for incomplete in [
             vec!["--daemon-worker"],
-            vec!["--daemon-worker", "--bridge-fd", "198"],
-            vec!["--bridge-fd", "198", "--daemon-parent-pid", "42"],
+            vec!["--daemon-worker", "--runtime-fd", "198"],
+            vec!["--runtime-fd", "198", "--daemon-parent-pid", "42"],
         ] {
             let mut arguments = vec!["wroid", "launch-v2", "profiles/examples/pubg-v2.json"];
             arguments.extend(incomplete);
@@ -1081,7 +1081,7 @@ mod tests {
             "launch-v2",
             "profiles/examples/pubg-v2.json",
             "--daemon-worker",
-            "--bridge-fd",
+            "--runtime-fd",
             "198",
             "--daemon-parent-pid",
             "42",
@@ -1091,7 +1091,7 @@ mod tests {
         .unwrap();
         let Commands::LaunchV2 {
             daemon_worker,
-            bridge_fd,
+            runtime_fd,
             daemon_parent_pid,
             exit_after_ms,
             ..
@@ -1100,9 +1100,21 @@ mod tests {
             panic!("expected launch-v2 command");
         };
         assert!(daemon_worker);
-        assert_eq!(bridge_fd, Some(198));
+        assert_eq!(runtime_fd, Some(198));
         assert_eq!(daemon_parent_pid, Some(42));
         assert_eq!(exit_after_ms, Some(25));
+
+        assert!(Cli::try_parse_from([
+            "wroid",
+            "launch-v2",
+            "profiles/examples/pubg-v2.json",
+            "--daemon-worker",
+            "--bridge-fd",
+            "198",
+            "--daemon-parent-pid",
+            "42",
+        ])
+        .is_err());
     }
 
     #[test]

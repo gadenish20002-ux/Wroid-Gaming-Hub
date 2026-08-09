@@ -298,7 +298,7 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
             trace_input,
             exit_after_seconds,
             daemon_worker,
-            bridge_fd,
+            runtime_fd,
             daemon_parent_pid,
             exit_after_ms,
         } => launch_v2::launch_v2(
@@ -317,7 +317,7 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
                 focus_socket: None,
             },
             daemon_worker.then(|| launch_v2::DaemonWorkerInvocation {
-                bridge_fd: bridge_fd.expect("clap requires the daemon bridge descriptor"),
+                runtime_fd: runtime_fd.expect("clap requires the daemon runtime descriptor"),
                 daemon_parent_pid: daemon_parent_pid.expect("clap requires the daemon parent PID"),
             }),
         ),
