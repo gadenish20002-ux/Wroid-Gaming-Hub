@@ -2282,6 +2282,10 @@ mod tests {
             Ok(())
         }
 
+        fn check_health(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
         fn finish(mut self: Box<Self>, waydroid_stopped: bool) -> io::Result<()> {
             self.calls
                 .lock()

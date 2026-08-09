@@ -27,6 +27,27 @@ const SAFE_SYSTEM_PATH: &str = "/usr/sbin:/usr/bin";
 const MAX_STAGED_HELPER_BYTES: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_PRIVILEGED_BRIDGE_HELPER: &str = "/usr/lib/wroid/wroid-helper";
 
+pub trait BridgeHelperSession: Send {
+    fn verify_android_input(&mut self) -> io::Result<()>;
+    fn check_health(&mut self) -> io::Result<()>;
+    fn finish(self: Box<Self>, waydroid_stopped: bool) -> io::Result<()>;
+}
+
+pub trait BridgeHelperFactory: Send + Sync + 'static {
+    fn start(&self, event_node: &Path) -> io::Result<Box<dyn BridgeHelperSession>>;
+}
+
+#[derive(Debug, Clone)]
+pub struct ProductionBridgeHelperFactory {
+    command: BridgeHelperCommand,
+}
+
+impl ProductionBridgeHelperFactory {
+    pub const fn new(command: BridgeHelperCommand) -> Self {
+        Self { command }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BridgeHelperCommand {
     executable: PathBuf,
@@ -284,20 +305,12 @@ where
     W: Write,
     F: FnMut() -> io::Result<()>,
 {
-    let mut verified = false;
     loop {
         match read_helper_command(reader)? {
-            Some(HelperProtocolCommand::VerifyAndroidInput) if !verified => {
+            Some(HelperProtocolCommand::VerifyAndroidInput) => {
                 verify_android_input()?;
                 writeln!(writer, "{ANDROID_INPUT_READY_LINE}")?;
                 writer.flush()?;
-                verified = true;
-            }
-            Some(HelperProtocolCommand::VerifyAndroidInput) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Android input verification was already requested",
-                ));
             }
             Some(HelperProtocolCommand::Cleanup) => return Ok(true),
             None => return Ok(false),
@@ -559,6 +572,19 @@ impl PrivilegedBridgeHelper {
         request_android_input_verification(stdin, &mut self.stdout)
     }
 
+    pub fn check_health(&mut self) -> io::Result<()> {
+        match self.child.try_wait()? {
+            None => Ok(()),
+            Some(status) => {
+                self.active = false;
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    format!("privileged bridge helper exited with {status}"),
+                ))
+            }
+        }
+    }
+
     pub fn finish(mut self, waydroid_stopped: bool) -> io::Result<()> {
         if waydroid_stopped {
             if let Some(stdin) = self.stdin.as_mut() {
@@ -576,6 +602,27 @@ impl PrivilegedBridgeHelper {
                 "privileged bridge helper exited with {status}"
             )))
         }
+    }
+}
+
+impl BridgeHelperSession for PrivilegedBridgeHelper {
+    fn verify_android_input(&mut self) -> io::Result<()> {
+        Self::verify_android_input(self)
+    }
+
+    fn check_health(&mut self) -> io::Result<()> {
+        Self::check_health(self)
+    }
+
+    fn finish(self: Box<Self>, waydroid_stopped: bool) -> io::Result<()> {
+        (*self).finish(waydroid_stopped)
+    }
+}
+
+impl BridgeHelperFactory for ProductionBridgeHelperFactory {
+    fn start(&self, event_node: &Path) -> io::Result<Box<dyn BridgeHelperSession>> {
+        PrivilegedBridgeHelper::start(&self.command, event_node)
+            .map(|helper| Box::new(helper) as Box<dyn BridgeHelperSession>)
     }
 }
 
@@ -600,6 +647,45 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     use std::os::unix::fs::symlink;
+
+    fn test_helper(command: &str) -> PrivilegedBridgeHelper {
+        let mut child = Command::new("sh")
+            .args(["-c", command])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take();
+        let stdout = BufReader::new(child.stdout.take().unwrap());
+        PrivilegedBridgeHelper {
+            child,
+            stdin,
+            stdout,
+            active: true,
+        }
+    }
+
+    #[test]
+    fn helper_health_uses_child_status_without_sending_a_protocol_command() {
+        let mut helper = test_helper("if IFS= read -r line; then exit 23; else exit 0; fi");
+
+        helper.check_health().unwrap();
+
+        assert!(helper.child.try_wait().unwrap().is_none());
+    }
+
+    #[test]
+    fn helper_health_reports_an_exited_child() {
+        let mut helper = test_helper("exit 17");
+        let status = helper.child.wait().unwrap();
+        assert_eq!(status.code(), Some(17));
+
+        let error = helper.check_health().unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert!(error.to_string().contains("exit status: 17"));
+        helper.active = false;
+    }
 
     #[test]
     fn helper_protocol_parses_only_fixed_line_commands() {
@@ -677,15 +763,22 @@ mod tests {
     }
 
     #[test]
-    fn helper_protocol_rejects_duplicate_android_verification() {
-        let mut commands = Cursor::new(b"VERIFY_ANDROID_INPUT\nVERIFY_ANDROID_INPUT\n");
+    fn helper_protocol_allows_reverification_after_waydroid_restart() {
+        let mut commands = Cursor::new(b"VERIFY_ANDROID_INPUT\nVERIFY_ANDROID_INPUT\nCLEANUP\n");
         let mut replies = Vec::new();
+        let mut probes = 0;
 
+        let graceful = serve_helper_protocol(&mut commands, &mut replies, || {
+            probes += 1;
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(graceful);
+        assert_eq!(probes, 2);
         assert_eq!(
-            serve_helper_protocol(&mut commands, &mut replies, || Ok(()))
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::InvalidInput
+            replies,
+            b"WROID_ANDROID_INPUT_READY 1\nWROID_ANDROID_INPUT_READY 1\n"
         );
     }
 

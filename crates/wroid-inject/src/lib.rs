@@ -23,8 +23,7 @@ mod waydroid_bridge;
 mod waydroid_session;
 
 pub use bridge_broker::{
-    serve_bridge_broker, BridgeBrokerClient, BridgeHelperFactory, BridgeHelperSession,
-    ProductionBridgeHelperFactory, BRIDGE_PROTOCOL_VERSION, BRIDGE_WORKER_FD,
+    serve_bridge_broker, BridgeBrokerClient, BRIDGE_PROTOCOL_VERSION, BRIDGE_WORKER_FD,
     BRIDGE_WORKER_PROTOCOL_GENERATION,
 };
 pub use config::{
@@ -53,7 +52,8 @@ pub use live_mouse_aim::{
 };
 pub use privileged_bridge::{
     run_privileged_bridge_helper, run_privileged_bridge_helper_check,
-    validate_installed_bridge_helper, BridgeHelperCommand, PrivilegedBridgeHelper,
+    validate_installed_bridge_helper, BridgeHelperCommand, BridgeHelperFactory,
+    BridgeHelperSession, PrivilegedBridgeHelper, ProductionBridgeHelperFactory,
     DEFAULT_PRIVILEGED_BRIDGE_HELPER,
 };
 pub use runtime_channel::{
@@ -70,8 +70,8 @@ pub use waydroid_bridge::{
 };
 pub use waydroid_session::{
     ensure_container_stopped, ensure_root, spawn_android_getevent_trace, stop_child,
-    wait_for_android_boot_completed, wait_for_android_display_size, wait_for_android_input_device,
-    DesktopUser, DesktopWaydroidSession,
+    stop_existing_waydroid_session, wait_for_android_boot_completed, wait_for_android_display_size,
+    wait_for_android_input_device, DesktopUser, DesktopWaydroidSession,
 };
 
 #[cfg(test)]

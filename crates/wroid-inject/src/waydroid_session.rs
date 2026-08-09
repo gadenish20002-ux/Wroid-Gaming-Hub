@@ -453,6 +453,45 @@ pub fn ensure_container_stopped() -> io::Result<()> {
     ensure_container_stopped_status(&status)
 }
 
+pub fn stop_existing_waydroid_session(user: &DesktopUser) -> io::Result<()> {
+    stop_existing_waydroid_session_using(
+        || {
+            user.output(&["status"])
+                .map(|output| combined_output(&output))
+        },
+        || user.run(&["session", "stop"]),
+        sleep,
+    )
+}
+
+fn stop_existing_waydroid_session_using(
+    mut status: impl FnMut() -> io::Result<String>,
+    mut stop: impl FnMut() -> io::Result<()>,
+    mut wait: impl FnMut(Duration),
+) -> io::Result<()> {
+    let initial_status = status()?;
+    if !waydroid_is_active(&initial_status) {
+        return Ok(());
+    }
+
+    stop()?;
+    let mut last_status = initial_status;
+    for attempt in 0..STATUS_ATTEMPTS {
+        last_status = status()?;
+        if waydroid_is_stopped(&last_status) {
+            return Ok(());
+        }
+        if attempt + 1 < STATUS_ATTEMPTS {
+            wait(STATUS_INTERVAL);
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!("existing Waydroid session did not stop cleanly\n{last_status}"),
+    ))
+}
+
 pub(crate) fn ensure_container_stopped_status(status: &str) -> io::Result<()> {
     if container_state(status) == Some("RUNNING") {
         return Err(io::Error::new(
@@ -630,10 +669,16 @@ fn waydroid_container_started(status: &str) -> bool {
     matches!(container_state(status), Some("RUNNING" | "FROZEN"))
 }
 
+fn waydroid_is_active(status: &str) -> bool {
+    session_state(status) == Some("RUNNING") || waydroid_container_started(status)
+}
+
 fn waydroid_is_stopped(status: &str) -> bool {
+    if waydroid_is_active(status) {
+        return false;
+    }
     match container_state(status) {
         Some("STOPPED") => true,
-        Some("RUNNING") => false,
         _ => session_state(status) == Some("STOPPED"),
     }
 }
@@ -847,7 +892,7 @@ fn detect_wayland_display(runtime_dir: &Path) -> io::Result<OsString> {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, VecDeque};
     use std::io::Cursor;
 
     use super::*;
@@ -897,6 +942,53 @@ mod tests {
     }
 
     #[test]
+    fn stopped_existing_waydroid_is_left_untouched() {
+        let statuses = RefCell::new(VecDeque::from([
+            "Session:\tSTOPPED\nContainer:\tSTOPPED\n".to_owned()
+        ]));
+        let calls = RefCell::new(Vec::new());
+
+        stop_existing_waydroid_session_using(
+            || {
+                calls.borrow_mut().push("status");
+                Ok(statuses.borrow_mut().pop_front().unwrap())
+            },
+            || {
+                calls.borrow_mut().push("stop");
+                Ok(())
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(*calls.borrow(), ["status"]);
+    }
+
+    #[test]
+    fn active_existing_waydroid_is_stopped_through_the_desktop_user_path() {
+        let statuses = RefCell::new(VecDeque::from([
+            "Session:\tRUNNING\nContainer:\tFROZEN\n".to_owned(),
+            "Session:\tSTOPPED\nContainer:\tSTOPPED\n".to_owned(),
+        ]));
+        let calls = RefCell::new(Vec::new());
+
+        stop_existing_waydroid_session_using(
+            || {
+                calls.borrow_mut().push("status");
+                Ok(statuses.borrow_mut().pop_front().unwrap())
+            },
+            || {
+                calls.borrow_mut().push("stop");
+                Ok(())
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(*calls.borrow(), ["status", "stop", "status"]);
+    }
+
+    #[test]
     fn current_user_waydroid_command_does_not_use_runuser() {
         let user = DesktopUser {
             name: "player".to_owned(),
@@ -923,6 +1015,13 @@ mod tests {
     }
 
     #[test]
+    fn running_session_wins_over_stopped_container() {
+        assert!(!waydroid_is_stopped(
+            "Session:\tRUNNING\nContainer:\tSTOPPED\n"
+        ));
+    }
+
+    #[test]
     fn detects_stopped_waydroid_without_container_field() {
         assert!(waydroid_is_stopped("Session:\tSTOPPED\n"));
     }
@@ -931,6 +1030,13 @@ mod tests {
     fn running_container_wins_over_stopped_session() {
         assert!(!waydroid_is_stopped(
             "Session:\tSTOPPED\nContainer:\tRUNNING\n"
+        ));
+    }
+
+    #[test]
+    fn frozen_container_wins_over_stopped_session() {
+        assert!(!waydroid_is_stopped(
+            "Session:\tSTOPPED\nContainer:\tFROZEN\n"
         ));
     }
 

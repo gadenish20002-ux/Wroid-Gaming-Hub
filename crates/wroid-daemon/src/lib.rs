@@ -10,6 +10,9 @@ pub mod ipc;
 #[allow(dead_code)]
 mod platform;
 mod process;
+// This backend is wired into the process owner in Task 5.
+#[allow(dead_code)]
+mod production_platform;
 
 use std::collections::BTreeMap;
 

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use crate::{BridgeHelperCommand, PrivilegedBridgeHelper};
+use crate::{BridgeHelperFactory, BridgeHelperSession};
 
 pub const BRIDGE_PROTOCOL_VERSION: u32 = 1;
 pub const BRIDGE_WORKER_PROTOCOL_GENERATION: u32 = 1;
@@ -18,43 +18,6 @@ const VERIFY_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const CLIENT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(125);
 const FRAME_WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_ERROR_DETAIL_CHARS: usize = 512;
-
-pub trait BridgeHelperSession: Send {
-    fn verify_android_input(&mut self) -> io::Result<()>;
-    fn finish(self: Box<Self>, waydroid_stopped: bool) -> io::Result<()>;
-}
-
-pub trait BridgeHelperFactory: Send + Sync + 'static {
-    fn start(&self, event_node: &Path) -> io::Result<Box<dyn BridgeHelperSession>>;
-}
-
-#[derive(Debug, Clone)]
-pub struct ProductionBridgeHelperFactory {
-    command: BridgeHelperCommand,
-}
-
-impl ProductionBridgeHelperFactory {
-    pub const fn new(command: BridgeHelperCommand) -> Self {
-        Self { command }
-    }
-}
-
-impl BridgeHelperSession for PrivilegedBridgeHelper {
-    fn verify_android_input(&mut self) -> io::Result<()> {
-        Self::verify_android_input(self)
-    }
-
-    fn finish(self: Box<Self>, waydroid_stopped: bool) -> io::Result<()> {
-        (*self).finish(waydroid_stopped)
-    }
-}
-
-impl BridgeHelperFactory for ProductionBridgeHelperFactory {
-    fn start(&self, event_node: &Path) -> io::Result<Box<dyn BridgeHelperSession>> {
-        PrivilegedBridgeHelper::start(&self.command, event_node)
-            .map(|helper| Box::new(helper) as Box<dyn BridgeHelperSession>)
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClientState {
@@ -514,6 +477,10 @@ mod tests {
             Ok(())
         }
 
+        fn check_health(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
         fn finish(mut self: Box<Self>, waydroid_stopped: bool) -> std::io::Result<()> {
             self.calls
                 .lock()
@@ -544,6 +511,10 @@ mod tests {
                 "verify failed:{}",
                 "\0".repeat(MAX_ERROR_DETAIL_CHARS)
             )))
+        }
+
+        fn check_health(&mut self) -> std::io::Result<()> {
+            Ok(())
         }
 
         fn finish(self: Box<Self>, _waydroid_stopped: bool) -> std::io::Result<()> {
