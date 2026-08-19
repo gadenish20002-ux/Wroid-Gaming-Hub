@@ -41,6 +41,7 @@ const APK_STATUS_DETAIL_BYTES: usize = 4 * 1024;
 const SIDELOAD_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
 const DESKTOP_READY_ATTEMPTS: usize = 240;
 const DESKTOP_READY_INTERVAL: Duration = Duration::from_millis(250);
+const PACKAGE_DISCOVERY_ATTEMPTS: usize = 40;
 const INPUT_SELF_TEST_SECONDS: u64 = 20;
 
 const STARTER_PROFILES: [StarterProfile; 4] = [
@@ -1526,9 +1527,15 @@ fn open_game_for_calibration(payload: &Value, directory: &Path) -> Result<String
         DESKTOP_READY_ATTEMPTS,
         DESKTOP_READY_INTERVAL,
     )?;
-    let packages = wroid_waydroid::app_list_packages()
-        .context("failed to verify the game package before calibration")?;
-    ensure_package_available_for_calibration(&package, &packages)?;
+    wait_for_package_available_for_calibration(
+        &package,
+        PACKAGE_DISCOVERY_ATTEMPTS,
+        DESKTOP_READY_INTERVAL,
+        || {
+            wroid_waydroid::app_list_packages()
+                .context("failed to verify the game package before calibration")
+        },
+    )?;
     wroid_waydroid::app_launch_package(&package)
         .with_context(|| format!("failed to open {title} for calibration"))?;
     open_profile_editor(profile)?;
@@ -1543,6 +1550,38 @@ fn ensure_package_available_for_calibration(package: &str, packages: &[String]) 
         return Ok(());
     }
     bail!("game package {package} is not installed; install it from Google Play first")
+}
+
+fn wait_for_package_available_for_calibration<F>(
+    package: &str,
+    attempts: usize,
+    interval: Duration,
+    mut list_packages: F,
+) -> Result<()>
+where
+    F: FnMut() -> Result<Vec<String>>,
+{
+    let mut last_error = None;
+    for attempt in 0..attempts {
+        match list_packages() {
+            Ok(packages) => {
+                if ensure_package_available_for_calibration(package, &packages).is_ok() {
+                    return Ok(());
+                }
+                last_error = None;
+            }
+            Err(error) => last_error = Some(error),
+        }
+        if attempt + 1 < attempts {
+            thread::sleep(interval);
+        }
+    }
+    if let Some(error) = last_error {
+        return Err(error);
+    }
+    bail!(
+        "game package {package} did not become visible after Android startup; refresh the Hub and try calibration again"
+    )
 }
 
 fn ensure_input_bridge_available() -> Result<()> {
@@ -3098,6 +3137,23 @@ mod tests {
         let error =
             ensure_package_available_for_calibration("com.dts.freefireth", &packages).unwrap_err();
         assert!(error.to_string().contains("not installed"));
+    }
+
+    #[test]
+    fn calibration_retries_until_the_selected_package_is_visible() {
+        let mut package_lists = VecDeque::from([
+            Ok(vec!["com.android.settings".to_owned()]),
+            Ok(vec!["com.axlebolt.standoff2".to_owned()]),
+        ]);
+
+        wait_for_package_available_for_calibration(
+            "com.axlebolt.standoff2",
+            2,
+            Duration::ZERO,
+            || package_lists.pop_front().unwrap(),
+        )
+        .unwrap();
+        assert!(package_lists.is_empty());
     }
 
     #[test]
