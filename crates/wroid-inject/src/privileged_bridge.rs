@@ -472,11 +472,23 @@ fn wait_for_android_input_privileged() -> io::Result<()> {
 }
 
 fn disable_android_pointer_diagnostics_privileged() -> io::Result<()> {
-    run_fixed_android_setting_command("show_touches", android_show_touches_off_command())?;
-    run_fixed_android_setting_command(
-        "pointer_location",
-        android_pointer_location_off_command(),
+    disable_android_pointer_diagnostics_with(
+        || run_fixed_android_setting_command("show_touches", android_show_touches_off_command()),
+        || {
+            run_fixed_android_setting_command(
+                "pointer_location",
+                android_pointer_location_off_command(),
+            )
+        },
     )
+}
+
+fn disable_android_pointer_diagnostics_with(
+    disable_show_touches: impl FnOnce() -> io::Result<()>,
+    disable_pointer_location: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    disable_show_touches()?;
+    disable_pointer_location()
 }
 
 fn run_fixed_android_setting_command(name: &str, mut command: Command) -> io::Result<()> {
@@ -792,6 +804,25 @@ mod tests {
 
         assert_eq!(error.to_string(), "pointer cleanup failed");
         assert!(replies.is_empty());
+    }
+
+    #[test]
+    fn pointer_diagnostic_cleanup_runs_both_fixed_operations() {
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        disable_android_pointer_diagnostics_with(
+            || {
+                calls.borrow_mut().push("show_touches");
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("pointer_location");
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(*calls.borrow(), ["show_touches", "pointer_location"]);
     }
 
     #[test]
