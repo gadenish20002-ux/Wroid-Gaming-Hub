@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use gtk::gio::ApplicationFlags;
+use gtk::glib::translate::ToGlibPtr;
 use gtk::glib::{self, Cast, ControlFlow, Propagation};
 use gtk::prelude::*;
 use webkit2gtk::{
@@ -188,7 +189,11 @@ fn configure_webview(webview: &WebView, origin: &LocalOrigin) {
             .dynamic_cast::<UserMediaPermissionRequest>()
             .ok();
         if user_media.as_ref().is_some_and(|request| {
-            allow_user_media(request.is_for_video_device(), request.is_for_audio_device())
+            allow_user_media(
+                request.is_for_video_device(),
+                request.is_for_audio_device(),
+                is_for_display_device(request),
+            )
         }) {
             request.allow();
         } else {
@@ -224,8 +229,16 @@ fn configure_webview(webview: &WebView, origin: &LocalOrigin) {
     });
 }
 
-fn allow_user_media(video: bool, audio: bool) -> bool {
-    video && !audio
+fn is_for_display_device(request: &UserMediaPermissionRequest) -> bool {
+    unsafe {
+        webkit2gtk::ffi::webkit_user_media_permission_is_for_display_device(
+            request.to_glib_none().0,
+        ) != 0
+    }
+}
+
+fn allow_user_media(_video: bool, audio: bool, display: bool) -> bool {
+    display && !audio
 }
 
 fn show_error_dialog(
@@ -319,11 +332,12 @@ mod tests {
     }
 
     #[test]
-    fn permission_policy_allows_only_silent_video_capture() {
-        assert!(allow_user_media(true, false));
-        assert!(!allow_user_media(false, false));
-        assert!(!allow_user_media(true, true));
-        assert!(!allow_user_media(false, true));
+    fn permission_policy_allows_only_silent_display_capture() {
+        assert!(allow_user_media(false, false, true));
+        assert!(allow_user_media(true, false, true));
+        assert!(!allow_user_media(true, false, false));
+        assert!(!allow_user_media(false, false, false));
+        assert!(!allow_user_media(false, true, true));
     }
 
     #[test]
