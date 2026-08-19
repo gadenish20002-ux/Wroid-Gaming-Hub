@@ -1,0 +1,40 @@
+name: Feature request
+description: Suggest an improvement that fits Wroid's Linux/Waydroid gaming scope
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or gap
+      description: What problem would this solve for Wroid users or contributors?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the behavior or workflow you would like to see.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Existing tools, workarounds, or other designs you considered.
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Relevant environment
+      description: Linux distribution, Waydroid version, GPU/compositor, game/package, or other context if relevant.
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Project scope
+      options:
+        - label: This request does not involve hiding root, bypassing integrity checks, evading anti-cheat, or other protection bypasses.
+          required: true
