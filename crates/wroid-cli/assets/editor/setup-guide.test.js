@@ -2,7 +2,7 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { steps } = require("./setup-guide.js");
+const { selectionForPlace, steps } = require("./setup-guide.js");
 
 test("setup starts by asking for the game window", () => {
   assert.deepEqual(
@@ -33,4 +33,13 @@ test("guide exposes concise action labels", () => {
       .map((step) => step.action),
     ["capture", "place", "test", "save"],
   );
+});
+
+test("place keeps a visible selection and otherwise chooses the first visible binding", () => {
+  const bindings = [{ layer: "base" }, { layer: "combat" }, { layer: "combat" }];
+  const visible = (binding) => binding.layer === "combat";
+
+  assert.equal(selectionForPlace(bindings, 2, visible), 2);
+  assert.equal(selectionForPlace(bindings, 0, visible), 1);
+  assert.equal(selectionForPlace([], -1, visible), -1);
 });

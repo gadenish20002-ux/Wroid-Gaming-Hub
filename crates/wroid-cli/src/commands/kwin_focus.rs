@@ -100,6 +100,7 @@ fn run_relay(
     stop: mpsc::Receiver<()>,
     ready: mpsc::Sender<Result<(), String>>,
 ) -> Result<()> {
+    let owner_pid = std::process::id();
     let callback_connection =
         SyncConnection::new_session().context("failed to connect to the desktop D-Bus")?;
     let callback_address = callback_connection.unique_name().to_string();
@@ -143,7 +144,8 @@ fn run_relay(
                 .is_some_and(|member| member == "focusChanged")
             {
                 if let Some(value) = message.get1::<String>() {
-                    let _ = focus_tx.send(value == "focused");
+                    let _ =
+                        focus_tx.send(focus_event_is_owned(&value, owner_pid, Path::new("/proc")));
                 }
             }
             true
@@ -216,26 +218,71 @@ const fn focus_line(focused: bool) -> &'static [u8] {
 fn focus_script(callback_address: &str) -> String {
     format!(
         r#"
-function isGameSurface(window) {{
+function surfaceIdentity(window) {{
     if (window == null) {{
-        return false;
+        return "other";
     }}
     const windowClass = String(window.resourceClass || "").toLowerCase();
     const windowName = String(window.resourceName || "").toLowerCase();
     const isWaydroid = value => value === "waydroid" || value.startsWith("waydroid.");
-    return isWaydroid(windowClass) || isWaydroid(windowName) ||
-        windowClass === "gamescope" || windowName === "gamescope";
+    if (isWaydroid(windowClass) || isWaydroid(windowName)) {{
+        return "waydroid";
+    }}
+    if (windowClass === "gamescope" || windowName === "gamescope") {{
+        return "gamescope:" + String(Number(window.pid || 0));
+    }}
+    return "other";
 }}
 
 function reportFocus(window) {{
-    const state = isGameSurface(window) ? "focused" : "unfocused";
-    callDBus("{callback_address}", "/", "", "focusChanged", state);
+    callDBus("{callback_address}", "/", "", "focusChanged", surfaceIdentity(window));
 }}
 
 workspace.windowActivated.connect(reportFocus);
 reportFocus(workspace.activeWindow);
 "#
     )
+}
+
+fn focus_event_is_owned(value: &str, owner_pid: u32, proc_root: &Path) -> bool {
+    if value == "waydroid" {
+        return true;
+    }
+    let Some(pid) = value
+        .strip_prefix("gamescope:")
+        .and_then(|pid| pid.parse::<u32>().ok())
+        .filter(|pid| *pid > 1)
+    else {
+        return false;
+    };
+    process_descends_from(pid, owner_pid, proc_root)
+}
+
+fn process_descends_from(mut pid: u32, ancestor: u32, proc_root: &Path) -> bool {
+    for _ in 0..64 {
+        if pid == ancestor {
+            return true;
+        }
+        if pid <= 1 {
+            return false;
+        }
+        let Ok(stat) = fs::read_to_string(proc_root.join(pid.to_string()).join("stat")) else {
+            return false;
+        };
+        let Some(parent) = stat
+            .rfind(')')
+            .and_then(|end| stat.get(end + 1..))
+            .and_then(|fields| fields.split_whitespace().nth(1))
+            .and_then(|parent| parent.parse::<u32>().ok())
+        else {
+            return false;
+        };
+        if parent == pid {
+            return false;
+        }
+        pid = parent;
+    }
+    false
 }
 
 fn ensure_supported_desktop() -> Result<()> {
@@ -272,11 +319,36 @@ mod tests {
         assert!(script.contains("window.resourceClass"));
         assert!(script.contains("window.resourceName"));
         assert!(script.contains("startsWith(\"waydroid.\")"));
-        assert!(script.contains("windowClass === \"gamescope\""));
-        assert!(script.contains("windowName === \"gamescope\""));
+        assert!(script.contains("gamescope:"));
+        assert!(script.contains("window.pid"));
         assert!(script.contains("workspace.windowActivated.connect(reportFocus)"));
         assert!(script.contains("reportFocus(workspace.activeWindow)"));
         assert!(script.contains("callDBus(\":1.42\""));
+    }
+
+    #[test]
+    fn gamescope_focus_is_limited_to_the_worker_process_tree() {
+        let directory = tempfile::tempdir().unwrap();
+        let proc_root = directory.path();
+        for (pid, parent) in [(4200, 4100), (4100, 4000), (9000, 1)] {
+            let process = proc_root.join(pid.to_string());
+            fs::create_dir(&process).unwrap();
+            fs::write(
+                process.join("stat"),
+                format!("{pid} (gamescope worker) S {parent} 0 0 0 0"),
+            )
+            .unwrap();
+        }
+
+        assert!(focus_event_is_owned("gamescope:4200", 4000, proc_root));
+        assert!(!focus_event_is_owned("gamescope:9000", 4000, proc_root));
+        assert!(!focus_event_is_owned(
+            "gamescope:not-a-pid",
+            4000,
+            proc_root
+        ));
+        assert!(focus_event_is_owned("waydroid", 4000, proc_root));
+        assert!(!focus_event_is_owned("other", 4000, proc_root));
     }
 
     #[test]

@@ -333,8 +333,12 @@
         captureWindow();
         return;
       }
-      const firstVisible = state.profile.bindings.findIndex(bindingInSelectedLayer);
-      if (firstVisible >= 0) selectBinding(firstVisible);
+      const selection = Guide.selectionForPlace(
+        state.profile.bindings,
+        state.selected,
+        bindingInSelectedLayer,
+      );
+      if (selection >= 0) selectBinding(selection);
       elements.inspectorBody.scrollIntoView({ block: "nearest", behavior: "smooth" });
       toast("Drag a marker onto the matching HUD control. Click its input field and press the key you want.");
       return;
@@ -1552,6 +1556,7 @@
       elements.clearBackgroundButton.hidden = true;
       elements.backgroundState.textContent = "NO BACKGROUND";
       elements.backgroundState.classList.remove("is-saved");
+      renderSetupGuide();
       toast(result.message);
     } catch (error) {
       toast(error.message, true);

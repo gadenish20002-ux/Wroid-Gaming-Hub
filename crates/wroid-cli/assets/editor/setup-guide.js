@@ -43,5 +43,12 @@
     return definitions.map((definition, index) => ({ ...definition, state: states[index] }));
   }
 
-  return { steps };
+  function selectionForPlace(bindings, selected, isVisible) {
+    if (Number.isInteger(selected) && selected >= 0 && bindings[selected] && isVisible(bindings[selected])) {
+      return selected;
+    }
+    return bindings.findIndex(isVisible);
+  }
+
+  return { selectionForPlace, steps };
 });

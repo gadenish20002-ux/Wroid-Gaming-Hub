@@ -86,21 +86,41 @@ pub(crate) fn launch_game(
         focus_socket: None,
     };
     let launch = start_managed_game(profile_path, profile, &options, game_mode)?;
-    let pid = launch.process_id;
+    Ok(launch_game_message(
+        width,
+        height,
+        launch.process_id,
+        game_mode,
+        launch.presentation,
+    ))
+}
+
+fn launch_game_message(
+    width: u32,
+    height: u32,
+    pid: u32,
+    game_mode: bool,
+    presentation: wroid_inject::WaydroidPresentation,
+) -> String {
     let performance = if game_mode {
         "GameMode Auto requested"
     } else {
         "GameMode Off"
     };
-    Ok(format!(
-        "Started the game at {width}×{height} via wroidd PID {pid}; {performance}; Ctrl+Esc or Hub Stop ends it"
-    ))
+    let presentation = match presentation {
+        wroid_inject::WaydroidPresentation::Gamescope { .. } => "Gamescope fullscreen + FSR",
+        wroid_inject::WaydroidPresentation::Direct => "direct Waydroid window fallback",
+    };
+    format!(
+        "Started the game at {width}×{height} via wroidd PID {pid}; {presentation}; {performance}; Ctrl+Esc or Hub Stop ends it"
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ManagedLaunch {
     pub(crate) session_id: String,
     pub(crate) process_id: u32,
+    pub(crate) presentation: wroid_inject::WaydroidPresentation,
 }
 
 pub(crate) fn start_managed_game(
@@ -130,9 +150,16 @@ pub(crate) fn start_managed_game(
     let pid = session
         .process_id
         .context("wroidd launched a session without a worker PID")?;
+    let presentation = wroid_inject::presentation_for_game(
+        options.launch_package,
+        wroid_inject::gamescope_is_available(),
+        options.resolution.width,
+        options.resolution.height,
+    );
     Ok(ManagedLaunch {
         session_id,
         process_id: pid,
+        presentation,
     })
 }
 
@@ -906,6 +933,29 @@ mod tests {
             launch.worker_protocol_generation,
             wroid_inject::BRIDGE_WORKER_PROTOCOL_GENERATION
         );
+    }
+
+    #[test]
+    fn launch_message_reports_the_selected_presentation() {
+        assert!(launch_game_message(
+            1280,
+            720,
+            42,
+            true,
+            wroid_inject::WaydroidPresentation::Gamescope {
+                width: 1280,
+                height: 720,
+            },
+        )
+        .contains("Gamescope fullscreen + FSR"));
+        assert!(launch_game_message(
+            1280,
+            720,
+            42,
+            false,
+            wroid_inject::WaydroidPresentation::Direct,
+        )
+        .contains("direct Waydroid window fallback"));
     }
 
     #[test]
