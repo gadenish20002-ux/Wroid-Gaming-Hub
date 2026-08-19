@@ -2,7 +2,12 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { selectionForPlace, steps } = require("./setup-guide.js");
+const {
+  captureErrorMessage,
+  capturePrompt,
+  selectionForPlace,
+  steps,
+} = require("./setup-guide.js");
 
 test("setup starts by asking for the game window", () => {
   assert.deepEqual(
@@ -42,4 +47,11 @@ test("place keeps a visible selection and otherwise chooses the first visible bi
   assert.equal(selectionForPlace(bindings, 2, visible), 2);
   assert.equal(selectionForPlace(bindings, 0, visible), 1);
   assert.equal(selectionForPlace([], -1, visible), -1);
+});
+
+test("window capture guidance names the required confirmation", () => {
+  assert.match(capturePrompt(), /Standoff 2 \/ Waydroid/);
+  assert.match(capturePrompt(), /Share/);
+  assert.match(captureErrorMessage({ name: "NotAllowedError" }), /cancelled or denied/);
+  assert.equal(captureErrorMessage({ message: "portal failed" }), "portal failed");
 });

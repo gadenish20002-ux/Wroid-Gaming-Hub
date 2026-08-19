@@ -50,5 +50,16 @@
     return bindings.findIndex(isVisible);
   }
 
-  return { selectionForPlace, steps };
+  function capturePrompt() {
+    return "System window picker opened: select Standoff 2 / Waydroid, then press Share.";
+  }
+
+  function captureErrorMessage(error) {
+    if (error?.name === "NotAllowedError") {
+      return "Window capture was cancelled or denied. Click Capture game window, select Standoff 2 / Waydroid, then press Share.";
+    }
+    return error?.message || "Window capture failed.";
+  }
+
+  return { captureErrorMessage, capturePrompt, selectionForPlace, steps };
 });

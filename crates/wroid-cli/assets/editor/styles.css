@@ -2229,7 +2229,7 @@ kbd {
 .toast-stack {
   position: fixed;
   z-index: 200;
-  right: 18px;
+  right: 334px;
   bottom: 42px;
   display: grid;
   gap: 8px;
@@ -2314,6 +2314,10 @@ kbd {
 
   .setup-guide-steps {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .toast-stack {
+    right: 312px;
   }
 
   .setup-step {

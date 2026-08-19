@@ -1449,7 +1449,7 @@
     }
     let stream;
     try {
-      toast("Choose the Waydroid game window. Its live surface will stay behind the control map.");
+      toast(Guide.capturePrompt());
       stream = await navigator.mediaDevices.getDisplayMedia({
         video: { frameRate: { ideal: 30, max: 60 } },
         audio: false,
@@ -1492,7 +1492,7 @@
     } catch (error) {
       if (state.calibration) stopLiveCalibration();
       else stream?.getTracks().forEach((track) => track.stop());
-      if (error.name !== "NotAllowedError") toast(error.message, true);
+      toast(Guide.captureErrorMessage(error), true);
     }
   }
 
