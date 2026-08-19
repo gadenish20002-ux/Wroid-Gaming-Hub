@@ -162,6 +162,10 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
   persistent aligned frames.
 - [x] Expose per-game calibration readiness and open an installed game plus
   Controls Studio through one rootless Hub action.
+- [x] Scale preset-resolution package sessions to fullscreen through Gamescope
+  FSR, with direct Waydroid fallback and package-aware KWin focus tracking.
+- [x] Add a four-step Controls Studio quick setup strip and selected-game key
+  map guidance in Hub.
 - [x] Add automatic first-run hardware and Waydroid validation.
 
 ## Phase 5: Compatibility and release

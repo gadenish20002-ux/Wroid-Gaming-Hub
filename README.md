@@ -161,6 +161,11 @@ and user edits always win. Each edition keeps its own calibration reference.
 The selected preset is also persisted as Waydroid's Android render size. Wroid
 verifies the saved width and height, restarts Android once only when they
 change, and confirms the live `wm size` before input capture or game launch.
+Installed package launches use Gamescope when `/usr/bin/gamescope` is available:
+Android keeps the selected 720p/900p/1080p render target while Gamescope opens
+fullscreen and performs aspect-fit FSR scaling. If Gamescope is unavailable,
+Wroid keeps the direct Waydroid window and records the fallback in the session
+log. Calibration and the Android system UI remain direct windowed surfaces.
 When Android is stopped, **Start Waydroid & scan**, **Play Store**, and
 **Open Waydroid UI** start the normal desktop session without sudo, wait for
 the Android package manager, and then refresh installed-game status. These
@@ -298,7 +303,9 @@ Controls Studio opens in its own native GTK/WebKitGTK window. The explicit
 diagnostic fallback is
 `wroid profile edit-v2 <profile-path> --browser`; `--no-open` keeps the editor
 headless. Load or drop a game
-screenshot, or use **Live align** and select the running Waydroid game window.
+screenshot, or choose **1. Capture game window** and select the running Waydroid
+game window. The Quick Setup strip then leads through **Place & bind**,
+**Test bindings**, and **Save & play**.
 The live surface remains beneath the editable map; zoom and horizontal/vertical
 crop controls remove window borders or letterboxing before **Save aligned
 frame** stores an aspect-correct calibration image. Drag
@@ -306,7 +313,7 @@ tap/hold/joystick/mouse-aim controls over the matching HUD elements, adjust keys
 and sensitivity in the inspector, then enable **Test inputs**. The inspector
 only offers input sources that the production runtime can execute. Keyboard keys,
 mouse buttons, and relative mouse movement highlight every matching control
-without sending events to Android. Use **Save & Close** when the preview is
+without sending events to Android. Use **Save & play** when the preview is
 correct. Calibration images are kept in a local `.wroid-assets` directory
 beside the profile and reopen automatically. The editor binds only to
 `127.0.0.1`, uses a per-session token, validates the profile, and atomically
@@ -319,6 +326,9 @@ Key, directional-cluster, and mouse-aim toggle cells capture the next physical
 key directly, including arrows, Tab, Escape, and modifiers. Backspace clears an
 optional aim toggle. Unsupported keys are rejected before they can enter the
 profile, and F12 remains reserved for releasing captured devices during play.
+Ctrl+Esc stops the managed game session. The Hub lists the selected starter's
+actual key map, including the Standoff 2 WASD/mouse/LMB/RMB/R/Space/C/1/2/F
+defaults and Tab mouse-aim toggle.
 Use the layer rail to add Base overrides or named Hold/Toggle maps, select the
 layer before placing controls, and capture an optional modifier in the binding
 inspector. The list, overlay, validation, and **Test inputs** preview follow the

@@ -101,10 +101,12 @@ from the canonical family starter and changing only its title and package.
 It never overwrites an existing profile, including one stored under another id.
 The new edition is launchable immediately but deliberately starts without a
 calibration image, because its HUD can differ from the canonical edition.
-Open Controls Studio before the first match, choose **Live align**, and select
-the actual Waydroid game window. The live game surface stays under the control
-markers while they are moved; zoom and pan remove borders or letterboxing, and
-**Save aligned frame** retains the calibrated viewport beside the profile.
+Open Controls Studio before the first match and follow its Quick Setup strip:
+**Capture game**, **Place & bind**, **Test bindings**, then **Save & play**.
+Select the actual Waydroid game window for capture. The live game surface stays
+under the control markers while they are moved; zoom and pan remove borders or
+letterboxing, and **Save aligned frame** retains the calibrated viewport beside
+the profile.
 When the package is installed but no reference exists, the Hub combines the
 first two steps in **Open game & calibrate** and changes the game-card status
 after the frame is saved.
@@ -115,6 +117,10 @@ the 20-second input self-test before the first managed match. A 15-minute match
 must exercise WASD, relative mouse aim, fire, ADS, reload, jump, crouch, weapon
 selection, F12 release/reacquire, and Ctrl+Esc cleanup. Reader-to-inject p95
 must remain below 5 ms, with no contacts or device grabs left after exit.
+With Gamescope installed, the 1280x720 Android surface is presented fullscreen
+with aspect-fit FSR scaling instead of being moved to the output corner by
+KWin's normal maximize action. F12 releases/reacquires captured devices and
+Ctrl+Esc ends the managed session.
 
 The same compatibility card measures the host filesystem that backs
 `waydroid.host_data_path`; it does not confuse the system-image size with
