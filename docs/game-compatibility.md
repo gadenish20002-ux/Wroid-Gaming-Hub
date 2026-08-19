@@ -23,6 +23,30 @@ confirms the package transaction and privilege prompt. For `yay`, Wroid skips
 only the clean-build and diff housekeeping menus; it never passes
 `--noconfirm`.
 
+## Android root
+
+Some supported games, including Standoff 2, refuse to run while Android root
+is active. Wroid treats the active Magisk system overlay as proven root. A
+detected overlay is shown as `ACTION_REQUIRED` and blocks a known-game launch
+before Waydroid teardown, resolution changes, or physical input capture.
+
+When Magisk was installed through `waydroid-extras`, remove it with the same
+tool, restart Waydroid, and refresh Wroid:
+
+```sh
+sudo waydroid-extras remove magisk
+waydroid session stop
+waydroid session start
+wroid compatibility
+```
+
+Wroid does not hide root, spoof device integrity, or modify game files. A
+Magisk manager APK without the system overlay is reported as `not_detected` and
+does not block launch: the manager can remain installed after root is removed
+and does not itself provide root access. Stale Magisk app data and the Waydroid
+data directory named `adbroot` are ignored for the same reason. An incomplete
+probe is reported as unknown and remains non-blocking.
+
 ## x86_64 and ARM games
 
 Waydroid's x86_64 image runs x86 Android code directly. Android applications
@@ -84,6 +108,13 @@ markers while they are moved; zoom and pan remove borders or letterboxing, and
 When the package is installed but no reference exists, the Hub combines the
 first two steps in **Open game & calibrate** and changes the game-card status
 after the frame is saved.
+
+For the reference Standoff 2 acceptance path, select the physical keyboard and
+relative mouse, use the 1280x720 preset, save a live aligned HUD frame, and run
+the 20-second input self-test before the first managed match. A 15-minute match
+must exercise WASD, relative mouse aim, fire, ADS, reload, jump, crouch, weapon
+selection, F12 release/reacquire, and Ctrl+Esc cleanup. Reader-to-inject p95
+must remain below 5 ms, with no contacts or device grabs left after exit.
 
 The same compatibility card measures the host filesystem that backs
 `waydroid.host_data_path`; it does not confuse the system-image size with

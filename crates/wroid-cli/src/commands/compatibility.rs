@@ -73,10 +73,10 @@ impl RootAccess {
             (RootAccessState::Detected, Some("magisk_overlay")) => {
                 "Active Magisk system overlay detected; remove Magisk with `sudo waydroid-extras remove magisk`, restart Waydroid, then refresh Wroid"
             }
-            (RootAccessState::Detected, Some("magisk_package")) => {
-                "Active Magisk package detected; remove Magisk with `sudo waydroid-extras remove magisk`, restart Waydroid, then refresh Wroid"
-            }
             (RootAccessState::Detected, _) => "Active Android root access detected",
+            (RootAccessState::NotDetected, Some("magisk_manager_package_only")) => {
+                "A Magisk manager app remains installed, but no active Magisk system overlay was found"
+            }
             (RootAccessState::NotDetected, _) => "No active Magisk signals detected",
             (RootAccessState::Unknown, _) => {
                 "Android root state could not be fully verified; Wroid will not claim the environment is clean"
@@ -524,20 +524,20 @@ fn classify_root_access(
             evidence: Some("magisk_overlay"),
         };
     }
+    if marker == RootMarkerProbe::Unknown || installed_packages.is_none() {
+        return RootAccess {
+            state: RootAccessState::Unknown,
+            evidence: None,
+        };
+    }
     if installed_packages.is_some_and(|packages| {
         packages
             .iter()
             .any(|package| MAGISK_PACKAGES.contains(&package.as_str()))
     }) {
         return RootAccess {
-            state: RootAccessState::Detected,
-            evidence: Some("magisk_package"),
-        };
-    }
-    if marker == RootMarkerProbe::Unknown || installed_packages.is_none() {
-        return RootAccess {
-            state: RootAccessState::Unknown,
-            evidence: None,
+            state: RootAccessState::NotDetected,
+            evidence: Some("magisk_manager_package_only"),
         };
     }
     RootAccess {
@@ -1233,15 +1233,15 @@ ro.dalvik.vm.native.bridge = libhoudini.so
     }
 
     #[test]
-    fn active_magisk_package_requires_action() {
+    fn manager_package_without_overlay_is_not_detected_and_non_blocking() {
         for package in ["io.github.huskydg.magisk", "com.topjohnwu.magisk"] {
             let access = classify_root_access(
                 RootMarkerProbe::Absent,
                 Some(&packages(&["com.android.settings", package])),
             );
 
-            assert_eq!(access.state, RootAccessState::Detected);
-            assert_eq!(access.evidence, Some("magisk_package"));
+            assert_eq!(access.state, RootAccessState::NotDetected);
+            assert_eq!(access.evidence, Some("magisk_manager_package_only"));
         }
     }
 
@@ -1257,6 +1257,33 @@ ro.dalvik.vm.native.bridge = libhoudini.so
     }
 
     #[test]
+    fn manager_only_report_does_not_block_known_game() {
+        let installed = packages(&[
+            "com.android.settings",
+            "com.android.vending",
+            "com.axlebolt.standoff2",
+            "io.github.huskydg.magisk",
+        ]);
+        let report = CompatibilityReport::from_probe(ProbeData {
+            host_arch: "x86_64".to_owned(),
+            waydroid_running: true,
+            android_version: Some("13".to_owned()),
+            primary_abi: Some("x86_64".to_owned()),
+            abi_list: packages(&["x86_64", "arm64-v8a"]),
+            native_bridge: Some("libhoudini.so".to_owned()),
+            arm_translation: Some(true),
+            play_store: Some(true),
+            installed_packages: Some(&installed),
+            root_marker: RootMarkerProbe::Absent,
+        });
+
+        assert_eq!(report.as_json()["rootAccess"]["state"], "not_detected");
+        assert!(report
+            .ensure_known_game_launch_ready("com.axlebolt.standoff2")
+            .is_ok());
+    }
+
+    #[test]
     fn incomplete_root_evidence_stays_unknown() {
         assert_eq!(
             classify_root_access(RootMarkerProbe::Unknown, Some(&packages(&[]))).state,
@@ -1264,6 +1291,14 @@ ro.dalvik.vm.native.bridge = libhoudini.so
         );
         assert_eq!(
             classify_root_access(RootMarkerProbe::Absent, None).state,
+            RootAccessState::Unknown,
+        );
+        assert_eq!(
+            classify_root_access(
+                RootMarkerProbe::Unknown,
+                Some(&packages(&["io.github.huskydg.magisk"])),
+            )
+            .state,
             RootAccessState::Unknown,
         );
     }

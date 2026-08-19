@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Detect only proven active Magisk signals: `/var/lib/waydroid/overlay/system/etc/init/magisk`, `io.github.huskydg.magisk`, and `com.topjohnwu.magisk`.
+- Detect proven active Magisk from `/var/lib/waydroid/overlay/system/etc/init/magisk`; retain manager-only packages as non-blocking not-detected evidence.
 - Do not classify `waydroid.host_data_path/adbroot` or stale app-data directories as active root.
 - Do not hide root, spoof integrity, modify game files, or automatically execute a root-removal command.
 - Unknown root state is a non-blocking warning; detected root blocks known-game launch before Waydroid teardown or physical input capture.
@@ -49,14 +49,14 @@ fn active_magisk_overlay_requires_action() {
 }
 
 #[test]
-fn active_magisk_package_requires_action() {
+fn manager_package_without_overlay_is_not_detected_and_non_blocking() {
     for package in ["io.github.huskydg.magisk", "com.topjohnwu.magisk"] {
         let access = classify_root_access(
             RootMarkerProbe::Absent,
             Some(&packages(&["com.android.settings", package])),
         );
-        assert_eq!(access.state, RootAccessState::Detected);
-        assert_eq!(access.evidence, Some("magisk_package"));
+        assert_eq!(access.state, RootAccessState::NotDetected);
+        assert_eq!(access.evidence, Some("magisk_manager_package_only"));
     }
 }
 
@@ -127,9 +127,10 @@ fn probe_magisk_overlay(path: &Path) -> RootMarkerProbe {
 }
 ```
 
-Classification precedence is overlay, installed package, incomplete evidence,
-then clean. Add an action finding with code `android-root-detected` and removal
-guidance, or a warning with code `android-root-unknown`. Include the typed root
+Classification precedence is overlay, incomplete unknown, manager-package-only
+not detected, and finally clean. Add an
+action finding with code `android-root-detected` and removal guidance, or a
+warning with code `android-root-unknown`. Include the typed root
 object in `CompatibilityReport` and `as_json()`.
 
 - [ ] **Step 5: Implement the shared known-game guard**

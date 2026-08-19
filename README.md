@@ -242,6 +242,12 @@ known to be absent. On x86_64, the compatibility report highlights a confirmed
 missing native bridge before opening Google Play, because ARM-only APKs cannot
 run without an ARM translation component. Offline probes reuse saved Waydroid
 properties and keep unavailable evidence explicitly unknown.
+Known games can also reject active Android root. Wroid reports a proven active
+Magisk system overlay and blocks their launch before changing the Waydroid
+session. It gives removal guidance but never hides root, modifies game files,
+or bypasses integrity checks. A manager APK without the overlay, stale Magisk
+app data, and Waydroid's `adbroot` data directory are reported as no active
+root because none provides root access by itself.
 
 See [Game compatibility setup](docs/game-compatibility.md) before installing the
 four starter games.

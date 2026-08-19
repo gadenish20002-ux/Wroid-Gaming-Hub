@@ -58,16 +58,20 @@ contained Magisk Delta installed by `waydroid-extras`; the active marker was
 
 Compatibility probing gains a root state with three outcomes:
 
-- `detected`: an active system overlay marker or an installed known root-manager
-  package is present;
-- `not_detected`: all supported active probes completed and no marker exists;
+- `detected`: the active system overlay marker is present;
+- `not_detected`: all supported active probes completed and no marker exists,
+  including when only a root-manager APK remains;
 - `unknown`: required evidence could not be read.
 
-The first implementation recognizes the proven Magisk signals only:
+The first implementation recognizes the proven active Magisk signal:
 
 - active overlay directory
   `/var/lib/waydroid/overlay/system/etc/init/magisk`;
-- installed package `io.github.huskydg.magisk` or `com.topjohnwu.magisk`.
+
+An installed `io.github.huskydg.magisk` or `com.topjohnwu.magisk` manager APK
+without the overlay is retained as non-blocking evidence in the
+`not_detected` state. The APK can survive root removal and does not itself
+provide root.
 
 The probe deliberately ignores `waydroid.host_data_path/adbroot` and stale app
 data such as `data/io.github.huskydg.magisk`. Those paths can remain after a

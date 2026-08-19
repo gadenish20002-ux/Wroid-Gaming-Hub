@@ -174,6 +174,10 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
   and atomically derive exact-package controls without overwriting user maps.
 - [x] Read saved ABI/native-bridge properties while Waydroid is stopped and
   preserve an explicit unknown state when evidence is unavailable.
+- [x] Detect the proven active Magisk overlay, block known-game launch before
+  Waydroid teardown, and avoid false positives from stale root-related data.
+- [ ] Complete the Standoff 2 reference acceptance match at 1280x720 with
+  calibrated keyboard/mouse controls and recorded production latency.
 - [ ] Test Intel, AMD, and NVIDIA across supported compositors.
 - [ ] Package signed beta releases for major Linux distribution families.
 
