@@ -13,6 +13,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use wroid_core::profile_v2::ProfileV2;
 
+use super::local_web_app::{LocalWebApp, WebUiMode};
 use super::preferences;
 use super::terminal::spawn_terminal;
 
@@ -25,7 +26,20 @@ const MAX_PROFILE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) fn edit_v2(path: PathBuf, port: u16, open_browser: bool) -> Result<()> {
+pub(crate) fn edit_v2(path: PathBuf, port: u16, mode: WebUiMode) -> Result<()> {
+    let app = start_editor(path, port)?;
+
+    println!("Wroid Controls Studio");
+    println!("The server listens on localhost only. Save & Close stops it.");
+    match mode {
+        WebUiMode::Browser => open_url(&app.authenticated_url()),
+        WebUiMode::Headless => println!("Editor: {}", app.authenticated_url()),
+        WebUiMode::Native => unreachable!("native editor mode is wired by the desktop shell"),
+    }
+    app.wait()
+}
+
+pub(crate) fn start_editor(path: PathBuf, port: u16) -> Result<LocalWebApp> {
     let path = absolute_existing_file(&path)?;
     let profile = ProfileV2::load_from_path(&path)
         .with_context(|| format!("failed to load profile v2 {}", path.display()))?;
@@ -37,46 +51,40 @@ pub(crate) fn edit_v2(path: PathBuf, port: u16, open_browser: bool) -> Result<()
         .context("failed to bind the local profile editor")?;
     let address = listener.local_addr()?;
     let token = local_token()?;
-    let url = format!("http://{address}/?token={token}");
-
-    println!("Wroid Controls Studio");
-    println!("Profile: {}", path.display());
-    println!("Editor: {url}");
-    println!("The server listens on localhost only. Save & Close stops it.");
-
-    if open_browser {
-        match Command::new("xdg-open")
-            .arg(&url)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            Ok(_) => {}
-            Err(error) => eprintln!("Warning: could not open a browser: {error}"),
-        }
-    }
-
     listener
         .set_nonblocking(true)
         .context("failed to configure the local profile editor")?;
     let shutdown = Arc::new(AtomicBool::new(false));
-    while !shutdown.load(Ordering::Acquire) {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                let path = path.clone();
-                let token = token.clone();
-                let shutdown = Arc::clone(&shutdown);
-                thread::spawn(move || serve_connection(stream, &path, &token, &shutdown));
+    let server_shutdown = Arc::clone(&shutdown);
+    LocalWebApp::spawn(address, token.clone(), Arc::clone(&shutdown), move || {
+        while !server_shutdown.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let path = path.clone();
+                    let token = token.clone();
+                    let shutdown = Arc::clone(&server_shutdown);
+                    thread::spawn(move || serve_connection(stream, &path, &token, &shutdown));
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => return Err(error).context("profile editor connection failed"),
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => return Err(error).context("profile editor connection failed"),
         }
+        Ok(())
+    })
+}
+
+fn open_url(url: &str) {
+    if let Err(error) = Command::new("xdg-open")
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        eprintln!("Warning: could not open a browser: {error}");
     }
-    println!("Profile editor closed.");
-    Ok(())
 }
 
 fn serve_connection(mut stream: TcpStream, path: &Path, token: &str, shutdown: &AtomicBool) {
@@ -635,6 +643,37 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editor_page_close_stops_the_server_handle() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("profile.json");
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../profiles/examples/standoff2-v2.json"),
+            &path,
+        )
+        .unwrap();
+        let app = start_editor(path, 0).unwrap();
+        let address: std::net::SocketAddr = app
+            .origin()
+            .as_str()
+            .strip_prefix("http://")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let token_query = app.authenticated_url().split_once('?').unwrap().1.to_owned();
+        let mut client = TcpStream::connect(address).unwrap();
+        write!(
+            client,
+            "POST /api/close?{token_query} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 200"));
+        app.wait().unwrap();
+    }
 
     #[test]
     fn serves_the_profile_model_asset() {

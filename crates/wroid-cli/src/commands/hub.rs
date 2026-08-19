@@ -23,6 +23,7 @@ use crate::backend::InputExecutor;
 use super::compatibility::{self, CompatibilityReport};
 use super::game_catalog::{family_for_package, GAME_FAMILIES};
 use super::graphics::GraphicsReport;
+use super::local_web_app::{LocalWebApp, WebUiMode};
 use super::preferences::{self, UserPreferences};
 use super::terminal::spawn_terminal;
 
@@ -72,7 +73,28 @@ struct LibraryProfile {
     profile: ProfileV2,
 }
 
-pub(crate) fn run_hub(port: u16, open_browser: bool, profiles_dir: Option<PathBuf>) -> Result<()> {
+pub(crate) fn run_hub(port: u16, mode: WebUiMode, profiles_dir: Option<PathBuf>) -> Result<()> {
+    let app = start_hub(port, profiles_dir)?;
+
+    println!("Wroid Gaming Hub");
+    println!("The server listens on localhost only. Ctrl+C stops it.");
+    match mode {
+        WebUiMode::Browser => open_url(&app.authenticated_url()),
+        WebUiMode::Headless => println!("Hub: {}", app.authenticated_url()),
+        WebUiMode::Native => unreachable!("native Hub mode is wired by the desktop shell"),
+    }
+    app.wait()
+}
+
+pub(crate) fn start_hub(port: u16, profiles_dir: Option<PathBuf>) -> Result<LocalWebApp> {
+    start_hub_in(port, profiles_dir, default_sideload_directory()?)
+}
+
+fn start_hub_in(
+    port: u16,
+    profiles_dir: Option<PathBuf>,
+    sideload_directory: PathBuf,
+) -> Result<LocalWebApp> {
     if effective_uid_from_proc().unwrap_or(u32::MAX) == 0 {
         bail!("the gaming hub must run as the desktop user, without sudo");
     }
@@ -82,53 +104,44 @@ pub(crate) fn run_hub(port: u16, open_browser: bool, profiles_dir: Option<PathBu
         None => default_profiles_dir()?,
     };
     bootstrap_library(&profiles_dir)?;
-    let sideload_directory = secure_sideload_directory(&default_sideload_directory()?)?;
+    let sideload_directory = secure_sideload_directory(&sideload_directory)?;
     cleanup_stale_sideload(&sideload_directory, SystemTime::now())?;
 
     let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port))
         .context("failed to bind the local gaming hub")?;
     let address = listener.local_addr()?;
     let token = local_token()?;
-    let url = format!("http://{address}/?token={token}");
-
-    println!("Wroid Gaming Hub");
-    println!("Library: {}", profiles_dir.display());
-    println!("Hub: {url}");
-    println!("The server listens on localhost only. Ctrl+C stops it.");
-
-    if open_browser {
-        open_url(&url);
-    }
-
     listener
         .set_nonblocking(true)
         .context("failed to configure the local gaming hub")?;
     let shutdown = Arc::new(AtomicBool::new(false));
-    while !shutdown.load(Ordering::Acquire) {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                let profiles_dir = profiles_dir.clone();
-                let sideload_directory = sideload_directory.clone();
-                let token = token.clone();
-                let shutdown = Arc::clone(&shutdown);
-                thread::spawn(move || {
-                    serve_connection(
-                        stream,
-                        &profiles_dir,
-                        &sideload_directory,
-                        &token,
-                        &shutdown,
-                    );
-                });
+    let server_shutdown = Arc::clone(&shutdown);
+    LocalWebApp::spawn(address, token.clone(), Arc::clone(&shutdown), move || {
+        while !server_shutdown.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let profiles_dir = profiles_dir.clone();
+                    let sideload_directory = sideload_directory.clone();
+                    let token = token.clone();
+                    let shutdown = Arc::clone(&server_shutdown);
+                    thread::spawn(move || {
+                        serve_connection(
+                            stream,
+                            &profiles_dir,
+                            &sideload_directory,
+                            &token,
+                            &shutdown,
+                        );
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => return Err(error).context("gaming hub connection failed"),
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => return Err(error).context("gaming hub connection failed"),
         }
-    }
-    println!("Gaming hub closed.");
-    Ok(())
+        Ok(())
+    })
 }
 
 fn serve_connection(
@@ -2029,6 +2042,36 @@ mod tests {
     use super::*;
     use wroid_android::{AbiCompatibility, PackageFormat, PackageInspection};
     use wroid_core::profile_v2::{LayerActivation, LayerV2};
+
+    #[test]
+    fn started_hub_serves_until_handle_shutdown() {
+        let directory = tempfile::tempdir().unwrap();
+        let app = start_hub_in(
+            0,
+            Some(directory.path().join("profiles")),
+            directory.path().join("sideload"),
+        )
+        .unwrap();
+        let address: std::net::SocketAddr = app
+            .origin()
+            .as_str()
+            .strip_prefix("http://")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let target = app
+            .authenticated_url()
+            .strip_prefix(app.origin().as_str())
+            .unwrap()
+            .to_owned();
+        let mut client = TcpStream::connect(address).unwrap();
+        write!(client, "GET {target} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 200"));
+        app.shutdown_and_join().unwrap();
+    }
 
     fn write_minimal_apk(path: &Path) {
         const LOCAL: u32 = 0x0403_4b50;

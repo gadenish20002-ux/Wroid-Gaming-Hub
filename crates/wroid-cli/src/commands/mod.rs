@@ -29,6 +29,7 @@ use crate::cli::{
     AppCommand, BindingCommand, Cli, Commands, DaemonCommand, DesktopCommand, DeviceCommand,
     HelperCommand, InputCommand, ProfileCommand, SessionCommand,
 };
+use local_web_app::WebUiMode;
 
 pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
     match cli.command {
@@ -54,7 +55,15 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
             port,
             no_open,
             profiles_dir,
-        } => hub::run_hub(port, !no_open, profiles_dir),
+        } => hub::run_hub(
+            port,
+            if no_open {
+                WebUiMode::Headless
+            } else {
+                WebUiMode::Browser
+            },
+            profiles_dir,
+        ),
         Commands::Doctor { backend } => doctor::doctor(input_executor, backend),
         Commands::Profile { command } => match command {
             ProfileCommand::Validate { path } => profile::validate_profile(path),
@@ -62,7 +71,15 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
                 path,
                 port,
                 no_open,
-            } => editor::edit_v2(path, port, !no_open),
+            } => editor::edit_v2(
+                path,
+                port,
+                if no_open {
+                    WebUiMode::Headless
+                } else {
+                    WebUiMode::Browser
+                },
+            ),
             ProfileCommand::Example { path } => profile::write_example_profile(path),
             ProfileCommand::New {
                 path,
