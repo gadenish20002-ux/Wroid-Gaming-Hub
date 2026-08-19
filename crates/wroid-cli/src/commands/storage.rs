@@ -14,7 +14,8 @@ const FULL_DECK_RECOMMENDED_BYTES: u64 = 40 * 1024 * 1024 * 1024;
 const CRITICAL_AVAILABLE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const BTRFS_SUPER_MAGIC: libc::c_long = 0x9123_683e;
 const FS_IOC_GETFLAGS: libc::c_ulong = 0x8008_6601;
-const FS_NOCOW_FL: libc::c_int = 0x0080_0000;
+const FS_NOCOW_FL: libc::c_long = 0x0080_0000;
+type FilesystemFlags = libc::c_long;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CopyOnWriteState {
@@ -154,9 +155,9 @@ fn copy_on_write_state(path: &Path) -> CopyOnWriteState {
     let Ok(directory) = File::open(path) else {
         return CopyOnWriteState::Unknown;
     };
-    let mut flags: libc::c_int = 0;
+    let mut flags: FilesystemFlags = 0;
     // SAFETY: directory is a live read-only descriptor and flags points to a
-    // writable c_int expected by Linux FS_IOC_GETFLAGS.
+    // writable long expected by Linux _IOR('f', 1, long).
     if unsafe { libc::ioctl(directory.as_raw_fd(), FS_IOC_GETFLAGS, &mut flags) } != 0 {
         return CopyOnWriteState::Unknown;
     }
@@ -283,5 +284,17 @@ mod tests {
         };
 
         assert_eq!(report.as_json()["copyOnWrite"], "enabled");
+    }
+
+    #[test]
+    fn getflags_buffer_matches_linux_ioctl_abi() {
+        const IOC_SIZE_SHIFT: u32 = 16;
+        const IOC_SIZE_MASK: libc::c_ulong = 0x3fff;
+        let encoded_size = (FS_IOC_GETFLAGS >> IOC_SIZE_SHIFT) & IOC_SIZE_MASK;
+
+        assert_eq!(
+            encoded_size as usize,
+            std::mem::size_of::<FilesystemFlags>()
+        );
     }
 }

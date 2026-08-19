@@ -182,7 +182,8 @@ Expected: compilation fails because the enum and classifier are missing.
 - [ ] **Step 3: Implement read-only Btrfs probing**
 
 Use `libc::statfs` and Btrfs magic `0x9123683e`. On Btrfs, open the directory
-read-only and call `FS_IOC_GETFLAGS` (`0x80086601`) into `libc::c_int`;
+read-only and call `FS_IOC_GETFLAGS` (`0x80086601`) into `libc::c_long`, matching
+Linux `_IOR('f', 1, long)`;
 `FS_NOCOW_FL` (`0x00800000`) means `Disabled`. Failed probes return `Unknown`.
 Never call `SETFLAGS`, `chattr`, copy, rename, or delete.
 
