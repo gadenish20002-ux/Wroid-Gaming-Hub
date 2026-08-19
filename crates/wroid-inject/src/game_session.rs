@@ -41,6 +41,23 @@ const PHYSICAL_INPUT_COUNT: usize = 51;
 
 static INTERRUPT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AndroidOpenAction {
+    None,
+    FullUi,
+    Package,
+}
+
+fn android_open_action(show_ui: bool, launch_package: bool) -> AndroidOpenAction {
+    if launch_package {
+        AndroidOpenAction::Package
+    } else if show_ui {
+        AndroidOpenAction::FullUi
+    } else {
+        AndroidOpenAction::None
+    }
+}
+
 type SignalHandler = extern "C" fn(i32);
 
 unsafe extern "C" {
@@ -159,12 +176,13 @@ pub fn run_game_session(mut options: GameSessionOptions) -> GameSessionResult<Ga
         }
         waydroid.confirm_resolution(options.width, options.height)?;
         bridge.verify_android_input()?;
-        if options.show_ui {
-            waydroid.show_full_ui()?;
-        }
-        if options.launch_package {
-            waydroid.launch_package(&plan.package_name)?;
-            println!("Launched Android package {}.", plan.package_name);
+        match android_open_action(options.show_ui, options.launch_package) {
+            AndroidOpenAction::Package => {
+                waydroid.launch_package(&plan.package_name)?;
+                println!("Launched Android package {}.", plan.package_name);
+            }
+            AndroidOpenAction::FullUi => waydroid.show_full_ui()?,
+            AndroidOpenAction::None => {}
         }
         let focus_connection = if options.grab {
             options
@@ -2247,6 +2265,23 @@ mod tests {
         NormalizedRect, ProfileV2,
     };
     use wroid_runtime::{TouchInjectionError, TouchInjector};
+
+    #[test]
+    fn package_launch_bypasses_full_android_desktop() {
+        assert_eq!(
+            android_open_action(true, true),
+            AndroidOpenAction::Package
+        );
+        assert_eq!(
+            android_open_action(false, true),
+            AndroidOpenAction::Package
+        );
+        assert_eq!(
+            android_open_action(true, false),
+            AndroidOpenAction::FullUi
+        );
+        assert_eq!(android_open_action(false, false), AndroidOpenAction::None);
+    }
 
     #[derive(Default)]
     struct RecordingInjector {
