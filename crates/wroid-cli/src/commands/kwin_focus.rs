@@ -216,17 +216,19 @@ const fn focus_line(focused: bool) -> &'static [u8] {
 fn focus_script(callback_address: &str) -> String {
     format!(
         r#"
-function isWaydroid(window) {{
+function isGameSurface(window) {{
     if (window == null) {{
         return false;
     }}
     const windowClass = String(window.resourceClass || "").toLowerCase();
     const windowName = String(window.resourceName || "").toLowerCase();
-    return windowClass === "waydroid" || windowName === "waydroid";
+    const isWaydroid = value => value === "waydroid" || value.startsWith("waydroid.");
+    return isWaydroid(windowClass) || isWaydroid(windowName) ||
+        windowClass === "gamescope" || windowName === "gamescope";
 }}
 
 function reportFocus(window) {{
-    const state = isWaydroid(window) ? "focused" : "unfocused";
+    const state = isGameSurface(window) ? "focused" : "unfocused";
     callDBus("{callback_address}", "/", "", "focusChanged", state);
 }}
 
@@ -269,6 +271,9 @@ mod tests {
         let script = focus_script(":1.42");
         assert!(script.contains("window.resourceClass"));
         assert!(script.contains("window.resourceName"));
+        assert!(script.contains("startsWith(\"waydroid.\")"));
+        assert!(script.contains("windowClass === \"gamescope\""));
+        assert!(script.contains("windowName === \"gamescope\""));
         assert!(script.contains("workspace.windowActivated.connect(reportFocus)"));
         assert!(script.contains("reportFocus(workspace.activeWindow)"));
         assert!(script.contains("callDBus(\":1.42\""));
