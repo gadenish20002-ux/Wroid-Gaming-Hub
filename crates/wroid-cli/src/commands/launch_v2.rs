@@ -193,7 +193,7 @@ fn print_launch_preflight(profile: &ProfileV2, launch_package: bool) -> Result<(
     );
     let compatibility = CompatibilityReport::probe();
     if launch_package {
-        compatibility.ensure_package_installed_if_known(&profile.package_name)?;
+        compatibility.ensure_known_game_launch_ready(&profile.package_name)?;
     }
     if let Some(game) = compatibility.game(&profile.package_name) {
         println!(

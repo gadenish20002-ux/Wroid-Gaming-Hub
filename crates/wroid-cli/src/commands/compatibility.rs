@@ -17,6 +17,8 @@ const WAYDROID_COMMUNITY_URL: &str = "https://docs.waydro.id/faq/community-proje
 const APP_LIST_READY_TIMEOUT: Duration = Duration::from_secs(30);
 const APP_LIST_READY_INTERVAL: Duration = Duration::from_millis(250);
 const WAYDROID_CONFIG: &str = "/var/lib/waydroid/waydroid.cfg";
+const MAGISK_OVERLAY: &str = "/var/lib/waydroid/overlay/system/etc/init/magisk";
+const MAGISK_PACKAGES: [&str; 2] = ["io.github.huskydg.magisk", "com.topjohnwu.magisk"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Severity {
@@ -31,6 +33,54 @@ impl Severity {
             Self::Info => "info",
             Self::Warning => "warning",
             Self::Action => "action",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootMarkerProbe {
+    Present,
+    Absent,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootAccessState {
+    Detected,
+    NotDetected,
+    Unknown,
+}
+
+impl RootAccessState {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Detected => "detected",
+            Self::NotDetected => "not_detected",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RootAccess {
+    state: RootAccessState,
+    evidence: Option<&'static str>,
+}
+
+impl RootAccess {
+    fn detail(&self) -> &'static str {
+        match (self.state, self.evidence) {
+            (RootAccessState::Detected, Some("magisk_overlay")) => {
+                "Active Magisk system overlay detected; remove Magisk with `sudo waydroid-extras remove magisk`, restart Waydroid, then refresh Wroid"
+            }
+            (RootAccessState::Detected, Some("magisk_package")) => {
+                "Active Magisk package detected; remove Magisk with `sudo waydroid-extras remove magisk`, restart Waydroid, then refresh Wroid"
+            }
+            (RootAccessState::Detected, _) => "Active Android root access detected",
+            (RootAccessState::NotDetected, _) => "No active Magisk signals detected",
+            (RootAccessState::Unknown, _) => {
+                "Android root state could not be fully verified; Wroid will not claim the environment is clean"
+            }
         }
     }
 }
@@ -63,6 +113,7 @@ pub(crate) struct CompatibilityReport {
     arm_translation: Option<bool>,
     play_store: Option<bool>,
     installed_packages: Option<Vec<String>>,
+    root_access: RootAccess,
     games: Vec<GameCompatibility>,
     findings: Vec<Finding>,
 }
@@ -138,11 +189,13 @@ impl CompatibilityReport {
             arm_translation,
             play_store,
             installed_packages,
+            root_marker: probe_magisk_overlay(Path::new(MAGISK_OVERLAY)),
         })
     }
 
     fn from_probe(data: ProbeData<'_>) -> Self {
         let mut findings = Vec::new();
+        let root_access = classify_root_access(data.root_marker, data.installed_packages);
         if !data.waydroid_running {
             findings.push(Finding {
                 severity: Severity::Warning,
@@ -175,6 +228,20 @@ impl CompatibilityReport {
                     "Android package inventory did not become ready before the diagnostic deadline"
                         .to_owned(),
             });
+        }
+
+        match root_access.state {
+            RootAccessState::Detected => findings.push(Finding {
+                severity: Severity::Action,
+                code: "android-root-detected",
+                message: root_access.detail().to_owned(),
+            }),
+            RootAccessState::Unknown => findings.push(Finding {
+                severity: Severity::Warning,
+                code: "android-root-unknown",
+                message: root_access.detail().to_owned(),
+            }),
+            RootAccessState::NotDetected => {}
         }
 
         match data.arm_translation {
@@ -237,6 +304,7 @@ impl CompatibilityReport {
             arm_translation: data.arm_translation,
             play_store: data.play_store,
             installed_packages: data.installed_packages.map(<[String]>::to_vec),
+            root_access,
             games,
             findings,
         }
@@ -293,6 +361,16 @@ impl CompatibilityReport {
         Ok(())
     }
 
+    pub(crate) fn ensure_known_game_launch_ready(&self, package: &str) -> Result<()> {
+        if family_for_package(package).is_none() {
+            return Ok(());
+        }
+        if self.root_access.state == RootAccessState::Detected {
+            bail!(self.root_access.detail());
+        }
+        self.ensure_package_installed_if_known(package)
+    }
+
     pub(crate) fn as_json(&self) -> Value {
         let setup = setup_route();
         json!({
@@ -305,6 +383,11 @@ impl CompatibilityReport {
             "nativeBridge": self.native_bridge,
             "armTranslation": self.arm_translation,
             "playStore": self.play_store,
+            "rootAccess": {
+                "state": self.root_access.state.as_str(),
+                "evidence": self.root_access.evidence,
+                "detail": self.root_access.detail(),
+            },
             "setup": {
                 "kind": setup.kind,
                 "label": setup.label,
@@ -335,7 +418,7 @@ impl CompatibilityReport {
             self.primary_abi.as_deref().unwrap_or("unknown")
         );
         output.push_str(&format!(
-            "ABI list: {}\nNative bridge: {}\nARM translation: {}\nPlay Store: {}\n",
+            "ABI list: {}\nNative bridge: {}\nARM translation: {}\nPlay Store: {}\nAndroid root: {}\n",
             if self.abi_list.is_empty() {
                 "unknown".to_owned()
             } else {
@@ -347,7 +430,8 @@ impl CompatibilityReport {
                 Some(false) => "missing",
                 None => "unknown",
             },
-            optional_status(self.play_store)
+            optional_status(self.play_store),
+            self.root_access.state.as_str()
         ));
         for finding in &self.findings {
             output.push_str(&format!(
@@ -422,6 +506,46 @@ fn package_list_is_ready(packages: &[String], expect_play_store: bool) -> bool {
     has_settings && has_expected_store
 }
 
+fn probe_magisk_overlay(path: &Path) -> RootMarkerProbe {
+    match fs::symlink_metadata(path) {
+        Ok(_) => RootMarkerProbe::Present,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => RootMarkerProbe::Absent,
+        Err(_) => RootMarkerProbe::Unknown,
+    }
+}
+
+fn classify_root_access(
+    marker: RootMarkerProbe,
+    installed_packages: Option<&[String]>,
+) -> RootAccess {
+    if marker == RootMarkerProbe::Present {
+        return RootAccess {
+            state: RootAccessState::Detected,
+            evidence: Some("magisk_overlay"),
+        };
+    }
+    if installed_packages.is_some_and(|packages| {
+        packages
+            .iter()
+            .any(|package| MAGISK_PACKAGES.contains(&package.as_str()))
+    }) {
+        return RootAccess {
+            state: RootAccessState::Detected,
+            evidence: Some("magisk_package"),
+        };
+    }
+    if marker == RootMarkerProbe::Unknown || installed_packages.is_none() {
+        return RootAccess {
+            state: RootAccessState::Unknown,
+            evidence: None,
+        };
+    }
+    RootAccess {
+        state: RootAccessState::NotDetected,
+        evidence: None,
+    }
+}
+
 fn waydroid_config_expects_play_store() -> bool {
     fs::read_to_string(WAYDROID_CONFIG).is_ok_and(|config| {
         config.lines().any(|line| {
@@ -442,6 +566,7 @@ struct ProbeData<'a> {
     arm_translation: Option<bool>,
     play_store: Option<bool>,
     installed_packages: Option<&'a [String]>,
+    root_marker: RootMarkerProbe,
 }
 
 fn game_compatibility(
@@ -794,6 +919,7 @@ mod tests {
                     .any(|package| package == "com.android.vending")
             }),
             installed_packages: packages,
+            root_marker: RootMarkerProbe::Absent,
         })
     }
 
@@ -932,6 +1058,7 @@ mod tests {
             arm_translation: None,
             play_store: None,
             installed_packages: None,
+            root_marker: RootMarkerProbe::Absent,
         });
 
         assert_eq!(report.arm_translation, None);
@@ -1080,6 +1207,7 @@ ro.dalvik.vm.native.bridge = libhoudini.so
             arm_translation: Some(true),
             play_store: None,
             installed_packages: None,
+            root_marker: RootMarkerProbe::Absent,
         });
 
         assert_eq!(report.health(), "warning");
@@ -1091,5 +1219,87 @@ ro.dalvik.vm.native.bridge = libhoudini.so
             .games
             .iter()
             .all(|game| game.state == "runtime_not_ready" && game.installed.is_none()));
+    }
+
+    #[test]
+    fn active_magisk_overlay_requires_action() {
+        let access = classify_root_access(
+            RootMarkerProbe::Present,
+            Some(&packages(&["com.android.settings"])),
+        );
+
+        assert_eq!(access.state, RootAccessState::Detected);
+        assert_eq!(access.evidence, Some("magisk_overlay"));
+    }
+
+    #[test]
+    fn active_magisk_package_requires_action() {
+        for package in ["io.github.huskydg.magisk", "com.topjohnwu.magisk"] {
+            let access = classify_root_access(
+                RootMarkerProbe::Absent,
+                Some(&packages(&["com.android.settings", package])),
+            );
+
+            assert_eq!(access.state, RootAccessState::Detected);
+            assert_eq!(access.evidence, Some("magisk_package"));
+        }
+    }
+
+    #[test]
+    fn absent_active_signals_are_clean_even_when_stale_data_exists_elsewhere() {
+        let access = classify_root_access(
+            RootMarkerProbe::Absent,
+            Some(&packages(&["com.android.settings"])),
+        );
+
+        assert_eq!(access.state, RootAccessState::NotDetected);
+        assert_eq!(access.evidence, None);
+    }
+
+    #[test]
+    fn incomplete_root_evidence_stays_unknown() {
+        assert_eq!(
+            classify_root_access(RootMarkerProbe::Unknown, Some(&packages(&[]))).state,
+            RootAccessState::Unknown,
+        );
+        assert_eq!(
+            classify_root_access(RootMarkerProbe::Absent, None).state,
+            RootAccessState::Unknown,
+        );
+    }
+
+    #[test]
+    fn active_root_is_serialized_and_blocks_only_known_games() {
+        let installed = packages(&[
+            "com.android.settings",
+            "com.android.vending",
+            "com.axlebolt.standoff2",
+        ]);
+        let report = CompatibilityReport::from_probe(ProbeData {
+            host_arch: "x86_64".to_owned(),
+            waydroid_running: true,
+            android_version: Some("13".to_owned()),
+            primary_abi: Some("x86_64".to_owned()),
+            abi_list: packages(&["x86_64", "arm64-v8a"]),
+            native_bridge: Some("libhoudini.so".to_owned()),
+            arm_translation: Some(true),
+            play_store: Some(true),
+            installed_packages: Some(&installed),
+            root_marker: RootMarkerProbe::Present,
+        });
+
+        assert_eq!(report.health(), "action_required");
+        assert_eq!(report.as_json()["rootAccess"]["state"], "detected");
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.code == "android-root-detected"));
+        let error = report
+            .ensure_known_game_launch_ready("com.axlebolt.standoff2")
+            .unwrap_err();
+        assert!(error.to_string().contains("Magisk"));
+        assert!(report
+            .ensure_known_game_launch_ready("com.example.custom")
+            .is_ok());
     }
 }
