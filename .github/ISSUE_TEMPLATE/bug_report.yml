@@ -1,0 +1,105 @@
+name: Bug report
+description: Report a reproducible Wroid or Waydroid integration problem
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Wroid. Please remove secrets, credentials, account data, and private paths from logs before posting them.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the problem and what you expected instead.
+      placeholder: "Wroid ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start ...
+        2. Select ...
+        3. Launch ...
+        4. Observe ...
+    validations:
+      required: true
+
+  - type: input
+    id: wroid
+    attributes:
+      label: Wroid version / commit
+      placeholder: "commit SHA or version"
+    validations:
+      required: true
+
+  - type: input
+    id: distro
+    attributes:
+      label: Linux distribution
+      placeholder: "e.g. CachyOS, Arch Linux, Fedora"
+    validations:
+      required: true
+
+  - type: input
+    id: kernel
+    attributes:
+      label: Kernel
+      placeholder: "uname -r"
+    validations:
+      required: true
+
+  - type: input
+    id: desktop
+    attributes:
+      label: Desktop environment / compositor
+      placeholder: "e.g. KDE Plasma 6 / KWin Wayland"
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver
+      placeholder: "e.g. AMD RX 6600 XT / Mesa ..."
+    validations:
+      required: true
+
+  - type: input
+    id: waydroid
+    attributes:
+      label: Waydroid version
+      placeholder: "waydroid --version"
+    validations:
+      required: true
+
+  - type: input
+    id: package
+    attributes:
+      label: Android package / game
+      placeholder: "e.g. com.tencent.ig (if relevant)"
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Wroid diagnostics
+      description: Paste relevant `wroid compatibility`, `wroid performance`, or session output. Remove personal/private data first.
+      render: shell
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Screenshots, logs, hardware details, or anything else useful.
+
+  - type: checkboxes
+    id: security
+    attributes:
+      label: Security check
+      options:
+        - label: This is not a suspected security vulnerability. Security issues should be reported privately according to SECURITY.md.
+          required: true
