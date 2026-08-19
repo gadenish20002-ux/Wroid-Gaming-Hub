@@ -2268,18 +2268,9 @@ mod tests {
 
     #[test]
     fn package_launch_bypasses_full_android_desktop() {
-        assert_eq!(
-            android_open_action(true, true),
-            AndroidOpenAction::Package
-        );
-        assert_eq!(
-            android_open_action(false, true),
-            AndroidOpenAction::Package
-        );
-        assert_eq!(
-            android_open_action(true, false),
-            AndroidOpenAction::FullUi
-        );
+        assert_eq!(android_open_action(true, true), AndroidOpenAction::Package);
+        assert_eq!(android_open_action(false, true), AndroidOpenAction::Package);
+        assert_eq!(android_open_action(true, false), AndroidOpenAction::FullUi);
         assert_eq!(android_open_action(false, false), AndroidOpenAction::None);
     }
 
