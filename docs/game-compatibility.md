@@ -91,3 +91,9 @@ writable game storage. Wroid recommends at least 40 GiB free for all four games
 and their downloadable resources, and marks less than 8 GiB critical. Storage
 is advisory for already installed games, so low space never hides an existing
 launch action.
+
+The same read-only probe reports whether the data directory is on Btrfs with
+copy-on-write enabled. CoW can amplify Android's write-heavy cold-start I/O, so
+Wroid shows it as a latency warning after capacity checks. Wroid deliberately
+does not change inode flags or migrate an existing Android data directory;
+storage optimization remains an explicit administrator operation.
