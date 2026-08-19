@@ -9,7 +9,8 @@ use gtk::glib::{self, Cast, ControlFlow, Propagation};
 use gtk::prelude::*;
 use webkit2gtk::{
     NavigationPolicyDecision, NavigationPolicyDecisionExt, PermissionRequestExt, PolicyDecisionExt,
-    PolicyDecisionType, SettingsExt as WebKitSettingsExt, URIRequestExt, WebView, WebViewExt,
+    PolicyDecisionType, SettingsExt as WebKitSettingsExt, URIRequestExt,
+    UserMediaPermissionRequest, UserMediaPermissionRequestExt, WebView, WebViewExt,
 };
 
 use super::local_web_app::{LocalOrigin, LocalWebApp};
@@ -182,7 +183,17 @@ fn configure_webview(webview: &WebView, origin: &LocalOrigin) {
     webview.connect_create(|_, _| None);
     webview.connect_context_menu(|_, _, _, _| true);
     webview.connect_permission_request(|_, request| {
-        request.deny();
+        let user_media = request
+            .clone()
+            .dynamic_cast::<UserMediaPermissionRequest>()
+            .ok();
+        if user_media.as_ref().is_some_and(|request| {
+            allow_user_media(request.is_for_video_device(), request.is_for_audio_device())
+        }) {
+            request.allow();
+        } else {
+            request.deny();
+        }
         true
     });
 
@@ -211,6 +222,10 @@ fn configure_webview(webview: &WebView, origin: &LocalOrigin) {
         }
         true
     });
+}
+
+fn allow_user_media(video: bool, audio: bool) -> bool {
+    video && !audio
 }
 
 fn show_error_dialog(
@@ -264,8 +279,8 @@ mod tests {
     use anyhow::anyhow;
 
     use super::{
-        application_flags, finish_shell_session, navigation_decision, NavigationDecision,
-        CONTROLS_WINDOW, HUB_WINDOW,
+        allow_user_media, application_flags, finish_shell_session, navigation_decision,
+        NavigationDecision, CONTROLS_WINDOW, HUB_WINDOW,
     };
     use crate::commands::local_web_app::{LocalOrigin, LocalWebApp};
 
@@ -301,6 +316,14 @@ mod tests {
             navigation_decision(&origin, "http://127.0.0.1:37613/", true),
             NavigationDecision::Block
         );
+    }
+
+    #[test]
+    fn permission_policy_allows_only_silent_video_capture() {
+        assert!(allow_user_media(true, false));
+        assert!(!allow_user_media(false, false));
+        assert!(!allow_user_media(true, true));
+        assert!(!allow_user_media(false, true));
     }
 
     #[test]
