@@ -1,7 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { controlChipLabels, controlQuickStart } = require("./control-chips.js");
+const { controlChipLabels, controlQuickStart, editorActionFor } = require("./control-chips.js");
 
 assert.deepEqual(
   controlChipLabels({
@@ -24,5 +24,14 @@ assert.deepEqual(
   }),
   ["0 layers", "2 taps", "0 holds", "2 sticks", "no mouse aim"],
 );
+
+assert.equal(
+  editorActionFor({ installed: null, calibration: { ready: false } }),
+  "calibrate",
+  "an offline runtime must not hide calibration",
+);
+assert.equal(editorActionFor({ installed: true, calibration: { ready: false } }), "calibrate");
+assert.equal(editorActionFor({ installed: false, calibration: { ready: false } }), "edit");
+assert.equal(editorActionFor({ installed: true, calibration: { ready: true } }), "edit");
 
 console.log("hub control chip tests passed");

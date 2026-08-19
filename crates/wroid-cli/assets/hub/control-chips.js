@@ -51,5 +51,9 @@
     };
   }
 
-  return { controlChipLabels, controlQuickStart };
+  function editorActionFor(game) {
+    return game.installed !== false && !game.calibration?.ready ? "calibrate" : "edit";
+  }
+
+  return { controlChipLabels, controlQuickStart, editorActionFor };
 });

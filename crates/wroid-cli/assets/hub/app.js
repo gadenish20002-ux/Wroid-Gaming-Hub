@@ -557,7 +557,7 @@ function compatibilityFor(game) {
 }
 
 function editorActionFor(game) {
-  return game.installed === true && !game.calibration?.ready ? "calibrate" : "edit";
+  return window.WroidHubControlChips.editorActionFor(game);
 }
 
 function primaryActionFor(game) {
