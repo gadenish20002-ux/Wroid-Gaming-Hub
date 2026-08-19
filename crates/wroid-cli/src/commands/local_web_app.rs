@@ -16,6 +16,17 @@ pub(crate) enum WebUiMode {
     Headless,
 }
 
+impl WebUiMode {
+    pub(crate) fn from_flags(browser: bool, no_open: bool) -> Self {
+        match (browser, no_open) {
+            (true, false) => Self::Browser,
+            (false, true) => Self::Headless,
+            (false, false) => Self::Native,
+            (true, true) => unreachable!("clap rejects conflicting UI modes"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LocalOrigin(String);
 

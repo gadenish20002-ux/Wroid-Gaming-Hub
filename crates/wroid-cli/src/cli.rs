@@ -67,10 +67,13 @@ pub(crate) enum Commands {
         #[arg(long)]
         device: PathBuf,
     },
-    /// Open the Wroid desktop gaming hub in the default browser.
+    /// Open the Wroid desktop gaming hub in a native desktop window.
     Hub {
         #[arg(long, default_value_t = 0)]
         port: u16,
+        /// Open the Hub in the default browser instead of its native window.
+        #[arg(long, conflicts_with = "no_open")]
+        browser: bool,
         #[arg(long)]
         no_open: bool,
         #[arg(long)]
@@ -259,6 +262,9 @@ pub(crate) enum ProfileCommand {
         path: PathBuf,
         #[arg(long, default_value_t = 0)]
         port: u16,
+        /// Open Controls Studio in the default browser instead of its native window.
+        #[arg(long, conflicts_with = "no_open")]
+        browser: bool,
         #[arg(long)]
         no_open: bool,
     },
@@ -969,6 +975,7 @@ mod tests {
         let ProfileCommand::EditV2 {
             path,
             port,
+            browser,
             no_open,
         } = command
         else {
@@ -977,7 +984,56 @@ mod tests {
 
         assert_eq!(path, PathBuf::from("profiles/examples/brawlstars-v2.json"));
         assert_eq!(port, 9876);
+        assert!(!browser);
         assert!(no_open);
+    }
+
+    #[test]
+    fn hub_defaults_to_native_window_mode() {
+        let cli = Cli::try_parse_from(["wroid", "hub"]).unwrap();
+
+        let Commands::Hub {
+            browser, no_open, ..
+        } = cli.command
+        else {
+            panic!("expected hub command");
+        };
+
+        assert!(!browser);
+        assert!(!no_open);
+    }
+
+    #[test]
+    fn hub_browser_and_headless_modes_conflict() {
+        let error = Cli::try_parse_from(["wroid", "hub", "--browser", "--no-open"])
+            .unwrap_err();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn editor_accepts_explicit_browser_mode() {
+        let cli = Cli::try_parse_from([
+            "wroid",
+            "profile",
+            "edit-v2",
+            "profile.json",
+            "--browser",
+        ])
+        .unwrap();
+
+        let Commands::Profile {
+            command:
+                ProfileCommand::EditV2 {
+                    browser, no_open, ..
+                },
+        } = cli.command
+        else {
+            panic!("expected edit-v2 command");
+        };
+
+        assert!(browser);
+        assert!(!no_open);
     }
 
     #[test]
@@ -995,6 +1051,7 @@ mod tests {
 
         let Commands::Hub {
             port,
+            browser,
             no_open,
             profiles_dir,
         } = cli.command
@@ -1003,6 +1060,7 @@ mod tests {
         };
 
         assert_eq!(port, 9001);
+        assert!(!browser);
         assert!(no_open);
         assert_eq!(profiles_dir, Some(PathBuf::from("/tmp/wroid-games")));
     }

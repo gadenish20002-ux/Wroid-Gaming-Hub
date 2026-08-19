@@ -53,15 +53,12 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
         Commands::ConfigureWaydroidGpu { device } => graphics::configure_waydroid_gpu(&device),
         Commands::Hub {
             port,
+            browser,
             no_open,
             profiles_dir,
         } => hub::run_hub(
             port,
-            if no_open {
-                WebUiMode::Headless
-            } else {
-                WebUiMode::Browser
-            },
+            WebUiMode::from_flags(browser, no_open),
             profiles_dir,
         ),
         Commands::Doctor { backend } => doctor::doctor(input_executor, backend),
@@ -70,15 +67,12 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
             ProfileCommand::EditV2 {
                 path,
                 port,
+                browser,
                 no_open,
             } => editor::edit_v2(
                 path,
                 port,
-                if no_open {
-                    WebUiMode::Headless
-                } else {
-                    WebUiMode::Browser
-                },
+                WebUiMode::from_flags(browser, no_open),
             ),
             ProfileCommand::Example { path } => profile::write_example_profile(path),
             ProfileCommand::New {
