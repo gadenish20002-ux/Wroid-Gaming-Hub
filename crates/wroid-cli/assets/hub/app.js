@@ -30,6 +30,9 @@ const elements = {
   sessionPeakContacts: document.querySelector("#session-peak-contacts"),
   editButton: document.querySelector("#edit-button"),
   controlsEditButton: document.querySelector("#controls-edit-button"),
+  quickStartTitle: document.querySelector("#quick-start-title"),
+  quickStartBindings: document.querySelector("#quick-start-bindings"),
+  quickStartSafety: document.querySelector("#quick-start-safety"),
   gameGrid: document.querySelector("#game-grid"),
   runtimePill: document.querySelector("#runtime-pill"),
   runtimeLabel: document.querySelector("#runtime-label"),
@@ -638,6 +641,7 @@ function renderHero() {
   elements.heroMonogram.textContent = marks[game.kind] || "W";
   elements.gameCode.textContent = `${game.kind.toUpperCase().slice(0, 3)} / ${String(index + 1).padStart(2, "0")}`;
   elements.aimMode.textContent = game.controls.mouseAim ? "relative mouse" : game.controls.joysticks > 1 ? "dual joystick" : "profile-defined";
+  renderControlQuickStart(game);
   const graphicsBlocker = hubState.system.graphics.findings.find(
     (finding) => finding.severity === "blocking",
   );
@@ -703,7 +707,7 @@ function renderHero() {
     elements.launchEyebrow.textContent = game.installed === true ? "START SESSION" : "START + VERIFY";
     elements.launchLabel.textContent = game.installed === true ? "Launch game" : "Launch and verify";
     elements.launchNote.textContent = game.installed === true
-      ? "Gameplay stays unprivileged; the verified helper manages only the temporary input bridge."
+      ? "Fullscreen FSR scaling through Gamescope when available; F12 releases input and Ctrl+Esc stops the session."
       : "Waydroid is stopped; Wroid will start it and verify the package before gameplay.";
   }
   const editorAction = editorActionFor(game);
@@ -717,6 +721,15 @@ function renderHero() {
   elements.controlsEditButton.innerHTML = editorAction === "calibrate"
     ? "◉ Open game & calibrate"
     : "⌖ Edit selected profile";
+}
+
+function renderControlQuickStart(game) {
+  const quickStart = window.WroidHubControlChips.controlQuickStart(game);
+  elements.quickStartTitle.textContent = game.controls.mouseAim
+    ? "Keyboard + precision mouse"
+    : "Keyboard twin-stick map";
+  elements.quickStartBindings.replaceChildren(...quickStart.primary.map(label));
+  elements.quickStartSafety.replaceChildren(...quickStart.safety.map(label));
 }
 
 function renderLastGameSession(game, bridge) {
