@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -16,6 +16,54 @@ const DEFAULT_ANDROID_USER_ID: u32 = 0;
 const WAYDROID_WIDTH_PROPERTY: &str = "persist.waydroid.width";
 const WAYDROID_HEIGHT_PROPERTY: &str = "persist.waydroid.height";
 const MAX_WAYDROID_DIMENSION: u32 = 9_999;
+const GAMESCOPE_PATH: &str = "/usr/bin/gamescope";
+const WAYDROID_PATH: &str = "/usr/bin/waydroid";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaydroidPresentation {
+    Direct,
+    Gamescope { width: u32, height: u32 },
+}
+
+pub fn presentation_for_game(
+    launch_package: bool,
+    gamescope_available: bool,
+    width: u32,
+    height: u32,
+) -> WaydroidPresentation {
+    if launch_package && gamescope_available {
+        WaydroidPresentation::Gamescope { width, height }
+    } else {
+        WaydroidPresentation::Direct
+    }
+}
+
+pub fn gamescope_is_available() -> bool {
+    fs::metadata(GAMESCOPE_PATH)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+fn gamescope_arguments(width: u32, height: u32) -> Vec<OsString> {
+    vec![
+        OsString::from("-w"),
+        OsString::from(width.to_string()),
+        OsString::from("-h"),
+        OsString::from(height.to_string()),
+        OsString::from("-f"),
+        OsString::from("--expose-wayland"),
+        OsString::from("--force-windows-fullscreen"),
+        OsString::from("-S"),
+        OsString::from("fit"),
+        OsString::from("-F"),
+        OsString::from("fsr"),
+        OsString::from("--sharpness"),
+        OsString::from("5"),
+        OsString::from("--"),
+        OsString::from(WAYDROID_PATH),
+        OsString::from("session"),
+        OsString::from("start"),
+    ]
+}
 
 #[derive(Debug, Clone)]
 pub struct DesktopUser {
@@ -151,12 +199,26 @@ impl DesktopUser {
     }
 
     fn command(&self, arguments: &[&str]) -> Command {
+        let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
+        self.command_for_program("waydroid", &arguments)
+    }
+
+    fn session_command(&self, presentation: WaydroidPresentation) -> Command {
+        match presentation {
+            WaydroidPresentation::Direct => self.command(&["session", "start"]),
+            WaydroidPresentation::Gamescope { width, height } => {
+                self.command_for_program(GAMESCOPE_PATH, &gamescope_arguments(width, height))
+            }
+        }
+    }
+
+    fn command_for_program(&self, program: &str, arguments: &[OsString]) -> Command {
         let mut wayland = OsString::from("WAYLAND_DISPLAY=");
         wayland.push(&self.wayland_display);
 
         let mut command = match self.launch {
             DesktopUserLaunch::Current => {
-                let mut command = Command::new("waydroid");
+                let mut command = Command::new(program);
                 command.args(arguments);
                 command
             }
@@ -174,7 +236,7 @@ impl DesktopUser {
                         self.runtime_dir.display()
                     ))
                     .arg(&wayland)
-                    .arg("waydroid")
+                    .arg(program)
                     .args(arguments);
                 command
             }
@@ -223,6 +285,7 @@ fn effective_uid() -> io::Result<u32> {
 pub struct DesktopWaydroidSession {
     child: Child,
     user: DesktopUser,
+    presentation: WaydroidPresentation,
     active: bool,
     ready_users: Vec<u32>,
     readiness: Receiver<u32>,
@@ -235,13 +298,30 @@ impl DesktopWaydroidSession {
     }
 
     pub fn start(user: DesktopUser) -> io::Result<Self> {
+        Self::start_presented(user, WaydroidPresentation::Direct)
+    }
+
+    pub fn start_presented(
+        user: DesktopUser,
+        presentation: WaydroidPresentation,
+    ) -> io::Result<Self> {
         println!(
             "Starting Waydroid session as desktop user {} on {}...",
             user.name(),
             user.wayland_display().to_string_lossy()
         );
+        match presentation {
+            WaydroidPresentation::Direct => {
+                println!("Game presentation: direct Waydroid window.");
+            }
+            WaydroidPresentation::Gamescope { width, height } => {
+                println!(
+                    "Game presentation: Gamescope fullscreen with FSR ({width}x{height} render target)."
+                );
+            }
+        }
         let mut child = user
-            .command(&["session", "start"])
+            .session_command(presentation)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -257,6 +337,7 @@ impl DesktopWaydroidSession {
         let mut session = Self {
             child,
             user,
+            presentation,
             active: true,
             ready_users: Vec::new(),
             readiness,
@@ -311,7 +392,7 @@ impl DesktopWaydroidSession {
 
     pub fn restart(&mut self) -> io::Result<()> {
         self.stop()?;
-        let replacement = Self::start(self.user.clone())?;
+        let replacement = Self::start_presented(self.user.clone(), self.presentation)?;
         *self = replacement;
         Ok(())
     }
@@ -851,6 +932,52 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
+
+    #[test]
+    fn gamescope_arguments_preserve_the_render_preset_and_aspect_ratio() {
+        assert_eq!(
+            gamescope_arguments(1280, 720),
+            [
+                "-w",
+                "1280",
+                "-h",
+                "720",
+                "-f",
+                "--expose-wayland",
+                "--force-windows-fullscreen",
+                "-S",
+                "fit",
+                "-F",
+                "fsr",
+                "--sharpness",
+                "5",
+                "--",
+                "/usr/bin/waydroid",
+                "session",
+                "start",
+            ]
+            .map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn package_game_uses_fullscreen_presentation_when_gamescope_is_available() {
+        assert_eq!(
+            presentation_for_game(true, true, 1280, 720),
+            WaydroidPresentation::Gamescope {
+                width: 1280,
+                height: 720
+            }
+        );
+        assert_eq!(
+            presentation_for_game(false, true, 1280, 720),
+            WaydroidPresentation::Direct
+        );
+        assert_eq!(
+            presentation_for_game(true, false, 1280, 720),
+            WaydroidPresentation::Direct
+        );
+    }
 
     #[derive(Default)]
     struct FakeProperties {

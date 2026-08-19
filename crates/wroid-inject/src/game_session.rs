@@ -9,9 +9,10 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::{
-    ensure_container_stopped, ensure_root, remove_default_bridge, wait_for_android_input_device,
-    BridgeBrokerClient, DesktopUser, DesktopWaydroidSession, DeviceConfig, InputDeviceNode,
-    InstalledWaydroidBridge, UinputTouchInjector, WaydroidBridgeLease, WROID_TOUCHSCREEN_NAME,
+    ensure_container_stopped, ensure_root, gamescope_is_available, presentation_for_game,
+    remove_default_bridge, wait_for_android_input_device, BridgeBrokerClient, DesktopUser,
+    DesktopWaydroidSession, DeviceConfig, InputDeviceNode, InstalledWaydroidBridge,
+    UinputTouchInjector, WaydroidBridgeLease, WaydroidPresentation, WROID_TOUCHSCREEN_NAME,
 };
 use wroid_core::profile_v2::{InputV2, JoystickMode, ProfileV2};
 use wroid_core::{Point, Resolution};
@@ -166,7 +167,19 @@ pub fn run_game_session(mut options: GameSessionOptions) -> GameSessionResult<Ga
         SessionBridge::Broker(broker)
     };
     let desktop_user = DesktopUser::from_session_environment()?;
-    let mut waydroid = DesktopWaydroidSession::start(desktop_user)?;
+    let gamescope_available = gamescope_is_available();
+    let presentation = presentation_for_game(
+        options.launch_package,
+        gamescope_available,
+        options.width,
+        options.height,
+    );
+    if options.launch_package && presentation == WaydroidPresentation::Direct {
+        eprintln!(
+            "Fullscreen scaling unavailable: /usr/bin/gamescope is missing or not executable; using a direct Waydroid window."
+        );
+    }
+    let mut waydroid = DesktopWaydroidSession::start_presented(desktop_user, presentation)?;
 
     let session_result = (|| -> GameSessionResult<GameSessionReport> {
         waydroid.wait_until_android_ready()?;
