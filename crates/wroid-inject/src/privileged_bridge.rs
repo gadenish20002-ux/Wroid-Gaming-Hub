@@ -5,8 +5,8 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
-use std::thread::sleep;
-use std::time::Duration;
+use std::thread::{self, sleep};
+use std::time::{Duration, Instant};
 
 use crate::{
     ensure_root, remove_default_bridge, validate_wroid_touchscreen_node, InputDeviceNode,
@@ -20,6 +20,8 @@ const VERIFY_ANDROID_INPUT_COMMAND: &[u8] = b"VERIFY_ANDROID_INPUT\n";
 const ANDROID_INPUT_READY_LINE: &str = "WROID_ANDROID_INPUT_READY 1";
 const MAX_HELPER_COMMAND_BYTES: u64 = 64;
 const MAX_ANDROID_SETTINGS_ERROR_CHARS: usize = 4 * 1024;
+const ANDROID_SETTINGS_TIMEOUT: Duration = Duration::from_secs(5);
+const ANDROID_SETTINGS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const ANDROID_INPUT_ATTEMPTS: usize = 60;
 const ANDROID_INPUT_INTERVAL: Duration = Duration::from_millis(500);
 const LXC_PATH: &str = "/var/lib/waydroid/lxc";
@@ -491,8 +493,79 @@ fn disable_android_pointer_diagnostics_with(
     disable_pointer_location()
 }
 
-fn run_fixed_android_setting_command(name: &str, mut command: Command) -> io::Result<()> {
-    let output = command.output()?;
+fn run_fixed_android_setting_command(name: &str, command: Command) -> io::Result<()> {
+    run_fixed_android_setting_command_with_timeout(name, command, ANDROID_SETTINGS_TIMEOUT)
+}
+
+fn run_fixed_android_setting_command_with_timeout(
+    name: &str,
+    mut command: Command,
+    timeout: Duration,
+) -> io::Result<()> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    let mut child = command.spawn().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("failed to start fixed Android pointer diagnostic cleanup for {name}: {error}"),
+        )
+    })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        io::Error::other(format!(
+            "stdout unavailable while disabling Android setting {name}"
+        ))
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        io::Error::other(format!(
+            "stderr unavailable while disabling Android setting {name}"
+        ))
+    })?;
+    let stdout_reader = thread::spawn(move || read_android_setting_output(stdout));
+    let stderr_reader = thread::spawn(move || read_android_setting_output(stderr));
+    let started = Instant::now();
+
+    let status = loop {
+        if stdout_reader.is_finished() && stderr_reader.is_finished() {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => {}
+                Err(error) => {
+                    kill_android_setting_process_group(&mut child);
+                    let _ = stdout_reader.join();
+                    let _ = stderr_reader.join();
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!("failed to poll Android setting cleanup for {name}: {error}"),
+                    ));
+                }
+            }
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            kill_android_setting_process_group(&mut child);
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "timed out after {:.2} seconds while disabling Android setting {name}",
+                    timeout.as_secs_f64()
+                ),
+            ));
+        }
+        sleep(ANDROID_SETTINGS_POLL_INTERVAL.min(timeout - elapsed));
+    };
+
+    let stdout = join_android_setting_output(stdout_reader, name, "stdout")?;
+    let stderr = join_android_setting_output(stderr_reader, name, "stderr")?;
+    let output = Output {
+        status,
+        stdout,
+        stderr,
+    };
     if output.status.success() {
         return Ok(());
     }
@@ -505,6 +578,51 @@ fn run_fixed_android_setting_command(name: &str, mut command: Command) -> io::Re
         output.status,
         detail.trim()
     )))
+}
+
+fn read_android_setting_output(mut stream: impl Read) -> io::Result<Vec<u8>> {
+    let mut retained = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    loop {
+        let count = stream.read(&mut buffer)?;
+        if count == 0 {
+            return Ok(retained);
+        }
+        let remaining = MAX_ANDROID_SETTINGS_ERROR_CHARS.saturating_sub(retained.len());
+        retained.extend_from_slice(&buffer[..remaining.min(count)]);
+    }
+}
+
+fn join_android_setting_output(
+    reader: thread::JoinHandle<io::Result<Vec<u8>>>,
+    name: &str,
+    label: &str,
+) -> io::Result<Vec<u8>> {
+    reader
+        .join()
+        .map_err(|_| {
+            io::Error::other(format!(
+                "{label} reader panicked for Android setting {name}"
+            ))
+        })?
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("failed to read {label} while disabling Android setting {name}: {error}"),
+            )
+        })
+}
+
+fn kill_android_setting_process_group(child: &mut Child) {
+    if let Ok(pid) = i32::try_from(child.id()) {
+        // SAFETY: the child owns a new process group whose ID is its PID.
+        if unsafe { libc::kill(-pid, libc::SIGKILL) } != 0 {
+            let _ = child.kill();
+        }
+    } else {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
 }
 
 fn request_android_input_verification<W: Write, R: BufRead>(
@@ -823,6 +941,55 @@ mod tests {
         .unwrap();
 
         assert_eq!(*calls.borrow(), ["show_touches", "pointer_location"]);
+    }
+
+    #[test]
+    fn pointer_setting_timeout_is_bounded_and_names_the_setting() {
+        let mut command = Command::new("/usr/bin/sh");
+        command.args(["-c", "sleep 30"]);
+        let started = std::time::Instant::now();
+
+        let error = run_fixed_android_setting_command_with_timeout(
+            "pointer_location",
+            command,
+            Duration::from_millis(50),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("pointer_location"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn pointer_setting_timeout_kills_descendants_holding_output_pipes() {
+        let mut command = Command::new("/usr/bin/sh");
+        command.args(["-c", "sleep 30 &"]);
+        let started = std::time::Instant::now();
+
+        let error = run_fixed_android_setting_command_with_timeout(
+            "show_touches",
+            command,
+            Duration::from_millis(50),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn pointer_setting_spawn_error_names_the_setting() {
+        let command = Command::new("/definitely/missing/wroid-setting-command");
+
+        let error = run_fixed_android_setting_command_with_timeout(
+            "show_touches",
+            command,
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("show_touches"));
     }
 
     #[test]

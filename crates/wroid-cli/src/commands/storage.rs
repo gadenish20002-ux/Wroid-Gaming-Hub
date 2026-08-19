@@ -13,9 +13,21 @@ const WAYDROID_PROP: &str = "/var/lib/waydroid/waydroid.prop";
 const FULL_DECK_RECOMMENDED_BYTES: u64 = 40 * 1024 * 1024 * 1024;
 const CRITICAL_AVAILABLE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const BTRFS_SUPER_MAGIC: libc::c_long = 0x9123_683e;
-const FS_IOC_GETFLAGS: libc::c_ulong = 0x8008_6601;
 const FS_NOCOW_FL: libc::c_long = 0x0080_0000;
 type FilesystemFlags = libc::c_long;
+const IOC_NRSHIFT: u32 = 0;
+const IOC_TYPESHIFT: u32 = 8;
+const IOC_SIZESHIFT: u32 = 16;
+const IOC_DIRSHIFT: u32 = 30;
+const IOC_READ: libc::c_ulong = 2;
+const FS_IOC_GETFLAGS: libc::c_ulong = linux_ior(b'f', 1, std::mem::size_of::<FilesystemFlags>());
+
+const fn linux_ior(kind: u8, number: u8, size: usize) -> libc::c_ulong {
+    (IOC_READ << IOC_DIRSHIFT)
+        | ((kind as libc::c_ulong) << IOC_TYPESHIFT)
+        | ((number as libc::c_ulong) << IOC_NRSHIFT)
+        | ((size as libc::c_ulong) << IOC_SIZESHIFT)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CopyOnWriteState {
@@ -139,32 +151,43 @@ fn filesystem_capacity(path: &Path) -> Result<(u64, u64)> {
 
 fn copy_on_write_state(path: &Path) -> CopyOnWriteState {
     let Ok(encoded) = CString::new(path.as_os_str().as_bytes()) else {
-        return CopyOnWriteState::Unknown;
+        return classify_copy_on_write_probe(None, None);
     };
     let mut stats = MaybeUninit::<libc::statfs>::uninit();
     // SAFETY: encoded is NUL-terminated and stats points to writable storage.
     if unsafe { libc::statfs(encoded.as_ptr(), stats.as_mut_ptr()) } != 0 {
-        return CopyOnWriteState::Unknown;
+        return classify_copy_on_write_probe(None, None);
     }
     // SAFETY: statfs initialized stats after returning success.
     let stats = unsafe { stats.assume_init() };
     if stats.f_type != BTRFS_SUPER_MAGIC {
-        return CopyOnWriteState::NotBtrfs;
+        return classify_copy_on_write_probe(Some(stats.f_type), None);
     }
 
     let Ok(directory) = File::open(path) else {
-        return CopyOnWriteState::Unknown;
+        return classify_copy_on_write_probe(Some(stats.f_type), None);
     };
     let mut flags: FilesystemFlags = 0;
     // SAFETY: directory is a live read-only descriptor and flags points to a
     // writable long expected by Linux _IOR('f', 1, long).
     if unsafe { libc::ioctl(directory.as_raw_fd(), FS_IOC_GETFLAGS, &mut flags) } != 0 {
-        return CopyOnWriteState::Unknown;
+        return classify_copy_on_write_probe(Some(stats.f_type), None);
     }
-    if flags & FS_NOCOW_FL != 0 {
-        CopyOnWriteState::Disabled
-    } else {
-        CopyOnWriteState::Enabled
+    classify_copy_on_write_probe(Some(stats.f_type), Some(flags))
+}
+
+fn classify_copy_on_write_probe(
+    filesystem_type: Option<libc::c_long>,
+    inode_flags: Option<FilesystemFlags>,
+) -> CopyOnWriteState {
+    match filesystem_type {
+        None => CopyOnWriteState::Unknown,
+        Some(kind) if kind != BTRFS_SUPER_MAGIC => CopyOnWriteState::NotBtrfs,
+        Some(_) => match inode_flags {
+            None => CopyOnWriteState::Unknown,
+            Some(flags) if flags & FS_NOCOW_FL != 0 => CopyOnWriteState::Disabled,
+            Some(_) => CopyOnWriteState::Enabled,
+        },
     }
 }
 
@@ -288,13 +311,46 @@ mod tests {
 
     #[test]
     fn getflags_buffer_matches_linux_ioctl_abi() {
-        const IOC_SIZE_SHIFT: u32 = 16;
         const IOC_SIZE_MASK: libc::c_ulong = 0x3fff;
-        let encoded_size = (FS_IOC_GETFLAGS >> IOC_SIZE_SHIFT) & IOC_SIZE_MASK;
+        let encoded_size = (FS_IOC_GETFLAGS >> IOC_SIZESHIFT) & IOC_SIZE_MASK;
 
         assert_eq!(
             encoded_size as usize,
             std::mem::size_of::<FilesystemFlags>()
+        );
+    }
+
+    #[test]
+    fn copy_on_write_probe_classifies_filesystem_and_inode_results() {
+        assert_eq!(
+            classify_copy_on_write_probe(None, None),
+            CopyOnWriteState::Unknown
+        );
+        assert_eq!(
+            classify_copy_on_write_probe(Some(0x0102_1994), None),
+            CopyOnWriteState::NotBtrfs
+        );
+        assert_eq!(
+            classify_copy_on_write_probe(Some(BTRFS_SUPER_MAGIC), None),
+            CopyOnWriteState::Unknown
+        );
+        assert_eq!(
+            classify_copy_on_write_probe(Some(BTRFS_SUPER_MAGIC), Some(FS_NOCOW_FL)),
+            CopyOnWriteState::Disabled
+        );
+        assert_eq!(
+            classify_copy_on_write_probe(Some(BTRFS_SUPER_MAGIC), Some(0)),
+            CopyOnWriteState::Enabled
+        );
+    }
+
+    #[test]
+    fn copy_on_write_probe_reads_a_real_directory_without_mutating_it() {
+        let directory = tempfile::tempdir().unwrap();
+
+        assert_ne!(
+            copy_on_write_state(directory.path()),
+            CopyOnWriteState::Unknown
         );
     }
 }
