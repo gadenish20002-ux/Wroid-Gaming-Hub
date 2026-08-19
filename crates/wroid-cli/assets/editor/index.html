@@ -114,6 +114,13 @@
       </aside>
 
       <main class="workspace">
+        <section class="setup-guide" id="setupGuide" aria-label="Keyboard and mouse setup">
+          <div class="setup-guide-label">
+            <small>QUICK SETUP</small>
+            <strong>PLAY READY</strong>
+          </div>
+          <div class="setup-guide-steps" id="setupGuideSteps"></div>
+        </section>
         <div class="workspace-toolbar">
           <div class="viewport-label">
             <span class="live-tag">LIVE MAP</span>
@@ -123,7 +130,7 @@
             <input id="screenshotInput" type="file" accept="image/*" hidden>
             <span class="background-state" id="backgroundState">NO BACKGROUND</span>
             <button class="tool-button capture-button" id="captureButton" type="button">
-              <span>◉</span> Live align
+              <span>01</span> Capture game window
             </button>
             <button class="tool-button" id="screenshotButton" type="button">
               <span>▧</span> Import image
@@ -132,7 +139,7 @@
               <span>×</span> Clear
             </button>
             <button class="tool-button test-button" id="testButton" type="button" aria-pressed="false">
-              <span>⌁</span> Test inputs
+              <span>03</span> Test bindings
             </button>
             <button class="tool-button is-active" id="gridButton" type="button" aria-pressed="true">
               <span>⌗</span> Snap 0.5%
@@ -237,7 +244,7 @@
             Run map in Waydroid
           </button>
           <button class="button button-ghost wide" id="duplicateButton" type="button">Duplicate binding</button>
-          <button class="button button-close wide" id="closeButton" type="button">Save &amp; close studio</button>
+          <button class="button button-close wide" id="closeButton" type="button">04 · Save &amp; play</button>
         </div>
       </aside>
 
@@ -252,6 +259,7 @@
 
     <div class="toast-stack" id="toastStack" aria-live="polite"></div>
     <script src="/profile-model.js"></script>
+    <script src="/setup-guide.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

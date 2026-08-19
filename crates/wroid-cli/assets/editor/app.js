@@ -2,6 +2,7 @@
   "use strict";
 
   const Model = window.WroidProfileModel;
+  const Guide = window.WroidSetupGuide;
   const token = new URLSearchParams(window.location.search).get("token") || "";
   const api = (path) => `${path}?token=${encodeURIComponent(token)}`;
   const supportedKeys = Model.supportedKeys;
@@ -15,6 +16,8 @@
   const elements = {
     boot: document.querySelector("#bootScreen"),
     shell: document.querySelector("#appShell"),
+    setupGuide: document.querySelector("#setupGuide"),
+    setupGuideSteps: document.querySelector("#setupGuideSteps"),
     profileName: document.querySelector("#profileName"),
     packageName: document.querySelector("#packageName"),
     orientation: document.querySelector("#orientation"),
@@ -166,8 +169,8 @@
     elements.testButton.classList.toggle("is-active", state.testing);
     elements.testButton.setAttribute("aria-pressed", String(state.testing));
     elements.testButton.innerHTML = state.testing
-      ? "<span>●</span> Testing live"
-      : "<span>⌁</span> Test inputs";
+      ? "<span>03</span> Testing bindings"
+      : "<span>03</span> Test bindings";
     elements.inputTestHud.hidden = !state.testing;
 
     const active = activeTestBindings();
@@ -215,6 +218,7 @@
     state.testing = enabled;
     resetTestInputState();
     updateTestPreview();
+    renderSetupGuide();
     if (enabled) toast("Input preview armed. Press keys and mouse buttons over the game surface.");
   }
 
@@ -291,6 +295,58 @@
     updateStatus();
   }
 
+  function renderSetupGuide() {
+    if (!Guide || !elements.setupGuideSteps) return;
+    const guideSteps = Guide.steps({
+      backgroundSaved: state.backgroundSaved,
+      selected: state.selected,
+      testing: state.testing,
+      dirty: state.dirty,
+    });
+    elements.setupGuideSteps.replaceChildren();
+    guideSteps.forEach((step, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.setupAction = step.action;
+      button.className = `setup-step is-${step.state}`;
+      if (step.state === "active") button.setAttribute("aria-current", "step");
+
+      const number = document.createElement("span");
+      number.className = "setup-step-index";
+      number.textContent = step.state === "done" ? "✓" : String(index + 1).padStart(2, "0");
+      const label = document.createElement("strong");
+      label.textContent = step.label;
+      const detail = document.createElement("small");
+      detail.textContent = step.detail;
+      button.append(number, label, detail);
+      elements.setupGuideSteps.append(button);
+    });
+  }
+
+  function activateSetupStep(action) {
+    if (action === "capture") {
+      captureWindow();
+      return;
+    }
+    if (action === "place") {
+      if (!state.backgroundSaved) {
+        captureWindow();
+        return;
+      }
+      const firstVisible = state.profile.bindings.findIndex(bindingInSelectedLayer);
+      if (firstVisible >= 0) selectBinding(firstVisible);
+      elements.inspectorBody.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      toast("Drag a marker onto the matching HUD control. Click its input field and press the key you want.");
+      return;
+    }
+    if (action === "test") {
+      setTesting(true);
+      elements.viewport.scrollIntoView({ block: "center", behavior: "smooth" });
+      return;
+    }
+    if (action === "save") saveProfile(true);
+  }
+
   function ensureSelectedLayer() {
     if (state.selectedLayer !== null && !state.profile.layers.some((layer) => layer.name === state.selectedLayer)) {
       state.selectedLayer = null;
@@ -324,6 +380,7 @@
     renderInspector();
     renderViewportMode();
     updateStatus();
+    renderSetupGuide();
   }
 
   function renderMeta() {
@@ -1060,6 +1117,7 @@
     elements.selectedStatus.innerHTML = binding
       ? `<span>SELECTED</span> ${escapeHtml(binding.name).toUpperCase()}`
       : "<span>SELECTED</span> NONE";
+    renderSetupGuide();
   }
 
   async function saveProfile(closeAfter = false) {
@@ -1300,8 +1358,8 @@
     elements.liveCalibrationCanvas.hidden = !active;
     elements.captureButton.classList.toggle("is-active", active);
     elements.captureButton.innerHTML = active
-      ? "<span>■</span> End live align"
-      : "<span>◉</span> Live align";
+      ? "<span>■</span> End window capture"
+      : "<span>01</span> Capture game window";
     elements.screenshotButton.disabled = active;
     elements.clearBackgroundButton.disabled = active;
     if (active) {
@@ -1350,12 +1408,14 @@
       elements.backgroundState.textContent = "BACKGROUND SAVED";
       elements.backgroundState.classList.add("is-saved");
       state.backgroundSaved = true;
+      renderSetupGuide();
       toast(successMessage);
       return true;
     } catch (error) {
       elements.backgroundState.textContent = "LOCAL PREVIEW";
       elements.backgroundState.classList.remove("is-saved");
       state.backgroundSaved = false;
+      renderSetupGuide();
       toast(error.message, true);
       return false;
     } finally {
@@ -1527,6 +1587,10 @@
     elements.restoreButton.addEventListener("click", loadPreviousSave);
     elements.saveButton.addEventListener("click", () => saveProfile(false));
     elements.closeButton.addEventListener("click", () => saveProfile(true));
+    elements.setupGuide.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-setup-action]");
+      if (button) activateSetupStep(button.dataset.setupAction);
+    });
     elements.liveTestButton.addEventListener("click", launchLiveTest);
     elements.resolutionSwitch.addEventListener("click", (event) => {
       const button = event.target.closest("[data-resolution]");
