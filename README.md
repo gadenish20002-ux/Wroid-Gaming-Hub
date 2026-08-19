@@ -87,6 +87,13 @@ graphical path in a desktop session and retains a visible `sudo` fallback for
 headless consoles. Subsequent game launches need no password. Readiness checks
 verify ownership, exact permissions, effective-root `--check`, and release
 contents before production play.
+
+Managed Android input readiness also disables the persisted developer overlays
+`show_touches` and `pointer_location`, so gameplay never draws click markers,
+pointer trails, or top-edge coordinates. After updating Wroid, rebuild and
+stage the release with `target/release/wroid desktop install`, then run
+`wroid helper install` once so the installed privileged helper matches it.
+
 Inspect the installations without deleting profiles:
 
 ```sh

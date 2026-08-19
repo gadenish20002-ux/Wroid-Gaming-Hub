@@ -19,6 +19,7 @@ const CLEANUP_COMMAND: &[u8] = b"CLEANUP\n";
 const VERIFY_ANDROID_INPUT_COMMAND: &[u8] = b"VERIFY_ANDROID_INPUT\n";
 const ANDROID_INPUT_READY_LINE: &str = "WROID_ANDROID_INPUT_READY 1";
 const MAX_HELPER_COMMAND_BYTES: u64 = 64;
+const MAX_ANDROID_SETTINGS_ERROR_CHARS: usize = 4 * 1024;
 const ANDROID_INPUT_ATTEMPTS: usize = 60;
 const ANDROID_INPUT_INTERVAL: Duration = Duration::from_millis(500);
 const LXC_PATH: &str = "/var/lib/waydroid/lxc";
@@ -365,6 +366,44 @@ fn android_input_probe_command() -> Command {
     )
 }
 
+fn android_show_touches_off_command() -> Command {
+    fixed_privileged_command(
+        "/usr/bin/lxc-attach",
+        &[
+            "-P",
+            LXC_PATH,
+            "-n",
+            WAYDROID_CONTAINER_NAME,
+            "--clear-env",
+            "--",
+            "/system/bin/settings",
+            "put",
+            "system",
+            "show_touches",
+            "0",
+        ],
+    )
+}
+
+fn android_pointer_location_off_command() -> Command {
+    fixed_privileged_command(
+        "/usr/bin/lxc-attach",
+        &[
+            "-P",
+            LXC_PATH,
+            "-n",
+            WAYDROID_CONTAINER_NAME,
+            "--clear-env",
+            "--",
+            "/system/bin/settings",
+            "put",
+            "system",
+            "pointer_location",
+            "0",
+        ],
+    )
+}
+
 fn android_input_unfreeze_command() -> Command {
     fixed_privileged_command(
         "/usr/bin/lxc-unfreeze",
@@ -419,6 +458,7 @@ fn wait_for_android_input_privileged() -> io::Result<()> {
         let output = android_input_probe_command().output()?;
         last_output = combined_output(&output);
         if output.status.success() && last_output.contains(WROID_TOUCHSCREEN_NAME) {
+            disable_android_pointer_diagnostics_privileged()?;
             return Ok(());
         }
         sleep(ANDROID_INPUT_INTERVAL);
@@ -429,6 +469,30 @@ fn wait_for_android_input_privileged() -> io::Result<()> {
             "Android getevent did not list {WROID_TOUCHSCREEN_NAME}; device bridge is not active\n{last_output}"
         ),
     ))
+}
+
+fn disable_android_pointer_diagnostics_privileged() -> io::Result<()> {
+    run_fixed_android_setting_command("show_touches", android_show_touches_off_command())?;
+    run_fixed_android_setting_command(
+        "pointer_location",
+        android_pointer_location_off_command(),
+    )
+}
+
+fn run_fixed_android_setting_command(name: &str, mut command: Command) -> io::Result<()> {
+    let output = command.output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = combined_output(&output)
+        .chars()
+        .take(MAX_ANDROID_SETTINGS_ERROR_CHARS)
+        .collect::<String>();
+    Err(io::Error::other(format!(
+        "failed to disable fixed Android pointer diagnostic {name} ({})\n{}",
+        output.status,
+        detail.trim()
+    )))
 }
 
 fn request_android_input_verification<W: Write, R: BufRead>(
@@ -657,6 +721,46 @@ mod tests {
 
         assert!(waydroid_status_is_frozen("FROZEN\n"));
         assert!(!waydroid_status_is_frozen("RUNNING\n"));
+
+        let show_touches = android_show_touches_off_command();
+        assert_eq!(show_touches.get_program(), "/usr/bin/lxc-attach");
+        assert_eq!(
+            show_touches.get_args().collect::<Vec<_>>(),
+            [
+                "-P",
+                "/var/lib/waydroid/lxc",
+                "-n",
+                "waydroid",
+                "--clear-env",
+                "--",
+                "/system/bin/settings",
+                "put",
+                "system",
+                "show_touches",
+                "0",
+            ]
+            .map(std::ffi::OsStr::new)
+        );
+
+        let pointer_location = android_pointer_location_off_command();
+        assert_eq!(pointer_location.get_program(), "/usr/bin/lxc-attach");
+        assert_eq!(
+            pointer_location.get_args().collect::<Vec<_>>(),
+            [
+                "-P",
+                "/var/lib/waydroid/lxc",
+                "-n",
+                "waydroid",
+                "--clear-env",
+                "--",
+                "/system/bin/settings",
+                "put",
+                "system",
+                "pointer_location",
+                "0",
+            ]
+            .map(std::ffi::OsStr::new)
+        );
     }
 
     #[test]
@@ -674,6 +778,20 @@ mod tests {
         assert!(graceful);
         assert_eq!(probes, 1);
         assert_eq!(replies, b"WROID_ANDROID_INPUT_READY 1\n");
+    }
+
+    #[test]
+    fn helper_protocol_withholds_ready_when_android_cleanup_fails() {
+        let mut commands = Cursor::new(b"VERIFY_ANDROID_INPUT\n");
+        let mut replies = Vec::new();
+
+        let error = serve_helper_protocol(&mut commands, &mut replies, || {
+            Err(io::Error::other("pointer cleanup failed"))
+        })
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "pointer cleanup failed");
+        assert!(replies.is_empty());
     }
 
     #[test]
