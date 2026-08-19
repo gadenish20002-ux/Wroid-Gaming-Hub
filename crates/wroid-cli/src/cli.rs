@@ -1005,28 +1005,20 @@ mod tests {
 
     #[test]
     fn hub_browser_and_headless_modes_conflict() {
-        let error = Cli::try_parse_from(["wroid", "hub", "--browser", "--no-open"])
-            .unwrap_err();
+        let error = Cli::try_parse_from(["wroid", "hub", "--browser", "--no-open"]).unwrap_err();
 
         assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
     fn editor_accepts_explicit_browser_mode() {
-        let cli = Cli::try_parse_from([
-            "wroid",
-            "profile",
-            "edit-v2",
-            "profile.json",
-            "--browser",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["wroid", "profile", "edit-v2", "profile.json", "--browser"])
+            .unwrap();
 
         let Commands::Profile {
-            command:
-                ProfileCommand::EditV2 {
-                    browser, no_open, ..
-                },
+            command: ProfileCommand::EditV2 {
+                browser, no_open, ..
+            },
         } = cli.command
         else {
             panic!("expected edit-v2 command");

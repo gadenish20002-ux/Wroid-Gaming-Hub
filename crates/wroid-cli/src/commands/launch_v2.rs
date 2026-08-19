@@ -1051,7 +1051,7 @@ fn valid_session_performance(performance: &LastSessionPerformance) -> bool {
         && performance.frames_submitted <= MAX_COUNTER
         && performance.mouse_aim_recenters <= MAX_COUNTER
         && performance.rejected_kernel_timestamps <= MAX_COUNTER
-        && performance.peak_simultaneous_contacts <= u16::MAX.into()
+        && performance.peak_simultaneous_contacts <= u64::from(u16::MAX)
 }
 
 fn unix_time_millis() -> u64 {

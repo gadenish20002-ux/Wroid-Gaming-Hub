@@ -21,6 +21,7 @@ use wroid_input::{discover_keyboard_devices, discover_mouse_devices, InputDevice
 use crate::backend::InputExecutor;
 
 use super::compatibility::{self, CompatibilityReport};
+use super::desktop_webview::{self, HUB_WINDOW};
 use super::game_catalog::{family_for_package, GAME_FAMILIES};
 use super::graphics::GraphicsReport;
 use super::local_web_app::{LocalWebApp, WebUiMode};
@@ -74,6 +75,9 @@ struct LibraryProfile {
 }
 
 pub(crate) fn run_hub(port: u16, mode: WebUiMode, profiles_dir: Option<PathBuf>) -> Result<()> {
+    if mode == WebUiMode::Native {
+        return desktop_webview::run_native_app(HUB_WINDOW, move || start_hub(port, profiles_dir));
+    }
     let app = start_hub(port, profiles_dir)?;
 
     println!("Wroid Gaming Hub");
@@ -81,7 +85,7 @@ pub(crate) fn run_hub(port: u16, mode: WebUiMode, profiles_dir: Option<PathBuf>)
     match mode {
         WebUiMode::Browser => open_url(&app.authenticated_url()),
         WebUiMode::Headless => println!("Hub: {}", app.authenticated_url()),
-        WebUiMode::Native => unreachable!("native Hub mode is wired by the desktop shell"),
+        WebUiMode::Native => unreachable!("handled before starting the native application"),
     }
     app.wait()
 }

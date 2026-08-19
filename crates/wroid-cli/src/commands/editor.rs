@@ -13,6 +13,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use wroid_core::profile_v2::ProfileV2;
 
+use super::desktop_webview::{self, CONTROLS_WINDOW};
 use super::local_web_app::{LocalWebApp, WebUiMode};
 use super::preferences;
 use super::terminal::spawn_terminal;
@@ -27,6 +28,9 @@ const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn edit_v2(path: PathBuf, port: u16, mode: WebUiMode) -> Result<()> {
+    if mode == WebUiMode::Native {
+        return desktop_webview::run_native_app(CONTROLS_WINDOW, move || start_editor(path, port));
+    }
     let app = start_editor(path, port)?;
 
     println!("Wroid Controls Studio");
@@ -34,7 +38,7 @@ pub(crate) fn edit_v2(path: PathBuf, port: u16, mode: WebUiMode) -> Result<()> {
     match mode {
         WebUiMode::Browser => open_url(&app.authenticated_url()),
         WebUiMode::Headless => println!("Editor: {}", app.authenticated_url()),
-        WebUiMode::Native => unreachable!("native editor mode is wired by the desktop shell"),
+        WebUiMode::Native => unreachable!("handled before starting the native application"),
     }
     app.wait()
 }
@@ -661,7 +665,12 @@ mod tests {
             .unwrap()
             .parse()
             .unwrap();
-        let token_query = app.authenticated_url().split_once('?').unwrap().1.to_owned();
+        let token_query = app
+            .authenticated_url()
+            .split_once('?')
+            .unwrap()
+            .1
+            .to_owned();
         let mut client = TcpStream::connect(address).unwrap();
         write!(
             client,

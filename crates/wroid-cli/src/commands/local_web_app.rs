@@ -75,10 +75,13 @@ impl LocalWebApp {
     {
         let origin = LocalOrigin::new(address)?;
         let (completion_tx, completion) = mpsc::sync_channel(1);
+        let worker_shutdown = Arc::clone(&shutdown);
         let thread = thread::Builder::new()
             .name("wroid-local-web-app".to_owned())
             .spawn(move || {
-                let _ = completion_tx.send(server());
+                let result = server();
+                worker_shutdown.store(true, Ordering::Release);
+                let _ = completion_tx.send(result);
             })
             .context("failed to start the local web application server")?;
 
@@ -134,9 +137,9 @@ impl LocalWebApp {
 
     fn completion_error(&mut self, _error: RecvError) -> anyhow::Error {
         match self.join_thread() {
-            Ok(()) => anyhow::anyhow!(
-                "local web application server exited without reporting a result"
-            ),
+            Ok(()) => {
+                anyhow::anyhow!("local web application server exited without reporting a result")
+            }
             Err(error) => error,
         }
     }
@@ -218,5 +221,27 @@ mod tests {
 
         app.shutdown_and_join().unwrap();
         assert!(shutdown.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn completed_server_notifies_the_native_shell() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let app = LocalWebApp::spawn(
+            "127.0.0.1:37613".parse().unwrap(),
+            "token".to_owned(),
+            Arc::clone(&shutdown),
+            || Ok(()),
+        )
+        .unwrap();
+
+        for _ in 0..100 {
+            if app.is_shutdown() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        assert!(app.is_shutdown());
+        app.wait().unwrap();
     }
 }

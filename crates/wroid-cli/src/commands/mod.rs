@@ -1,6 +1,7 @@
 pub(crate) mod app;
 pub(crate) mod compatibility;
 pub(crate) mod desktop;
+pub(crate) mod desktop_webview;
 pub(crate) mod device;
 pub(crate) mod doctor;
 pub(crate) mod editor;
@@ -56,11 +57,7 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
             browser,
             no_open,
             profiles_dir,
-        } => hub::run_hub(
-            port,
-            WebUiMode::from_flags(browser, no_open),
-            profiles_dir,
-        ),
+        } => hub::run_hub(port, WebUiMode::from_flags(browser, no_open), profiles_dir),
         Commands::Doctor { backend } => doctor::doctor(input_executor, backend),
         Commands::Profile { command } => match command {
             ProfileCommand::Validate { path } => profile::validate_profile(path),
@@ -69,11 +66,7 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
                 port,
                 browser,
                 no_open,
-            } => editor::edit_v2(
-                path,
-                port,
-                WebUiMode::from_flags(browser, no_open),
-            ),
+            } => editor::edit_v2(path, port, WebUiMode::from_flags(browser, no_open)),
             ProfileCommand::Example { path } => profile::write_example_profile(path),
             ProfileCommand::New {
                 path,

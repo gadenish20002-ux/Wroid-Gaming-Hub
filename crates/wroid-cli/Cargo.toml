@@ -13,6 +13,7 @@ anyhow.workspace = true
 clap.workspace = true
 crossterm.workspace = true
 dbus.workspace = true
+gtk = { version = "0.18.2", features = ["v3_24"] }
 libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -24,6 +25,7 @@ wroid-inject = { path = "../wroid-inject" }
 wroid-input = { path = "../wroid-input" }
 wroid-runtime = { path = "../wroid-runtime" }
 wroid-waydroid = { path = "../wroid-waydroid" }
+webkit2gtk = { version = "2.0.2", features = ["v2_40"] }
 
 [dev-dependencies]
 tempfile.workspace = true
