@@ -13,21 +13,9 @@ const WAYDROID_PROP: &str = "/var/lib/waydroid/waydroid.prop";
 const FULL_DECK_RECOMMENDED_BYTES: u64 = 40 * 1024 * 1024 * 1024;
 const CRITICAL_AVAILABLE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const BTRFS_SUPER_MAGIC: libc::c_long = 0x9123_683e;
-const FS_NOCOW_FL: libc::c_long = 0x0080_0000;
-type FilesystemFlags = libc::c_long;
-const IOC_NRSHIFT: u32 = 0;
-const IOC_TYPESHIFT: u32 = 8;
-const IOC_SIZESHIFT: u32 = 16;
-const IOC_DIRSHIFT: u32 = 30;
-const IOC_READ: libc::c_ulong = 2;
-const FS_IOC_GETFLAGS: libc::c_ulong = linux_ior(b'f', 1, std::mem::size_of::<FilesystemFlags>());
-
-const fn linux_ior(kind: u8, number: u8, size: usize) -> libc::c_ulong {
-    (IOC_READ << IOC_DIRSHIFT)
-        | ((kind as libc::c_ulong) << IOC_TYPESHIFT)
-        | ((number as libc::c_ulong) << IOC_NRSHIFT)
-        | ((size as libc::c_ulong) << IOC_SIZESHIFT)
-}
+const FS_IOC_GETFLAGS: libc::Ioctl = libc::FS_IOC_GETFLAGS;
+const FS_NOCOW_FL: libc::c_uint = 0x0080_0000;
+type FilesystemFlags = libc::c_uint;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CopyOnWriteState {
@@ -169,7 +157,8 @@ fn copy_on_write_state(path: &Path) -> CopyOnWriteState {
     };
     let mut flags: FilesystemFlags = 0;
     // SAFETY: directory is a live read-only descriptor and flags points to a
-    // writable long expected by Linux _IOR('f', 1, long).
+    // writable u32 used by the kernel for the request encoded by
+    // Linux FS_IOC_GETFLAGS (_IOR('f', 1, long)).
     if unsafe { libc::ioctl(directory.as_raw_fd(), FS_IOC_GETFLAGS, &mut flags) } != 0 {
         return classify_copy_on_write_probe(Some(stats.f_type), None);
     }
@@ -310,13 +299,11 @@ mod tests {
     }
 
     #[test]
-    fn getflags_buffer_matches_linux_ioctl_abi() {
-        const IOC_SIZE_MASK: libc::c_ulong = 0x3fff;
-        let encoded_size = (FS_IOC_GETFLAGS >> IOC_SIZESHIFT) & IOC_SIZE_MASK;
-
+    fn getflags_uses_linux_request_with_a_32_bit_result_buffer() {
+        assert_eq!(FS_IOC_GETFLAGS, libc::FS_IOC_GETFLAGS);
         assert_eq!(
-            encoded_size as usize,
-            std::mem::size_of::<FilesystemFlags>()
+            std::mem::size_of::<FilesystemFlags>(),
+            std::mem::size_of::<libc::c_uint>()
         );
     }
 
