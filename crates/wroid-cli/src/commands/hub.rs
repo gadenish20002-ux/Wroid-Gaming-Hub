@@ -29,6 +29,7 @@ use super::terminal::spawn_terminal;
 const INDEX_HTML: &str = include_str!("../../assets/hub/index.html");
 const STYLES_CSS: &str = include_str!("../../assets/hub/styles.css");
 const CONTROL_CHIPS_JS: &str = include_str!("../../assets/hub/control-chips.js");
+const COMPATIBILITY_STATE_JS: &str = include_str!("../../assets/hub/compatibility-state.js");
 const APP_JS: &str = include_str!("../../assets/hub/app.js");
 const MAX_HEADER_BYTES: usize = 32 * 1024;
 const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
@@ -1346,6 +1347,7 @@ fn handle_request(
     match (request.method.as_str(), route) {
         ("GET", "/styles.css") => (Response::css(STYLES_CSS), false),
         ("GET", "/control-chips.js") => (Response::javascript(CONTROL_CHIPS_JS), false),
+        ("GET", "/compatibility-state.js") => (Response::javascript(COMPATIBILITY_STATE_JS), false),
         ("GET", "/app.js") => (Response::javascript(APP_JS), false),
         ("GET", "/") if authorized => (Response::html(INDEX_HTML), false),
         ("GET", "/api/state") if authorized => match build_state(directory) {
@@ -1434,6 +1436,8 @@ fn handle_action(body: &[u8], directory: &Path) -> Response {
             let (width, height) = launch_resolution(&payload)?;
             let game_mode = launch_game_mode(&payload)?;
             GraphicsReport::probe().ensure_launch_ready()?;
+            CompatibilityReport::probe()
+                .ensure_known_game_launch_ready(&profile.profile.package_name)?;
             let (keyboard, mouse) = selected_profile_input_devices(&payload, &profile.profile)?;
             open_game_background(
                 &profile.path,
@@ -2810,6 +2814,27 @@ mod tests {
         let (response, close) =
             handle_request(&request, directory.path(), sideload.path(), "secret");
         assert_eq!(response.status, 403);
+        assert!(!close);
+    }
+
+    #[test]
+    fn serves_authenticated_compatibility_state_asset() {
+        let request = Request {
+            method: "GET".to_owned(),
+            target: "/compatibility-state.js?token=secret".to_owned(),
+            body: Vec::new(),
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let sideload = tempfile::tempdir().unwrap();
+
+        let (response, close) =
+            handle_request(&request, directory.path(), sideload.path(), "secret");
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.content_type, "text/javascript; charset=utf-8");
+        assert!(String::from_utf8(response.body)
+            .unwrap()
+            .contains("activeRootFinding"));
         assert!(!close);
     }
 

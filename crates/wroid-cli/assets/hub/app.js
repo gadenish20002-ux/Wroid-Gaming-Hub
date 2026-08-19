@@ -560,6 +560,12 @@ function editorActionFor(game) {
 function primaryActionFor(game) {
   const compatibility = compatibilityFor(game);
   if (
+    game.installed === true
+    && window.WroidHubCompatibility.activeRootFinding(hubState.system.compatibility)
+  ) {
+    return "root";
+  }
+  if (
     game.installed !== true
     && (
       hubState.system.compatibility.armTranslation === false
@@ -675,6 +681,16 @@ function renderHero() {
       hubState.system.bridgeHelper?.detail || "Install the minimal root-owned helper before production play.";
     elements.launchNote.textContent =
       `${helperDetail}. Uses one desktop authorization dialog; no game launch password.`;
+  } else if (primaryAction === "root") {
+    const finding = window.WroidHubCompatibility.activeRootFinding(
+      hubState.system.compatibility,
+    );
+    elements.launchButton.dataset.action = "blocked";
+    elements.launchIcon.textContent = "×";
+    elements.launchEyebrow.textContent = "ROOT ACCESS DETECTED";
+    elements.launchLabel.textContent = "Remove Android root first";
+    elements.launchNote.textContent = finding?.message || "Active Android root blocks this game.";
+    elements.launchButton.disabled = true;
   } else if (graphicsBlocker) {
     elements.launchButton.dataset.action = "blocked";
     elements.launchIcon.textContent = "×";
@@ -865,7 +881,7 @@ function launchSelected() {
   const game = selectedGame();
   if (!game) return;
   const primaryAction = primaryActionFor(game);
-  if (primaryAction === "compatibility") {
+  if (primaryAction === "compatibility" || primaryAction === "root") {
     elements.compatibilityCard.scrollIntoView({ behavior: "smooth", block: "center" });
     return;
   }
