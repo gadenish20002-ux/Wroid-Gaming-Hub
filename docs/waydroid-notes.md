@@ -27,8 +27,12 @@ When the IP address is `UNKNOWN`, ADB may not connect even though Waydroid itsel
 Package names vary by repository setup, but a typical development environment needs:
 
 ```sh
-sudo pacman -S rust cargo adb waydroid
+sudo pacman -S rust cargo adb waydroid gtk3 webkit2gtk-4.1
 ```
+
+`gtk3` and `webkit2gtk-4.1` are runtime dependencies of the native Wroid Hub
+and Controls Studio windows. `wroid hub --browser` remains an explicit
+diagnostic fallback; normal application-menu launch does not use the browser.
 
 Depending on the system, Waydroid itself may require distribution-specific setup, kernel modules, container service configuration, and a vendor image. Follow the distro Waydroid documentation for installation.
 

@@ -54,10 +54,11 @@ The current local development environment is CachyOS / Arch-based Linux on Wayla
 
 ## Build and Install
 
-Install Rust, ADB, and Waydroid with your distribution tooling. On Arch/CachyOS:
+Install Rust, ADB, Waydroid, GTK 3, and WebKitGTK 4.1 with your distribution
+tooling. On Arch/CachyOS:
 
 ```sh
-sudo pacman -S rust cargo adb waydroid
+sudo pacman -S rust cargo adb waydroid gtk3 webkit2gtk-4.1
 ```
 
 Build and test:
@@ -76,7 +77,8 @@ wroid helper install
 ```
 
 This installs `wroid` in `~/.local/bin`, adds **Wroid Gaming Hub** to the Linux
-application menu, installs its scalable icon, and stages the standalone
+application menu, opens it as a native GTK desktop window, installs its
+scalable icon, and stages the standalone
 `wroid-helper` as a read-only mode-`0555` release. The Hub's setup button opens
 the desktop Polkit authorization dialog without a terminal. A detached installer
 holds the exact helper bytes in a write-sealed Linux `memfd`, then asks the fixed
@@ -132,6 +134,13 @@ After installation, open **Wroid Gaming Hub** from the application menu or run:
 wroid hub
 ```
 
+The Hub runs in a native GTK/WebKitGTK window; its authenticated loopback URL
+stays private in the process and is not opened in browser chrome. A second
+launcher activation raises the existing Hub window. For diagnostics only,
+`wroid hub --browser` uses the default browser, while `wroid hub --no-open`
+starts the local server without opening a window. The two flags cannot be
+combined.
+
 On first launch, Wroid installs editable copies of the four starter profiles in
 `~/.config/wroid/profiles-v2`. The hub detects Waydroid, keyboard, mouse, and
 installed Android packages; lets you select the exact keyboard and mouse,
@@ -140,7 +149,7 @@ import additional Profile V2 JSON files. Device choices persist locally and
 are revalidated against `/dev/input/by-id` before every launch. Hub and
 Controls Studio share these choices and the GameMode Auto/Off preference
 through the atomically written private file
-`~/.config/wroid/preferences.json`, so random localhost ports and browser
+`~/.config/wroid/preferences.json`, so random localhost ports and shell
 restarts do not reset the selected devices or session target.
 Auto uses a protected system `gamemoderun` when installed; otherwise the game
 starts normally. The daemon clears loader override variables and never accepts
@@ -171,7 +180,7 @@ exercise WASD, mouse aim, and mapped buttons; the trace and latency report are
 printed in the terminal. The diagnostic stops after 20 seconds of live input,
 then restores the prior Waydroid state and bridge automatically. This permits
 end-to-end validation before any game or Google account is installed.
-When the browser regains focus after Play Store, Controls Studio, a game
+When the Hub window regains focus after Play Store, Controls Studio, a game
 session, or Waydroid, Hub refreshes package, profile, and lease state
 automatically. Concurrent focus events share one request, and there is no
 periodic background polling during gameplay.
@@ -285,7 +294,10 @@ Before launching, open the visual controls editor as the normal desktop user:
 target/release/wroid profile edit-v2 profiles/examples/brawlstars-v2.json
 ```
 
-Controls Studio opens locally in the default browser. Load or drop a game
+Controls Studio opens in its own native GTK/WebKitGTK window. The explicit
+diagnostic fallback is
+`wroid profile edit-v2 <profile-path> --browser`; `--no-open` keeps the editor
+headless. Load or drop a game
 screenshot, or use **Live align** and select the running Waydroid game window.
 The live surface remains beneath the editable map; zoom and horizontal/vertical
 crop controls remove window borders or letterboxing before **Save aligned

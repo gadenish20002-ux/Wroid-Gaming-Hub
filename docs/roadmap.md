@@ -116,8 +116,11 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
   hardware/runtime diagnostics.
 - [x] Add the first unprivileged visual profile v2 controls editor.
 - [x] Persist per-profile calibration backgrounds and capture a selected
-  Waydroid window through the browser display-capture permission flow.
+  Waydroid window through the WebKit display-capture permission flow.
 - [x] Add rootless per-user binary, desktop-entry, and icon installation.
+- [x] Embed Hub and Controls Studio in native GTK/WebKitGTK windows with Hub
+  single-instance activation, exact-origin navigation, and deterministic
+  localhost-server cleanup.
 - [x] Refresh packages, edited profiles, and session leases when Hub regains
   focus, deduplicating concurrent events without background gameplay polling.
 - [x] Add launch-time GPU/DRM/Waydroid graphics preflight with a
@@ -199,8 +202,8 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 
 ## Current Limitations
 
-- The launcher is a localhost desktop web UI with application-menu integration;
-  native toolkit packaging and background service integration are not implemented yet.
+- The native launcher still embeds a localhost web UI internally; signed distro
+  packages and release automation are not implemented yet.
 - The visual editor can calibrate over a user-authorized live Waydroid window,
   but it is not an always-on overlay during gameplay.
 - No production daemon-managed global input capture.
@@ -241,8 +244,9 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 
 4. GUI and overlay editor.
    - The local gaming hub, screenshot-backed controls editor, and live
-     Waydroid-window calibration are implemented.
-   - Native desktop packaging remains.
+     Waydroid-window calibration are implemented in native GTK/WebKitGTK
+     windows.
+   - An always-on gameplay overlay and tray integration remain out of scope.
 
 5. Package install expansion.
    - Single-APK install includes package structure, encryption, and Waydroid ABI
