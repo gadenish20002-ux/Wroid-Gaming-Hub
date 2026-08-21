@@ -170,7 +170,7 @@ fn run_relay(
     })();
 
     let _: Result<(bool,), _> =
-        kwin_proxy.method_call("org.kde.KWin", "unloadScript", (plugin_name,));
+        kwin_proxy.method_call("org.kde.kwin.Scripting", "unloadScript", (plugin_name,));
     relay_result
 }
 
