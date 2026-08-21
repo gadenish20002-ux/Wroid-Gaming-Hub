@@ -303,9 +303,9 @@ fn ensure_supported_desktop() -> Result<()> {
 fn random_token() -> Result<String> {
     let mut bytes = [0_u8; 12];
     fs::File::open("/dev/urandom")
-        .context("failed to open system random source")?
+        .context("failed to open the system random source")?
         .read_exact(&mut bytes)
-        .context("failed to generate focus relay token")?;
+        .context("failed to generate a focus relay token")?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
