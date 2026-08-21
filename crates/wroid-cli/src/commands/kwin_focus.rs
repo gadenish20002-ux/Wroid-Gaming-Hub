@@ -170,7 +170,7 @@ fn run_relay(
     })();
 
     let _: Result<(bool,), _> =
-        kwin_proxy.method_call("org.kde.kwin.Scripting", "unloadScript", (plugin_name,));
+        kwin_proxy.method_call("org.kde.KWin", "unloadScript", (plugin_name,));
     relay_result
 }
 
@@ -228,8 +228,9 @@ function surfaceIdentity(window) {{
     if (isWaydroid(windowClass) || isWaydroid(windowName)) {{
         return "waydroid";
     }}
-    if (windowClass === "gamescope" || windowName === "gamescope") {{
-        return "gamescope:" + String(Number(window.pid || 0));
+    const pid = Number(window.pid || 0);
+    if (Number.isInteger(pid) && pid > 1) {{
+        return "pid:" + String(pid);
     }}
     return "other";
 }}
@@ -249,7 +250,7 @@ fn focus_event_is_owned(value: &str, owner_pid: u32, proc_root: &Path) -> bool {
         return true;
     }
     let Some(pid) = value
-        .strip_prefix("gamescope:")
+        .strip_prefix("pid:")
         .and_then(|pid| pid.parse::<u32>().ok())
         .filter(|pid| *pid > 1)
     else {
@@ -302,9 +303,9 @@ fn ensure_supported_desktop() -> Result<()> {
 fn random_token() -> Result<String> {
     let mut bytes = [0_u8; 12];
     fs::File::open("/dev/urandom")
-        .context("failed to open the system random source")?
+        .context("failed to open system random source")?
         .read_exact(&mut bytes)
-        .context("failed to generate a focus relay token")?;
+        .context("failed to generate focus relay token")?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
@@ -314,20 +315,20 @@ mod tests {
     use std::io::{BufRead, BufReader};
 
     #[test]
-    fn script_matches_waydroid_by_stable_window_identity() {
+    fn script_matches_waydroid_and_reports_process_identity() {
         let script = focus_script(":1.42");
         assert!(script.contains("window.resourceClass"));
         assert!(script.contains("window.resourceName"));
         assert!(script.contains("startsWith(\"waydroid.\")"));
-        assert!(script.contains("gamescope:"));
         assert!(script.contains("window.pid"));
+        assert!(script.contains("pid:"));
         assert!(script.contains("workspace.windowActivated.connect(reportFocus)"));
         assert!(script.contains("reportFocus(workspace.activeWindow)"));
         assert!(script.contains("callDBus(\":1.42\""));
     }
 
     #[test]
-    fn gamescope_focus_is_limited_to_the_worker_process_tree() {
+    fn focused_surface_is_limited_to_the_worker_process_tree() {
         let directory = tempfile::tempdir().unwrap();
         let proc_root = directory.path();
         for (pid, parent) in [(4200, 4100), (4100, 4000), (9000, 1)] {
@@ -335,18 +336,14 @@ mod tests {
             fs::create_dir(&process).unwrap();
             fs::write(
                 process.join("stat"),
-                format!("{pid} (gamescope worker) S {parent} 0 0 0 0"),
+                format!("{pid} (game surface) S {parent} 0 0 0 0"),
             )
             .unwrap();
         }
 
-        assert!(focus_event_is_owned("gamescope:4200", 4000, proc_root));
-        assert!(!focus_event_is_owned("gamescope:9000", 4000, proc_root));
-        assert!(!focus_event_is_owned(
-            "gamescope:not-a-pid",
-            4000,
-            proc_root
-        ));
+        assert!(focus_event_is_owned("pid:4200", 4000, proc_root));
+        assert!(!focus_event_is_owned("pid:9000", 4000, proc_root));
+        assert!(!focus_event_is_owned("pid:not-a-pid", 4000, proc_root));
         assert!(focus_event_is_owned("waydroid", 4000, proc_root));
         assert!(!focus_event_is_owned("other", 4000, proc_root));
     }
