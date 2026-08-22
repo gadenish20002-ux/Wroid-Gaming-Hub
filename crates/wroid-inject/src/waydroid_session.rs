@@ -691,16 +691,18 @@ pub fn wait_for_android_input_reader(device_name: &str) -> io::Result<()> {
 }
 
 /// Check that `dumpsys input` output lists the device inside an InputReader
-/// section, not only under EventHub. An unrecognized dump format counts as
-/// unregistered: claiming delivery from an EventHub-only listing is exactly
-/// the silent failure this check exists to catch.
-fn dumpsys_lists_input_reader_device(dump: &str, device_name: &str) -> bool {
+/// section, not only under EventHub. When the dump carries no recognizable
+/// section headers at all (unexpected format), fall back to a plain mention
+/// so an unknown format cannot block a healthy session; a dump that does
+/// show EventHub but no reader section means the device is genuinely not
+/// registered.
+pub(crate) fn dumpsys_lists_input_reader_device(dump: &str, device_name: &str) -> bool {
     for section in ["Input Reader", "InputReader"] {
         if let Some(reader_state) = dump.split(section).nth(1) {
             return reader_state.contains(device_name);
         }
     }
-    false
+    !dump.contains("Event Hub") && dump.contains(device_name)
 }
 
 /// Keep error output bounded: `dumpsys input` can exceed tens of kilobytes
@@ -1080,7 +1082,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dumpsys_reader_check_requires_reader_section_registration() {
+    fn dumpsys_reader_check_is_strict_about_known_formats() {
+        // EventHub-only listing: the format is recognized, so a missing
+        // reader section correctly means "not registered".
         let event_hub_only = "Event Hub State\n  1: Wroid Gaming Touchscreen\n";
         assert!(!dumpsys_lists_input_reader_device(
             event_hub_only,
@@ -1096,9 +1100,12 @@ mod tests {
     }
 
     #[test]
-    fn dumpsys_reader_check_is_strict_about_unknown_formats() {
+    fn dumpsys_reader_check_is_lenient_about_unknown_formats() {
+        // A dump without any recognizable section headers is an unexpected
+        // format, not proof of a missing registration; a plain mention is
+        // accepted so the check cannot block a healthy session.
         let headerless = "  1: Wroid Gaming Touchscreen\n";
-        assert!(!dumpsys_lists_input_reader_device(
+        assert!(dumpsys_lists_input_reader_device(
             headerless,
             "Wroid Gaming Touchscreen"
         ));

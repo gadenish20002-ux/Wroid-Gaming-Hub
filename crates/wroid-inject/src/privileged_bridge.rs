@@ -507,6 +507,22 @@ fn android_input_probe_command() -> Command {
     )
 }
 
+fn android_dumpsys_input_command() -> Command {
+    fixed_privileged_command(
+        "/usr/bin/lxc-attach",
+        &[
+            "-P",
+            LXC_PATH,
+            "-n",
+            WAYDROID_CONTAINER_NAME,
+            "--clear-env",
+            "--",
+            "/system/bin/dumpsys",
+            "input",
+        ],
+    )
+}
+
 fn android_show_touches_off_command() -> Command {
     fixed_privileged_command(
         "/usr/bin/lxc-attach",
@@ -599,6 +615,7 @@ fn wait_for_android_input_privileged() -> io::Result<()> {
         let output = android_input_probe_command().output()?;
         last_output = combined_output(&output);
         if output.status.success() && last_output.contains(WROID_TOUCHSCREEN_NAME) {
+            wait_for_android_input_reader_privileged()?;
             disable_android_pointer_diagnostics_privileged()?;
             return Ok(());
         }
@@ -607,9 +624,59 @@ fn wait_for_android_input_privileged() -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::NotFound,
         format!(
-            "Android getevent did not list {WROID_TOUCHSCREEN_NAME}; device bridge is not active\n{last_output}"
+            "Android getevent did not list {WROID_TOUCHSCREEN_NAME}; device bridge is not active\n{}",
+            tail_for_error(&last_output)
         ),
     ))
+}
+
+/// Verify Android's InputReader opened the bridged touchscreen.
+///
+/// `getevent -pl` only proves the node is visible inside the container;
+/// `dumpsys input` proves system_server could actually open it. A device the
+/// InputReader rejects (typically because the node still carries the host
+/// input GID instead of AID_INPUT) stays EventHub-listed but never delivers
+/// a single touch. Runs privileged because `waydroid shell` requires root
+/// and the daemon worker is unprivileged.
+fn wait_for_android_input_reader_privileged() -> io::Result<()> {
+    let mut last_output = String::new();
+    for _ in 0..ANDROID_INPUT_ATTEMPTS {
+        unfreeze_waydroid_for_input_probe()?;
+        let output = android_dumpsys_input_command().output()?;
+        last_output = combined_output(&output);
+        if output.status.success()
+            && crate::waydroid_session::dumpsys_lists_input_reader_device(
+                &last_output,
+                WROID_TOUCHSCREEN_NAME,
+            )
+        {
+            return Ok(());
+        }
+        sleep(ANDROID_INPUT_INTERVAL);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "Android InputReader did not register {WROID_TOUCHSCREEN_NAME}; the event node is \
+             visible but unreadable for system_server (expected host group 1004/AID_INPUT, mode \
+             0660)\n{}",
+            tail_for_error(&last_output)
+        ),
+    ))
+}
+
+/// Keep error output bounded: `dumpsys input` can exceed tens of kilobytes
+/// while only its tail matters for triage.
+fn tail_for_error(output: &str) -> String {
+    const MAX_ERROR_CHARS: usize = 4 * 1024;
+    let char_count = output.chars().count();
+    if char_count <= MAX_ERROR_CHARS {
+        return output.to_owned();
+    }
+    output
+        .chars()
+        .skip(char_count - MAX_ERROR_CHARS)
+        .collect::<String>()
 }
 
 fn disable_android_pointer_diagnostics_privileged() -> io::Result<()> {

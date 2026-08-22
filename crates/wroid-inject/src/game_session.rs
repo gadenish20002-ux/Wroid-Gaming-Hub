@@ -209,11 +209,13 @@ pub fn run_game_session(mut options: GameSessionOptions) -> GameSessionResult<Ga
             waydroid.wait_until_android_ready()?;
         }
         waydroid.confirm_resolution(options.width, options.height)?;
-        bridge.verify_android_input()?;
         // getevent visibility is not delivery: make sure Android's
         // InputReader actually opened the bridged touchscreen. A node with
-        // host-only ownership passes getevent and drops every touch.
-        wait_for_android_input_reader(WROID_TOUCHSCREEN_NAME)?;
+        // host-only ownership passes getevent and drops every touch. The
+        // check runs per bridge path (root: waydroid shell; rootless: the
+        // privileged helper via lxc-attach, because `waydroid shell` needs
+        // root and the daemon worker is unprivileged).
+        bridge.verify_android_input()?;
         match android_open_action(options.show_ui, options.launch_package) {
             AndroidOpenAction::Package => {
                 waydroid.launch_package(&plan.package_name)?;
@@ -428,7 +430,15 @@ enum SessionBridge {
 impl SessionBridge {
     fn verify_android_input(&mut self) -> io::Result<()> {
         match self {
-            Self::InProcess(..) => wait_for_android_input_device(WROID_TOUCHSCREEN_NAME),
+            // Root sessions can run `waydroid shell` directly: check both
+            // EventHub visibility and InputReader registration.
+            Self::InProcess(..) => {
+                wait_for_android_input_device(WROID_TOUCHSCREEN_NAME)?;
+                wait_for_android_input_reader(WROID_TOUCHSCREEN_NAME)
+            }
+            // The daemon worker is unprivileged and `waydroid shell` needs
+            // root, so the helper performs the full verification (getevent +
+            // dumpsys via lxc-attach) inside VERIFY_ANDROID_INPUT.
             Self::Broker(broker) => broker.verify_android_input(),
         }
     }
