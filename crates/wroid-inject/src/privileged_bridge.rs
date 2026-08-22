@@ -25,6 +25,11 @@ const ANDROID_SETTINGS_TIMEOUT: Duration = Duration::from_secs(5);
 const ANDROID_SETTINGS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const ANDROID_INPUT_ATTEMPTS: usize = 60;
 const ANDROID_INPUT_INTERVAL: Duration = Duration::from_millis(500);
+// The worker runs `waydroid session stop` right before opening the bridge,
+// so the container is usually still tearing Android down when the helper
+// starts. Wait out that window instead of failing on the first probe.
+const CONTAINER_STOP_ATTEMPTS: usize = 30;
+const CONTAINER_STOP_INTERVAL: Duration = Duration::from_secs(1);
 // Android AID_INPUT. The Waydroid system_server belongs to this group and
 // InputReader cannot open a host input node that retains the host input GID.
 const ANDROID_INPUT_GID: u32 = 1004;
@@ -271,7 +276,7 @@ pub fn run_privileged_bridge_helper(event_node: PathBuf) -> io::Result<()> {
         libc::umask(0o022);
     }
     let _lease = WaydroidBridgeLease::acquire_default("privileged bridge helper")?;
-    ensure_container_stopped_privileged()?;
+    wait_for_container_stopped_privileged()?;
     remove_default_bridge()?;
 
     let node = InputDeviceNode::from_path(event_node)?;
@@ -424,6 +429,36 @@ fn ensure_container_stopped_privileged() -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::AlreadyExists,
         "Waydroid container is running. Stop it first with: waydroid session stop",
+    ))
+}
+
+/// Wait for the Waydroid container to finish stopping, bounded by
+/// [`CONTAINER_STOP_ATTEMPTS`]. Failing on the very first status probe killed
+/// the helper during the worker's session teardown and surfaced as a bare
+/// EPIPE in the game session; only a container that stays up is an error.
+fn wait_for_container_stopped_privileged() -> io::Result<()> {
+    let mut last_status = String::new();
+    for _ in 0..CONTAINER_STOP_ATTEMPTS {
+        let output = lxc_status_command().output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "privileged Waydroid LXC status failed\n{}",
+                combined_output(&output)
+            )));
+        }
+        last_status = combined_output(&output);
+        if last_status.trim() == "STOPPED" {
+            return Ok(());
+        }
+        sleep(CONTAINER_STOP_INTERVAL);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        format!(
+            "Waydroid container is still running after waiting {} seconds. \
+             Stop it first with: waydroid session stop\n{last_status}",
+            CONTAINER_STOP_ATTEMPTS
+        ),
     ))
 }
 

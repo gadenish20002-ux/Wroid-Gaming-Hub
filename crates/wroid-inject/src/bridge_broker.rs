@@ -13,7 +13,13 @@ pub const BRIDGE_PROTOCOL_VERSION: u32 = 1;
 pub const BRIDGE_WORKER_PROTOCOL_GENERATION: u32 = 1;
 pub const BRIDGE_WORKER_FD: RawFd = 198;
 const MAX_BRIDGE_FRAME_BYTES: usize = 4096;
-const INITIAL_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+// The worker legitimately spends time before its first Open: it stops a
+// running desktop Waydroid session (Android shutdown can take tens of
+// seconds), discovers input devices, and validates the profile. A short
+// deadline here killed the broker mid-preparation and surfaced as a bare
+// EPIPE in the worker. 120 s matches the verify window the broker already
+// tolerates afterwards.
+const INITIAL_OPEN_TIMEOUT: Duration = Duration::from_secs(120);
 const VERIFY_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const CLIENT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(125);
 const FRAME_WRITE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -208,11 +214,13 @@ impl BridgeBrokerClient {
                 protocol_version: BRIDGE_PROTOCOL_VERSION,
                 request,
             },
-        )?;
+        )
+        .map_err(|error| broker_transport_error("send a bridge request", error))?;
         let response: ResponseFrame = read_required_frame_until(
             &mut self.reader,
             Some(Instant::now() + CLIENT_RESPONSE_TIMEOUT),
-        )?;
+        )
+        .map_err(|error| broker_transport_error("read the bridge broker reply", error))?;
         if response.protocol_version != BRIDGE_PROTOCOL_VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -383,6 +391,26 @@ fn error_from_response(code: &str, detail: String) -> io::Error {
         _ => io::ErrorKind::Other,
     };
     io::Error::new(kind, detail)
+}
+
+/// Replace bare transport failures (EPIPE, EOF, reset) with an error that
+/// says what actually happened and where to look. Without this the game
+/// session reported a meaningless "Broken pipe (os error 32)" whenever the
+/// daemon-side broker had already exited.
+fn broker_transport_error(stage: &str, error: io::Error) -> io::Error {
+    match error.kind() {
+        io::ErrorKind::BrokenPipe
+        | io::ErrorKind::UnexpectedEof
+        | io::ErrorKind::ConnectionReset => io::Error::new(
+            error.kind(),
+            format!(
+                "could not {stage}: the wroidd bridge broker closed the channel before \
+                     replying. The privileged helper may have failed to stop a running Waydroid \
+                     container; check the wroidd log for the helper's error (original: {error})"
+            ),
+        ),
+        _ => error,
+    }
 }
 
 fn write_error(writer: &mut UnixStream, code: &str, detail: &str) -> io::Result<()> {
@@ -726,6 +754,38 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::Other);
         assert!(error.to_string().starts_with("verify failed:"));
         assert!(broker.join().unwrap().is_err());
+    }
+
+    #[test]
+    fn transport_failures_explain_the_closed_broker_channel() {
+        let error = broker_transport_error(
+            "send a bridge request",
+            io::Error::from_raw_os_error(libc::EPIPE),
+        );
+        let message = error.to_string();
+        assert!(message.contains("wroidd bridge broker closed the channel"));
+        assert!(message.contains("wroidd log"));
+
+        let passthrough = broker_transport_error(
+            "send a bridge request",
+            io::Error::new(io::ErrorKind::InvalidData, "frame too large"),
+        );
+        assert_eq!(passthrough.to_string(), "frame too large");
+    }
+
+    #[test]
+    fn open_against_a_closed_broker_channel_reports_an_actionable_error() {
+        let (client, server) = UnixStream::pair().unwrap();
+        drop(server);
+        let mut client = BridgeBrokerClient::from_stream(client).unwrap();
+
+        let error = client.open(Path::new("/dev/input/event7")).unwrap_err();
+
+        let message = error.to_string();
+        assert!(
+            message.contains("wroidd bridge broker closed the channel"),
+            "{message}"
+        );
     }
 
     #[test]

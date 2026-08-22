@@ -12,7 +12,7 @@ use std::process::ExitStatus;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -1189,17 +1189,37 @@ fn combine_lifecycle_errors(
 }
 
 fn stop_desktop_waydroid_session() -> Result<()> {
-    let status = Command::new("waydroid")
+    // A frozen or wedged session can make `waydroid session stop` hang
+    // indefinitely; bound the graceful stop so the game session keeps moving
+    // (the privileged helper finishes the teardown afterwards).
+    const SESSION_STOP_TIMEOUT: Duration = Duration::from_secs(45);
+
+    let mut child = Command::new("waydroid")
         .args(["session", "stop"])
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
-        .status()
+        .spawn()
         .context("failed to stop the current Waydroid session")?;
-    if !status.success() {
-        bail!("waydroid session stop exited with {status}");
+    let deadline = Instant::now() + SESSION_STOP_TIMEOUT;
+    loop {
+        match child
+            .try_wait()
+            .context("failed to stop the current Waydroid session")?
+        {
+            Some(status) if status.success() => return Ok(()),
+            Some(status) => bail!("waydroid session stop exited with {status}"),
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!(
+                    "waydroid session stop did not finish within {SESSION_STOP_TIMEOUT:?}; \
+                     the session was killed and the privileged stop will finish cleanup"
+                );
+            }
+            None => std::thread::sleep(Duration::from_millis(200)),
+        }
     }
-    Ok(())
 }
 
 fn start_desktop_waydroid_session() -> Result<()> {
