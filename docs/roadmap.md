@@ -108,7 +108,6 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - [x] Ship starter profiles for Brawl Stars, Standoff 2, PUBG Mobile, and Free Fire.
 - [ ] Connect profile-defined controls to the daemon-managed Waydroid session.
 - [ ] Wire profile-defined relative mouse aim through the daemon-managed session.
-- [ ] Add physical and virtual gamepad support.
 
 ## Phase 4: Desktop gaming hub
 
@@ -220,7 +219,6 @@ precede the desktop UI. See [Architecture v2](architecture-v2.md) and the
 - The LXC bridge helper needs one graphical Polkit authorization during its
   one-time installation. Gameplay later stops Waydroid automatically for
   temporary bridge setup and does not prompt again.
-- No gamepad mapping.
 - No macro execution.
 - No XAPK/APKM/OBB install flow.
 - No anti-cheat bypasses or protection evasion.
