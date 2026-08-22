@@ -5,7 +5,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{anyhow, bail, Context, Result};
 use dbus::blocking::{Connection, SyncConnection};
@@ -155,12 +155,20 @@ fn run_relay(
     let _ = ready.send(Ok(()));
     let mut client: Option<UnixStream> = None;
     let mut last_focus = None;
+    let mut client_buffer = String::new();
     let relay_result = (|| -> Result<()> {
         while stop.try_recv().is_err() {
             callback_connection
                 .process(LOOP_INTERVAL)
                 .context("desktop D-Bus focus listener failed")?;
             accept_client(&listener, &mut client, last_focus)?;
+            handle_client_commands(
+                &mut client,
+                &mut client_buffer,
+                &kwin_connection,
+                relay_dir(script_path),
+                plugin_name,
+            )?;
             while let Ok(focused) = focus_rx.try_recv() {
                 last_focus = Some(focused);
                 write_focus(&mut client, focused);
@@ -172,6 +180,128 @@ fn run_relay(
     let _: Result<(bool,), _> =
         kwin_proxy.method_call("org.kde.kwin.Scripting", "unloadScript", (plugin_name,));
     relay_result
+}
+
+fn relay_dir(script_path: &Path) -> &Path {
+    script_path.parent().unwrap_or_else(|| Path::new("."))
+}
+
+/// Read warp requests ("warp corner" / "warp x y") from the session client.
+///
+/// The mouse stays EVIOCGRABbed while the session owns input, which freezes
+/// the host cursor sprite wherever it was; parking it in the corner of the
+/// game window (and restoring it on release) keeps exactly one visible
+/// cursor: the session-drawn one.
+fn handle_client_commands(
+    client: &mut Option<UnixStream>,
+    buffer: &mut String,
+    kwin_connection: &Connection,
+    script_dir: &Path,
+    plugin_prefix: &str,
+) -> Result<()> {
+    let Some(stream) = client.as_mut() else {
+        return Ok(());
+    };
+    stream
+        .set_read_timeout(Some(Duration::ZERO))
+        .context("failed to configure focus client for warp requests")?;
+    loop {
+        let mut chunk = [0_u8; 256];
+        match stream.read(&mut chunk) {
+            Ok(0) => {
+                *client = None;
+                return Ok(());
+            }
+            Ok(read) => buffer.push_str(&String::from_utf8_lossy(&chunk[..read])),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    || error.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                break;
+            }
+            Err(error) => {
+                eprintln!("Wroid focus client read failed: {error}");
+                *client = None;
+                return Ok(());
+            }
+        }
+    }
+    while let Some(position) = buffer.find('\n') {
+        let request = buffer[..position].trim().to_owned();
+        buffer.drain(..=position);
+        if request.is_empty() {
+            continue;
+        }
+        if let Err(error) = warp_cursor(kwin_connection, script_dir, plugin_prefix, &request) {
+            eprintln!("Wroid host cursor warp failed: {error:#}");
+        }
+    }
+    Ok(())
+}
+
+/// Warp the host cursor with a one-shot KWin script. Best-effort: failures
+/// only leave the cursor where it was.
+fn warp_cursor(
+    connection: &Connection,
+    script_dir: &Path,
+    plugin_prefix: &str,
+    request: &str,
+) -> Result<()> {
+    let script = if request == "warp corner" {
+        "(function() {\n\
+          const active = workspace.activeWindow;\n\
+          const output = active ? active.output : null;\n\
+          const area = (output && output.geometry) ? output.geometry : workspace.geometry;\n\
+          workspace.cursorPos = Qt.point(area.x + area.width - 2, area.y + area.height - 2);\n\
+         })();\n"
+            .to_owned()
+    } else {
+        let mut parts = request.split_whitespace();
+        match (parts.next(), parts.next(), parts.next(), parts.next()) {
+            (Some("warp"), Some(x), Some(y), None) => {
+                format!("workspace.cursorPos = Qt.point({x}, {y});\n")
+            }
+            _ => bail!("unsupported warp request: {request}"),
+        }
+    };
+
+    let sequence = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let plugin_name = format!("{plugin_prefix}-warp-{sequence}");
+    let script_path = script_dir.join(format!("{plugin_name}.js"));
+    fs::write(&script_path, script)
+        .with_context(|| format!("failed to write {}", script_path.display()))?;
+    fs::set_permissions(&script_path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("failed to secure {}", script_path.display()))?;
+
+    let result = (|| -> Result<()> {
+        let kwin_proxy = connection.with_proxy("org.kde.KWin", "/Scripting", DBUS_TIMEOUT);
+        let (script_id,): (i32,) = kwin_proxy
+            .method_call(
+                "org.kde.kwin.Scripting",
+                "loadScript",
+                (script_path.to_string_lossy().as_ref(), &plugin_name),
+            )
+            .context("KWin rejected the cursor warp script")?;
+        if script_id < 0 {
+            bail!("KWin could not load the cursor warp script");
+        }
+        let script_proxy = connection.with_proxy(
+            "org.kde.KWin",
+            format!("/Scripting/Script{script_id}"),
+            DBUS_TIMEOUT,
+        );
+        script_proxy
+            .method_call::<(), _, _, _>("org.kde.kwin.Script", "run", ())
+            .context("failed to run the KWin cursor warp script")?;
+        let _: Result<(bool,), _> =
+            kwin_proxy.method_call("org.kde.kwin.Scripting", "unloadScript", (&plugin_name,));
+        Ok(())
+    })();
+    let _ = fs::remove_file(&script_path);
+    result
 }
 
 fn accept_client(

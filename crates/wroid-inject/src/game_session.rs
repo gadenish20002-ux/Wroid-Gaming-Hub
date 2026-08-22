@@ -19,7 +19,9 @@ use crate::{
 };
 use wroid_core::profile_v2::{InputV2, JoystickMode, ProfileV2};
 use wroid_core::{Point, Resolution};
-use wroid_input::mouse::{EvdevMouse, MouseButtonTransition, MouseEvent, RelativeMouseMotion};
+use wroid_input::mouse::{
+    EvdevMouse, MouseButton, MouseButtonTransition, MouseEvent, RelativeMouseMotion,
+};
 use wroid_input::{EvdevKeyboard, HostKey, HostKeyEvent, KeyTransition};
 use wroid_runtime::{
     ContactId, DirectionalInput, HostKeyName, HostMouseButton, LayerId, LayerMode, ModifierMask,
@@ -300,8 +302,10 @@ pub fn run_game_session(mut options: GameSessionOptions) -> GameSessionResult<Ga
         if let Some(mouse) = mouse {
             mouse_control = Some(spawn_mouse_reader(mouse, sender.clone(), input_active));
         }
+        let mut cursor_warp: Option<UnixStream> = None;
         let focus_receiver = focus_connection.map(|connection| {
             let (focus_sender, focus_receiver) = mpsc::channel();
+            cursor_warp = Some(connection.writer);
             spawn_focus_reader(connection.reader, focus_sender);
             focus_receiver
         });
@@ -362,7 +366,9 @@ pub fn run_game_session(mut options: GameSessionOptions) -> GameSessionResult<Ga
             InputMode::Aim
         };
         if initial_mode == InputMode::Ui {
-            println!("Input mode: ui (LMB clicks the Android UI; press the aim key to aim).");
+            println!(
+                "Input mode: ui (virtual cursor clicks the Android UI; press the aim key to aim)."
+            );
         }
 
         if initially_focused {
@@ -393,6 +399,7 @@ pub fn run_game_session(mut options: GameSessionOptions) -> GameSessionResult<Ga
                 grab_allowed: options.grab,
                 initial_mode,
                 overlay: cursor_overlay.as_ref(),
+                cursor_warp: &mut cursor_warp,
             },
         );
         if let Some(mut trace) = android_input_trace {
@@ -891,6 +898,9 @@ fn drain_mouse(mouse: &mut EvdevMouse) -> Result<(), wroid_input::mouse::MouseDe
 
 struct FocusConnection {
     reader: BufReader<UnixStream>,
+    /// Write half back to the relay: the session sends host-cursor warp
+    /// requests ("warp corner" / "warp x y") over it while input is captured.
+    writer: UnixStream,
     focused: bool,
 }
 
@@ -898,6 +908,7 @@ impl FocusConnection {
     fn connect(path: &Path) -> io::Result<Self> {
         let stream = UnixStream::connect(path)?;
         stream.set_read_timeout(Some(FOCUS_CONNECT_TIMEOUT))?;
+        let writer = stream.try_clone()?;
         let mut reader = BufReader::new(stream);
         let mut state = String::new();
         if reader.read_line(&mut state)? == 0 {
@@ -908,7 +919,11 @@ impl FocusConnection {
         }
         let focused = parse_focus_state(&state)?;
         reader.get_ref().set_read_timeout(None)?;
-        Ok(Self { reader, focused })
+        Ok(Self {
+            reader,
+            writer,
+            focused,
+        })
     }
 }
 
@@ -966,6 +981,9 @@ struct EventLoopOptions<'a> {
     initial_mode: InputMode,
     /// Cursor overlay used to click Android UI in UI mode; `None` disables UI mode.
     overlay: Option<&'a crate::cursor_overlay::CursorOverlay>,
+    /// Write half of the focus relay socket, used to ask the desktop
+    /// compositor to park/restore the host cursor while input is captured.
+    cursor_warp: &'a mut Option<UnixStream>,
 }
 
 /// Input ownership mode: who currently owns the physical mouse.
@@ -988,12 +1006,63 @@ impl fmt::Display for InputMode {
     }
 }
 
+/// The session-owned virtual cursor for UI mode.
+///
+/// Gamescope's nested (xdg) backend neither delivers pointer events to
+/// nested clients nor controls the host cursor, so the session keeps its own
+/// cursor: relative mouse deltas move it, the overlay draws the sprite, and
+/// left clicks become Android touches at the mapped position.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct VirtualCursor {
+    x: f64,
+    y: f64,
+    pressed: bool,
+}
+
+impl VirtualCursor {
+    fn centered(width: u32, height: u32) -> Self {
+        Self {
+            x: f64::from(width) / 2.0,
+            y: f64::from(height) / 2.0,
+            pressed: false,
+        }
+    }
+
+    fn move_by(&mut self, dx: i32, dy: i32, width: u32, height: u32) {
+        self.x = (self.x + f64::from(dx)).clamp(0.0, f64::from(width.saturating_sub(1)));
+        self.y = (self.y + f64::from(dy)).clamp(0.0, f64::from(height.saturating_sub(1)));
+    }
+
+    fn point(&self) -> Point {
+        Point {
+            x: self.x.floor().clamp(0.0, f64::from(u32::MAX)) as u32,
+            y: self.y.floor().clamp(0.0, f64::from(u32::MAX)) as u32,
+        }
+    }
+}
+
+/// Ask the desktop focus relay to warp the host cursor. Best-effort: a
+/// failure only means the parked host cursor stays where it is.
+fn request_cursor_warp(cursor_warp: &mut Option<UnixStream>, request: &str) {
+    use std::io::Write as _;
+    if let Some(stream) = cursor_warp.as_mut() {
+        let request = format!("{request}\n");
+        if let Err(error) = stream.write_all(request.as_bytes()) {
+            eprintln!("Host cursor park unavailable: {error}");
+            *cursor_warp = None;
+        }
+    }
+}
+
 /// Apply an input mode transition while the session is active (captured).
 ///
-/// Keyboard capture stays on in both modes; this handles the mouse routing
-/// (forward + EVIOCGRAB), the overlay input region, and the runtime aim state.
-/// Callers set `grab_allowed = false` under `--no-grab` so the reader never
-/// grabs the device.
+/// Keyboard capture and the mouse grab stay on in both modes — the mouse
+/// deltas either feed profile bindings (aim) or the virtual cursor (UI).
+/// This also routes the overlay sprite and parks the host cursor in the
+/// corner of the game window so only one cursor is visible.
+// The parameter set mirrors the loop's full transition context; grouping it
+// further would hide which side effects each call site relies on.
+#[allow(clippy::too_many_arguments)]
 fn apply_input_mode<I: TouchInjector>(
     runtime: &mut UnifiedRuntime<I>,
     input_readers: &InputReaderControls,
@@ -1001,6 +1070,8 @@ fn apply_input_mode<I: TouchInjector>(
     mode: InputMode,
     grab_allowed: bool,
     reactivate_toggle_aim: bool,
+    virtual_cursor: &VirtualCursor,
+    cursor_warp: &mut Option<UnixStream>,
 ) -> GameSessionResult<()> {
     match mode {
         InputMode::Aim => {
@@ -1008,6 +1079,7 @@ fn apply_input_mode<I: TouchInjector>(
             if let Some(overlay) = overlay {
                 overlay
                     .set_enabled(false)
+                    .and_then(|()| overlay.set_cursor(false, 0.0, 0.0))
                     .map_err(|error| io::Error::other(format!("cursor overlay: {error}")))?;
             }
             runtime.restore_aim(reactivate_toggle_aim)?;
@@ -1015,34 +1087,46 @@ fn apply_input_mode<I: TouchInjector>(
         InputMode::Ui => {
             runtime.set_aim_enabled(false)?;
             runtime.release_mouse_buttons()?;
-            input_readers.set_mouse_mode(false, false)?;
+            // The virtual cursor consumes the deltas itself; keep forwarding
+            // (and the grab) so the host cursor does not drift in parallel.
+            input_readers.set_mouse_mode(true, grab_allowed)?;
             if let Some(overlay) = overlay {
                 overlay
                     .set_enabled(true)
+                    .and_then(|()| overlay.set_cursor(true, virtual_cursor.x, virtual_cursor.y))
                     .map_err(|error| io::Error::other(format!("cursor overlay: {error}")))?;
             }
         }
     }
+    request_cursor_warp(cursor_warp, "warp corner");
     Ok(())
 }
 
 /// Fully release input to the host OS (F12 release / focus loss).
 ///
 /// Stops keyboard forwarding, drops the mouse (no forwarding, no grab),
-/// disables the overlay's input region, and suspends the runtime. The current
+/// disables the overlay's input region and sprite, restores the host cursor
+/// to the virtual cursor's position, and suspends the runtime. The current
 /// [`InputMode`] is deliberately not touched so recapture restores it.
 fn release_input_to_os<I: TouchInjector>(
     runtime: &mut UnifiedRuntime<I>,
     input_readers: &InputReaderControls,
     overlay: Option<&crate::cursor_overlay::CursorOverlay>,
+    restore: (f64, f64),
+    cursor_warp: &mut Option<UnixStream>,
 ) -> GameSessionResult<()> {
     input_readers.set_keyboard_capture(false)?;
     input_readers.set_mouse_mode(false, false)?;
     if let Some(overlay) = overlay {
         overlay
             .set_enabled(false)
+            .and_then(|()| overlay.set_cursor(false, 0.0, 0.0))
             .map_err(|error| io::Error::other(format!("cursor overlay: {error}")))?;
     }
+    request_cursor_warp(
+        cursor_warp,
+        &format!("warp {:.0} {:.0}", restore.0, restore.1),
+    );
     runtime.suspend()?;
     Ok(())
 }
@@ -1070,6 +1154,9 @@ fn run_event_loop<I: TouchInjector>(
     let mut toggle_aim_active_before_release = false;
     let loop_started_at = Instant::now();
     let mut control_pressed = false;
+    let (surface_width, surface_height) = runtime.resolution();
+    let mut virtual_cursor = VirtualCursor::centered(surface_width, surface_height);
+    let mut cursor_warp = options.cursor_warp.take();
 
     // Sync mode with the current runtime aim state. Aim mode follows any
     // active aim controller; when no aim is active but the profile only has
@@ -1093,8 +1180,12 @@ fn run_event_loop<I: TouchInjector>(
             InputMode::Ui,
             grab_allowed,
             false,
+            &virtual_cursor,
+            &mut cursor_warp,
         )?;
-        println!("Cursor mode: Android UI clicks are enabled; press the aim key to aim.");
+        println!(
+            "Cursor mode: the virtual cursor clicks the Android UI; press the aim key to aim."
+        );
     }
 
     loop {
@@ -1122,6 +1213,8 @@ fn run_event_loop<I: TouchInjector>(
                                     mode,
                                     grab_allowed,
                                     toggle_aim_active_before_release,
+                                    &virtual_cursor,
+                                    &mut cursor_warp,
                                 )?;
                                 input_active = true;
                                 println!("Focus protection: Waydroid focused; input captured ({mode} mode).");
@@ -1130,7 +1223,13 @@ fn run_event_loop<I: TouchInjector>(
                             input_active = false;
                             mode = desired_mode(runtime);
                             toggle_aim_active_before_release = runtime.aim_active();
-                            release_input_to_os(runtime, input_readers, overlay)?;
+                            release_input_to_os(
+                                runtime,
+                                input_readers,
+                                overlay,
+                                (virtual_cursor.x, virtual_cursor.y),
+                                &mut cursor_warp,
+                            )?;
                             println!("Focus protection: Waydroid unfocused; input released.");
                         }
                     }
@@ -1143,7 +1242,13 @@ fn run_event_loop<I: TouchInjector>(
                             input_active = false;
                             mode = desired_mode(runtime);
                             toggle_aim_active_before_release = runtime.aim_active();
-                            release_input_to_os(runtime, input_readers, overlay)?;
+                            release_input_to_os(
+                                runtime,
+                                input_readers,
+                                overlay,
+                                (virtual_cursor.x, virtual_cursor.y),
+                                &mut cursor_warp,
+                            )?;
                         }
                         eprintln!("Focus protection stopped: {message}");
                         eprintln!(
@@ -1209,7 +1314,13 @@ fn run_event_loop<I: TouchInjector>(
                                 input_active = false;
                                 mode = desired_mode(runtime);
                                 toggle_aim_active_before_release = runtime.aim_active();
-                                release_input_to_os(runtime, input_readers, overlay)?;
+                                release_input_to_os(
+                                    runtime,
+                                    input_readers,
+                                    overlay,
+                                    (virtual_cursor.x, virtual_cursor.y),
+                                    &mut cursor_warp,
+                                )?;
                                 println!(
                                     "Manual capture: input released. Alt+Tab is available; focus Waydroid and press F12 to recapture."
                                 );
@@ -1222,6 +1333,8 @@ fn run_event_loop<I: TouchInjector>(
                                     mode,
                                     grab_allowed,
                                     toggle_aim_active_before_release,
+                                    &virtual_cursor,
+                                    &mut cursor_warp,
                                 )?;
                                 input_active = true;
                                 manually_released = false;
@@ -1268,6 +1381,8 @@ fn run_event_loop<I: TouchInjector>(
                             next_mode,
                             grab_allowed,
                             true,
+                            &virtual_cursor,
+                            &mut cursor_warp,
                         )?;
                         mode = next_mode;
                         println!("Input mode switched to {mode}.");
@@ -1279,16 +1394,68 @@ fn run_event_loop<I: TouchInjector>(
                 received_at,
                 kernel_timestamp,
             }) => {
-                // Raw mouse events only reach profile bindings in aim mode.
-                // In UI cursor mode the pointer belongs to the overlay, so the
-                // fire binding is gated here (and forwarding is also off).
-                if input_active && mode == InputMode::Aim {
+                // Aim mode feeds profile bindings; UI mode drives the virtual
+                // cursor: deltas move the sprite, LMB becomes an Android touch.
+                if !input_active {
+                    // Idle.
+                } else if mode == InputMode::Aim {
                     let mut submitted = false;
                     for event in events {
                         if trace_input {
                             println!("[trace] host mouse {event:?}");
                         }
                         submitted |= runtime.handle_mouse(event)?;
+                    }
+                    if submitted {
+                        runtime.record_pipeline_latency(received_at.elapsed(), kernel_timestamp);
+                    }
+                } else {
+                    let mut submitted = false;
+                    let mut sprite_dirty = false;
+                    for event in events {
+                        if trace_input {
+                            println!("[trace] host mouse {event:?}");
+                        }
+                        match event {
+                            MouseEvent::Motion(motion) => {
+                                virtual_cursor.move_by(
+                                    motion.dx,
+                                    motion.dy,
+                                    surface_width,
+                                    surface_height,
+                                );
+                                sprite_dirty = true;
+                                if virtual_cursor.pressed {
+                                    runtime.cursor_move(virtual_cursor.point())?;
+                                    submitted = true;
+                                }
+                            }
+                            MouseEvent::Button(button) if button.button == MouseButton::Left => {
+                                match button.transition {
+                                    MouseButtonTransition::Pressed => {
+                                        virtual_cursor.pressed = true;
+                                        runtime.cursor_down(virtual_cursor.point())?;
+                                        submitted = true;
+                                    }
+                                    MouseButtonTransition::Released => {
+                                        virtual_cursor.pressed = false;
+                                        runtime.cursor_up()?;
+                                        submitted = true;
+                                    }
+                                    MouseButtonTransition::Repeated => {}
+                                }
+                            }
+                            MouseEvent::Button(_) | MouseEvent::Wheel(_) => {}
+                        }
+                    }
+                    if sprite_dirty {
+                        if let Some(overlay) = overlay {
+                            if let Err(error) =
+                                overlay.set_cursor(true, virtual_cursor.x, virtual_cursor.y)
+                            {
+                                eprintln!("Cursor sprite update failed: {error}");
+                            }
+                        }
                     }
                     if submitted {
                         runtime.record_pipeline_latency(received_at.elapsed(), kernel_timestamp);
@@ -1615,6 +1782,12 @@ impl<I: TouchInjector> UnifiedRuntime<I> {
             .iter()
             .flatten()
             .any(MouseAimController::is_active)
+    }
+
+    /// The session render resolution: also the coordinate space of the
+    /// virtual cursor.
+    fn resolution(&self) -> (u32, u32) {
+        (self.plan.resolution.width, self.plan.resolution.height)
     }
 
     fn cursor_point(
@@ -2855,6 +3028,29 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
 
+    #[test]
+    fn virtual_cursor_starts_centered_and_clamps_to_the_surface() {
+        let mut cursor = VirtualCursor::centered(1000, 500);
+        assert_eq!(cursor.point(), Point { x: 500, y: 250 });
+
+        cursor.move_by(-10_000, -10_000, 1000, 500);
+        assert_eq!(cursor.point(), Point { x: 0, y: 0 });
+
+        cursor.move_by(90_000, 90_000, 1000, 500);
+        assert_eq!(cursor.point(), Point { x: 999, y: 499 });
+
+        cursor.move_by(-150, 120, 1000, 500);
+        assert_eq!(cursor.point(), Point { x: 849, y: 499 });
+    }
+
+    #[test]
+    fn virtual_cursor_accumulates_relative_deltas() {
+        let mut cursor = VirtualCursor::centered(1920, 1080);
+        cursor.move_by(30, -20, 1920, 1080);
+        cursor.move_by(20, 5, 1920, 1080);
+        assert_eq!(cursor.point(), Point { x: 1010, y: 525 });
+    }
+
     use crate::{
         serve_bridge_broker, BridgeBrokerClient, BridgeHelperFactory, BridgeHelperSession,
     };
@@ -3247,6 +3443,7 @@ mod tests {
                 grab_allowed: true,
                 initial_mode: InputMode::Aim,
                 overlay: None,
+                cursor_warp: &mut None,
             },
         )
         .unwrap();
@@ -3334,6 +3531,7 @@ mod tests {
                 grab_allowed: true,
                 initial_mode: InputMode::Aim,
                 overlay: None,
+                cursor_warp: &mut None,
             },
         )
         .unwrap();
@@ -3411,6 +3609,7 @@ mod tests {
                 grab_allowed: true,
                 initial_mode: InputMode::Aim,
                 overlay: None,
+                cursor_warp: &mut None,
             },
         )
         .unwrap();

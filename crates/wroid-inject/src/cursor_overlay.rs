@@ -65,7 +65,6 @@ const CURSOR_ROWS: &[&str] = &[
 ];
 const CURSOR_WIDTH: i32 = 12;
 const CURSOR_HEIGHT: i32 = CURSOR_ROWS.len() as i32;
-const CURSOR_HOTSPOT: (i32, i32) = (0, 0);
 const CURSOR_OUTLINE: u32 = 0xFF00_0000;
 const CURSOR_FILL: u32 = 0xFFFF_FFFF;
 const CURSOR_TRANSPARENT: u32 = 0x0000_0000;
@@ -95,6 +94,16 @@ pub enum CursorEvent {
 enum CursorOverlayCommand {
     SetEnabled {
         enabled: bool,
+        reply: Sender<io::Result<()>>,
+    },
+    /// Move or hide the session-drawn cursor sprite. The virtual cursor is
+    /// rendered by the overlay itself because Gamescope's nested (xdg)
+    /// backend implements neither host cursor control nor pointer delivery
+    /// to nested clients ("NO CURSOR IMPL XDG").
+    SetCursor {
+        visible: bool,
+        x: f64,
+        y: f64,
         reply: Sender<io::Result<()>>,
     },
     Stop,
@@ -163,6 +172,26 @@ impl CursorOverlay {
             .recv_timeout(CONTROL_TIMEOUT)
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "overlay control timeout"))?
     }
+
+    /// Position the session-drawn cursor sprite, or hide it.
+    ///
+    /// Coordinates are surface-local pixels of the overlay surface. The
+    /// sprite is only drawn while visible; hidden state re-attaches the
+    /// transparent 1x1 buffer so the surface stays mapped.
+    pub fn set_cursor(&self, visible: bool, x: f64, y: f64) -> io::Result<()> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.control
+            .send(CursorOverlayCommand::SetCursor {
+                visible,
+                x,
+                y,
+                reply: reply_tx,
+            })
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "overlay thread stopped"))?;
+        reply_rx
+            .recv_timeout(CONTROL_TIMEOUT)
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "overlay control timeout"))?
+    }
 }
 
 impl Drop for CursorOverlay {
@@ -188,8 +217,14 @@ struct OverlayState {
     buffer: Option<wl_buffer::WlBuffer>,
     /// Kept alive so the compositor can map the shared-memory buffer.
     _memfd: Option<File>,
-    cursor_surface: Option<wl_surface::WlSurface>,
-    cursor_buffer: Option<wl_buffer::WlBuffer>,
+    cursor_buffers: [Option<wl_buffer::WlBuffer>; 2],
+    cursor_buffer_index: usize,
+    cursor_visible: bool,
+    cursor_x: i32,
+    cursor_y: i32,
+    pending_cursor_visible: bool,
+    pending_cursor_x: i32,
+    pending_cursor_y: i32,
     _cursor_memfd: Option<File>,
     last_x: f64,
     last_y: f64,
@@ -197,6 +232,22 @@ struct OverlayState {
     emit: Box<dyn Fn(CursorEvent) + Send>,
     ready: Option<Sender<io::Result<()>>>,
     closed: bool,
+}
+
+impl OverlayState {
+    /// Horizontal clamp for the cursor sprite: the configured surface width
+    /// when known, otherwise the sprite width (single-position clamp).
+    fn clamp_width(&self) -> i32 {
+        self.configured_size
+            .and_then(|(width, _)| i32::try_from(width).ok())
+            .unwrap_or(CURSOR_WIDTH)
+    }
+
+    fn clamp_height(&self) -> i32 {
+        self.configured_size
+            .and_then(|(_, height)| i32::try_from(height).ok())
+            .unwrap_or(CURSOR_HEIGHT)
+    }
 }
 
 /// Overlay worker entry point: connect, set up the layer surface, then pump
@@ -232,8 +283,14 @@ fn run_overlay(
         pointer: None,
         buffer: None,
         _memfd: None,
-        cursor_surface: None,
-        cursor_buffer: None,
+        cursor_buffers: [None, None],
+        cursor_buffer_index: 0,
+        cursor_visible: false,
+        cursor_x: 0,
+        cursor_y: 0,
+        pending_cursor_visible: false,
+        pending_cursor_x: 0,
+        pending_cursor_y: 0,
         _cursor_memfd: None,
         last_x: 0.0,
         last_y: 0.0,
@@ -323,8 +380,8 @@ fn run_overlay(
 
     // Attach a tiny transparent buffer so the surface is mapped.
     create_and_attach_buffer(&mut state, &event_queue.handle())?;
-    // Prepare the visible cursor sprite for UI mode.
-    create_cursor_surface(&mut state, &event_queue.handle())?;
+    // Prepare the sprite buffers for the session-drawn virtual cursor.
+    create_cursor_buffers(&mut state, &event_queue.handle())?;
     // Apply the initial input region.
     apply_input_region(&mut state, &event_queue.handle());
 
@@ -386,45 +443,46 @@ fn create_memfd(name: &[u8], size: usize) -> io::Result<File> {
     Ok(file)
 }
 
-/// Build the cursor sprite surface: a dedicated `wl_surface` with the arrow
-/// bitmap attached, handed to the compositor through `wl_pointer.set_cursor`
-/// every time the pointer enters the overlay.
-fn create_cursor_surface(
+/// Build the cursor sprite buffers: two identical copies of the arrow bitmap
+/// sharing one shm pool. The sprite is attached to the main overlay surface
+/// at a per-move offset (the session-drawn virtual cursor); alternating the
+/// two copies defeats Gamescope's identical-buffer dedupe.
+fn create_cursor_buffers(
     state: &mut OverlayState,
     qh: &QueueHandle<OverlayState>,
 ) -> io::Result<()> {
     let Some(shm) = state.shm.clone() else {
         return Ok(());
     };
-    let Some(compositor) = state.compositor.clone() else {
-        return Ok(());
-    };
 
     let stride = CURSOR_WIDTH.checked_mul(4).expect("cursor stride fits");
-    let size = stride
+    let sprite_size = stride
         .checked_mul(CURSOR_HEIGHT)
         .expect("cursor buffer size fits");
+    let pool_size = sprite_size.checked_mul(2).expect("cursor pool fits");
 
-    let mut pixels = Vec::with_capacity((size / 4) as usize);
-    for row in CURSOR_ROWS {
-        for column in 0..CURSOR_WIDTH {
-            let cell = row
-                .chars()
-                .nth(column as usize)
-                .filter(|c| *c == 'X' || *c == 'o')
-                .map(|c| {
-                    if c == 'X' {
-                        CURSOR_OUTLINE
-                    } else {
-                        CURSOR_FILL
-                    }
-                })
-                .unwrap_or(CURSOR_TRANSPARENT);
-            pixels.extend_from_slice(&cell.to_ne_bytes());
+    let mut pixels = Vec::with_capacity((sprite_size / 4) as usize);
+    for _ in 0..2 {
+        for row in CURSOR_ROWS {
+            for column in 0..CURSOR_WIDTH {
+                let cell = row
+                    .chars()
+                    .nth(column as usize)
+                    .filter(|c| *c == 'X' || *c == 'o')
+                    .map(|c| {
+                        if c == 'X' {
+                            CURSOR_OUTLINE
+                        } else {
+                            CURSOR_FILL
+                        }
+                    })
+                    .unwrap_or(CURSOR_TRANSPARENT);
+                pixels.extend_from_slice(&cell.to_ne_bytes());
+            }
         }
     }
 
-    let memfd = create_memfd(b"wroid-cursor-sprite\0", size as usize)?;
+    let memfd = create_memfd(b"wroid-cursor-sprite\0", pool_size as usize)?;
     {
         use std::io::Write as _;
         let mut mapping = memfd.try_clone()?;
@@ -432,8 +490,8 @@ fn create_cursor_surface(
         mapping.flush()?;
     }
 
-    let pool = shm.create_pool(memfd.as_fd(), size, qh, ());
-    let buffer = pool.create_buffer(
+    let pool = shm.create_pool(memfd.as_fd(), pool_size, qh, ());
+    let first = pool.create_buffer(
         0,
         CURSOR_WIDTH,
         CURSOR_HEIGHT,
@@ -442,15 +500,65 @@ fn create_cursor_surface(
         qh,
         (),
     );
-    let cursor_surface = compositor.create_surface(qh, ());
-    cursor_surface.attach(Some(&buffer), 0, 0);
-    cursor_surface.damage_buffer(0, 0, CURSOR_WIDTH, CURSOR_HEIGHT);
-    cursor_surface.commit();
+    let second = pool.create_buffer(
+        sprite_size,
+        CURSOR_WIDTH,
+        CURSOR_HEIGHT,
+        stride,
+        wl_shm::Format::Argb8888,
+        qh,
+        (),
+    );
 
-    state.cursor_surface = Some(cursor_surface);
-    state.cursor_buffer = Some(buffer);
+    state.cursor_buffers = [Some(first), Some(second)];
     state._cursor_memfd = Some(memfd);
     Ok(())
+}
+
+/// Draw (or hide) the virtual cursor sprite on the main overlay surface.
+fn draw_cursor(state: &mut OverlayState) {
+    let Some(surface) = state.surface.clone() else {
+        return;
+    };
+    let old_rect = state.cursor_visible.then_some((
+        state.cursor_x,
+        state.cursor_y,
+        CURSOR_WIDTH,
+        CURSOR_HEIGHT,
+    ));
+
+    let new_x = state
+        .pending_cursor_x
+        .clamp(0, state.clamp_width().saturating_sub(CURSOR_WIDTH));
+    let new_y = state
+        .pending_cursor_y
+        .clamp(0, state.clamp_height().saturating_sub(CURSOR_HEIGHT));
+    state.cursor_visible = state.pending_cursor_visible;
+    state.cursor_x = new_x;
+    state.cursor_y = new_y;
+
+    if state.cursor_visible {
+        state.cursor_buffer_index ^= 1;
+        let index = state.cursor_buffer_index;
+        if let Some(buffer) = state.cursor_buffers[index].as_ref() {
+            surface.attach(Some(buffer), new_x, new_y);
+            if let Some((x, y, w, h)) = old_rect {
+                surface.damage(x, y, w, h);
+            }
+            surface.damage(new_x, new_y, CURSOR_WIDTH, CURSOR_HEIGHT);
+            surface.commit();
+        }
+    } else if old_rect.is_some() {
+        // Re-attach the transparent 1x1 buffer so the surface stays mapped
+        // while nothing is drawn.
+        if let Some(buffer) = state.buffer.as_ref() {
+            surface.attach(Some(buffer), 0, 0);
+            if let Some((x, y, w, h)) = old_rect {
+                surface.damage(x, y, w, h);
+            }
+            surface.commit();
+        }
+    }
 }
 
 /// Install the input region matching the current `enabled` flag and commit.
@@ -490,6 +598,18 @@ fn event_loop(
                 Ok(CursorOverlayCommand::SetEnabled { enabled, reply }) => {
                     state.enabled = enabled;
                     apply_input_region(state, &event_queue.handle());
+                    let _ = reply.send(Ok(()));
+                }
+                Ok(CursorOverlayCommand::SetCursor {
+                    visible,
+                    x,
+                    y,
+                    reply,
+                }) => {
+                    state.pending_cursor_visible = visible;
+                    state.pending_cursor_x = x as i32;
+                    state.pending_cursor_y = y as i32;
+                    draw_cursor(state);
                     let _ = reply.send(Ok(()));
                 }
                 Ok(CursorOverlayCommand::Stop) => return Ok(()),
@@ -682,21 +802,17 @@ impl Dispatch<wl_pointer::WlPointer, ()> for OverlayState {
         _qh: &QueueHandle<Self>,
     ) {
         match event {
+            // Pointer events are only possible on compositors that actually
+            // deliver host pointers to nested clients; Gamescope's nested
+            // backend does not, and the session-drawn virtual cursor is the
+            // primary path. These remain as a secondary source.
             wl_pointer::Event::Enter {
                 surface_x,
                 surface_y,
-                serial,
                 ..
             } => {
                 state.last_x = surface_x;
                 state.last_y = surface_y;
-                // Show our own arrow sprite while the overlay owns the
-                // pointer, so UI cursor mode never ends up cursorless.
-                if let (Some(pointer), Some(cursor)) =
-                    (state.pointer.as_ref(), state.cursor_surface.as_ref())
-                {
-                    pointer.set_cursor(serial, Some(cursor), CURSOR_HOTSPOT.0, CURSOR_HOTSPOT.1);
-                }
             }
             wl_pointer::Event::Motion {
                 surface_x,
