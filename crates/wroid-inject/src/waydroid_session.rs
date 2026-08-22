@@ -50,8 +50,16 @@ fn gamescope_arguments(width: u32, height: u32) -> Vec<OsString> {
         OsString::from("-h"),
         OsString::from(height.to_string()),
         OsString::from("-f"),
+        // No `-g`: the session EVIOCGRABs the keyboard itself when captured,
+        // and a compositor-level grab would keep Alt+Tab dead even after F12
+        // releases input to the OS.
         OsString::from("--expose-wayland"),
         OsString::from("--force-windows-fullscreen"),
+        // Hide the cursor sprite after ~1s without movement: in aim mode the
+        // physical mouse is grabbed (cursor frozen) so it disappears, while in
+        // UI cursor mode the moving pointer stays visible.
+        OsString::from("-C"),
+        OsString::from("1000"),
         OsString::from("-S"),
         OsString::from("fit"),
         OsString::from("-F"),
@@ -194,6 +202,10 @@ impl DesktopUser {
         &self.name
     }
 
+    pub fn runtime_dir(&self) -> &Path {
+        &self.runtime_dir
+    }
+
     pub fn wayland_display(&self) -> &OsString {
         &self.wayland_display
     }
@@ -289,6 +301,8 @@ pub struct DesktopWaydroidSession {
     active: bool,
     ready_users: Vec<u32>,
     readiness: Receiver<u32>,
+    gamescope_displays: Receiver<String>,
+    gamescope_wayland_display: Option<String>,
     output_threads: Vec<JoinHandle<()>>,
 }
 
@@ -326,14 +340,15 @@ impl DesktopWaydroidSession {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
-        let (readiness, output_threads) = match capture_session_output(&mut child) {
-            Ok(capture) => capture,
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error);
-            }
-        };
+        let (readiness, gamescope_displays, output_threads) =
+            match capture_session_output(&mut child) {
+                Ok(capture) => capture,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(error);
+                }
+            };
         let mut session = Self {
             child,
             user,
@@ -341,6 +356,8 @@ impl DesktopWaydroidSession {
             active: true,
             ready_users: Vec::new(),
             readiness,
+            gamescope_displays,
+            gamescope_wayland_display: None,
             output_threads,
         };
 
@@ -353,6 +370,42 @@ impl DesktopWaydroidSession {
 
     pub fn user(&self) -> &DesktopUser {
         &self.user
+    }
+
+    pub fn gamescope_wayland_display(&mut self) -> io::Result<Option<String>> {
+        if self.presentation == WaydroidPresentation::Direct {
+            return Ok(None);
+        }
+        if let Some(display) = self.gamescope_wayland_display.as_ref() {
+            return Ok(Some(display.clone()));
+        }
+
+        for _ in 0..STATUS_ATTEMPTS {
+            match self.gamescope_displays.recv_timeout(STATUS_INTERVAL) {
+                Ok(display) => {
+                    self.gamescope_wayland_display = Some(display.clone());
+                    return Ok(Some(display));
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    if let Some(status) = self.child.try_wait()? {
+                        return Err(io::Error::other(format!(
+                            "Gamescope exited before publishing its nested Wayland display: {status}"
+                        )));
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "Gamescope output closed before publishing its nested Wayland display",
+                    ));
+                }
+            }
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "Gamescope did not publish its nested Wayland display",
+        ))
     }
 
     pub fn show_full_ui(&mut self) -> io::Result<()> {
@@ -603,9 +656,65 @@ pub fn wait_for_android_input_device(device_name: &str) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::NotFound,
         format!(
-            "Android getevent did not list {device_name}; device bridge is not active\n{last_output}"
+            "Android getevent did not list {device_name}; device bridge is not active\n{}",
+            tail_for_error(&last_output)
         ),
     ))
+}
+
+/// Verify that Android's InputReader registered the bridged touchscreen.
+///
+/// `getevent -pl` only proves the event node is visible inside the container;
+/// `dumpsys input` proves system_server could actually open it. A device the
+/// InputReader rejects (typically because the node still carries the host
+/// input GID instead of AID_INPUT) stays EventHub-listed but never delivers
+/// a single touch — this check turns that silent failure into an error.
+pub fn wait_for_android_input_reader(device_name: &str) -> io::Result<()> {
+    let mut last_output = String::new();
+    for _ in 0..STATUS_ATTEMPTS {
+        let output = waydroid_command(&["shell", "--", "dumpsys", "input"]).output()?;
+        last_output = combined_output(&output);
+        if output.status.success() && dumpsys_lists_input_reader_device(&last_output, device_name) {
+            return Ok(());
+        }
+        sleep(STATUS_INTERVAL);
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "Android InputReader did not register {device_name}; the event node is visible but \
+             unreadable for system_server (expected host group 1004/AID_INPUT, mode 0660)\n{}",
+            tail_for_error(&last_output)
+        ),
+    ))
+}
+
+/// Check that `dumpsys input` output lists the device inside an InputReader
+/// section, not only under EventHub. An unrecognized dump format counts as
+/// unregistered: claiming delivery from an EventHub-only listing is exactly
+/// the silent failure this check exists to catch.
+fn dumpsys_lists_input_reader_device(dump: &str, device_name: &str) -> bool {
+    for section in ["Input Reader", "InputReader"] {
+        if let Some(reader_state) = dump.split(section).nth(1) {
+            return reader_state.contains(device_name);
+        }
+    }
+    false
+}
+
+/// Keep error output bounded: `dumpsys input` can exceed tens of kilobytes
+/// while only its tail matters for triage.
+fn tail_for_error(output: &str) -> String {
+    const MAX_ERROR_CHARS: usize = 4 * 1024;
+    let char_count = output.chars().count();
+    if char_count <= MAX_ERROR_CHARS {
+        return output.to_owned();
+    }
+    output
+        .chars()
+        .skip(char_count - MAX_ERROR_CHARS)
+        .collect::<String>()
 }
 
 pub fn spawn_android_getevent_trace(event_node: &Path) -> io::Result<Child> {
@@ -637,7 +746,21 @@ fn android_user_ready_event(line: &str) -> Option<u32> {
         .ok()
 }
 
-fn capture_session_output(child: &mut Child) -> io::Result<(Receiver<u32>, Vec<JoinHandle<()>>)> {
+fn gamescope_wayland_display_event(line: &str) -> Option<String> {
+    let (_, display) = line.split_once("Running compositor on wayland display ")?;
+    let display = display
+        .trim()
+        .strip_prefix(char::from(39))?
+        .strip_suffix(char::from(39))?;
+    (!display.is_empty()).then(|| display.to_owned())
+}
+
+/// Session event pipes produced by [`capture_session_output`]: the Android
+/// user id once boot completes, every nested Gamescope Wayland display name,
+/// and the forwarding threads (kept for implicit join on drop).
+type SessionOutputPipes = (Receiver<u32>, Receiver<String>, Vec<JoinHandle<()>>);
+
+fn capture_session_output(child: &mut Child) -> io::Result<SessionOutputPipes> {
     let stdout = child
         .stdout
         .take()
@@ -648,23 +771,40 @@ fn capture_session_output(child: &mut Child) -> io::Result<(Receiver<u32>, Vec<J
         .ok_or_else(|| io::Error::other("Waydroid session stderr pipe is unavailable"))?;
     let (readiness_sender, readiness) = mpsc::channel();
     let stderr_readiness_sender = readiness_sender.clone();
+    let (gamescope_sender, gamescope_displays) = mpsc::channel();
+    let stderr_gamescope_sender = gamescope_sender.clone();
     let stdout_thread = thread::spawn(move || {
         let reader = BufReader::new(stdout);
         let output = io::stdout();
-        let _ = forward_session_output(reader, output, Some(readiness_sender));
+        let _ = forward_session_output(
+            reader,
+            output,
+            Some(readiness_sender),
+            Some(gamescope_sender),
+        );
     });
     let stderr_thread = thread::spawn(move || {
         let reader = BufReader::new(stderr);
         let output = io::stderr();
-        let _ = forward_session_output(reader, output, Some(stderr_readiness_sender));
+        let _ = forward_session_output(
+            reader,
+            output,
+            Some(stderr_readiness_sender),
+            Some(stderr_gamescope_sender),
+        );
     });
-    Ok((readiness, vec![stdout_thread, stderr_thread]))
+    Ok((
+        readiness,
+        gamescope_displays,
+        vec![stdout_thread, stderr_thread],
+    ))
 }
 
 fn forward_session_output<R, W>(
     mut reader: R,
     mut writer: W,
     readiness: Option<Sender<u32>>,
+    gamescope_displays: Option<Sender<String>>,
 ) -> io::Result<()>
 where
     R: BufRead,
@@ -683,6 +823,12 @@ where
             android_user_ready_event(&String::from_utf8_lossy(&line)),
         ) {
             let _ = sender.send(user_id);
+        }
+        if let (Some(sender), Some(display)) = (
+            gamescope_displays.as_ref(),
+            gamescope_wayland_display_event(&String::from_utf8_lossy(&line)),
+        ) {
+            let _ = sender.send(display);
         }
     }
 }
@@ -934,6 +1080,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dumpsys_reader_check_requires_reader_section_registration() {
+        let event_hub_only = "Event Hub State\n  1: Wroid Gaming Touchscreen\n";
+        assert!(!dumpsys_lists_input_reader_device(
+            event_hub_only,
+            "Wroid Gaming Touchscreen"
+        ));
+
+        let registered = "Event Hub State\n  1: Wroid Gaming Touchscreen\n\
+            Input Reader State\n  Device 1: Wroid Gaming Touchscreen\n";
+        assert!(dumpsys_lists_input_reader_device(
+            registered,
+            "Wroid Gaming Touchscreen"
+        ));
+    }
+
+    #[test]
+    fn dumpsys_reader_check_is_strict_about_unknown_formats() {
+        let headerless = "  1: Wroid Gaming Touchscreen\n";
+        assert!(!dumpsys_lists_input_reader_device(
+            headerless,
+            "Wroid Gaming Touchscreen"
+        ));
+    }
+
+    #[test]
+    fn error_tails_are_bounded() {
+        let short = "abc";
+        assert_eq!(tail_for_error(short), "abc");
+
+        let long = "x".repeat(10_000);
+        let tail = tail_for_error(&long);
+        assert_eq!(tail.chars().count(), 4 * 1024);
+        assert!(tail.chars().all(|c| c == 'x'));
+    }
+
+    #[test]
     fn gamescope_arguments_preserve_the_render_preset_and_aspect_ratio() {
         assert_eq!(
             gamescope_arguments(1280, 720),
@@ -945,6 +1127,8 @@ mod tests {
                 "-f",
                 "--expose-wayland",
                 "--force-windows-fullscreen",
+                "-C",
+                "1000",
                 "-S",
                 "fit",
                 "-F",
@@ -1216,6 +1400,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_gamescope_wayland_display_from_real_output() {
+        assert_eq!(
+            gamescope_wayland_display_event(
+                "[gamescope] [Info]  wlserver: Running compositor on wayland display 'gamescope-0'
+"
+            ),
+            Some("gamescope-0".to_owned())
+        );
+        assert_eq!(
+            gamescope_wayland_display_event(
+                "[gamescope] [Info] unrelated
+"
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn parses_android_user_ready_from_real_session_stdout() {
         assert_eq!(
             android_user_ready_event("[13:07:35] Android with user 0 is ready\n"),
@@ -1237,7 +1439,7 @@ mod tests {
         let mut output = Vec::new();
         let (sender, receiver) = std::sync::mpsc::channel();
 
-        forward_session_output(Cursor::new(input), &mut output, Some(sender)).unwrap();
+        forward_session_output(Cursor::new(input), &mut output, Some(sender), None).unwrap();
 
         assert_eq!(output, input);
         assert_eq!(receiver.try_recv().unwrap(), 0);

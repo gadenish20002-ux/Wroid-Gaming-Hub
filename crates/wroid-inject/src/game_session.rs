@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::error::Error;
+use std::fmt;
 use std::io::{self, BufRead, BufReader};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -8,11 +9,13 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::privileged_bridge::{settle_wroid_input_udev, AndroidInputAccess};
 use crate::{
     ensure_container_stopped, ensure_root, gamescope_is_available, presentation_for_game,
-    remove_default_bridge, wait_for_android_input_device, BridgeBrokerClient, DesktopUser,
-    DesktopWaydroidSession, DeviceConfig, InputDeviceNode, InstalledWaydroidBridge,
-    UinputTouchInjector, WaydroidBridgeLease, WaydroidPresentation, WROID_TOUCHSCREEN_NAME,
+    remove_default_bridge, spawn_android_getevent_trace, stop_child, wait_for_android_input_device,
+    wait_for_android_input_reader, BridgeBrokerClient, DesktopUser, DesktopWaydroidSession,
+    DeviceConfig, InputDeviceNode, InstalledWaydroidBridge, UinputTouchInjector,
+    WaydroidBridgeLease, WaydroidPresentation, WROID_TOUCHSCREEN_NAME,
 };
 use wroid_core::profile_v2::{InputV2, JoystickMode, ProfileV2};
 use wroid_core::{Point, Resolution};
@@ -30,6 +33,11 @@ const DEFAULT_HEIGHT: u32 = 1080;
 const IDLE_POLL: Duration = Duration::from_millis(50);
 const INPUT_CONTROL_TIMEOUT: Duration = Duration::from_secs(2);
 const FOCUS_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Grace period for a connected focus relay to report its first window event.
+/// A relay that stays silent past this leaves the session dead (no grabs, no
+/// input), so the loop degrades to manual F12 capture instead of waiting
+/// forever.
+const FOCUS_FALLBACK_AFTER: Duration = Duration::from_secs(10);
 /// Upper bound on how long an input reader parks inside `poll`. Control
 /// commands are delivered over a channel that `poll` cannot observe, so the
 /// wait is bounded to keep capture toggles and shutdown responsive.
@@ -160,7 +168,16 @@ pub fn run_game_session(mut options: GameSessionOptions) -> GameSessionResult<Ga
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "uinput event node not found"))?;
     let mut bridge = if is_root {
         let input_node = InputDeviceNode::from_path(&event_node)?;
-        SessionBridge::InProcess(InstalledWaydroidBridge::install_default(&input_node)?)
+        // Mirror the privileged helper's handoff: wait for udev to finish
+        // device initialization, then hand the node to Android's AID_INPUT
+        // group. Without this, InputReader cannot open the node and touches
+        // silently never reach Android even though getevent lists it.
+        settle_wroid_input_udev()?;
+        let input_access = AndroidInputAccess::prepare(&input_node)?;
+        SessionBridge::InProcess(
+            input_access,
+            InstalledWaydroidBridge::install_default(&input_node)?,
+        )
     } else {
         let mut broker = bridge_broker.expect("rootless bridge was validated before setup");
         broker.open(&event_node)?;
@@ -180,6 +197,10 @@ pub fn run_game_session(mut options: GameSessionOptions) -> GameSessionResult<Ga
         );
     }
     let mut waydroid = DesktopWaydroidSession::start_presented(desktop_user, presentation)?;
+    let gamescope_wayland_display = waydroid.gamescope_wayland_display()?;
+    if let Some(display) = gamescope_wayland_display.as_deref() {
+        println!("Gamescope nested Wayland display: {display}.");
+    }
 
     let session_result = (|| -> GameSessionResult<GameSessionReport> {
         waydroid.wait_until_android_ready()?;
@@ -189,6 +210,10 @@ pub fn run_game_session(mut options: GameSessionOptions) -> GameSessionResult<Ga
         }
         waydroid.confirm_resolution(options.width, options.height)?;
         bridge.verify_android_input()?;
+        // getevent visibility is not delivery: make sure Android's
+        // InputReader actually opened the bridged touchscreen. A node with
+        // host-only ownership passes getevent and drops every touch.
+        wait_for_android_input_reader(WROID_TOUCHSCREEN_NAME)?;
         match android_open_action(options.show_ui, options.launch_package) {
             AndroidOpenAction::Package => {
                 waydroid.launch_package(&plan.package_name)?;
@@ -288,8 +313,70 @@ pub fn run_game_session(mut options: GameSessionOptions) -> GameSessionResult<Ga
             SessionMetricsInjector::new(injector),
             options.trace_input,
         )?;
+
+        // Cursor overlay: a native Wayland layer surface inside nested
+        // Gamescope that turns pointer input into Android touchscreen clicks.
+        // Its emit closure forwards overlay events into the event loop.
+        let cursor_overlay = gamescope_wayland_display.as_deref().and_then(|display| {
+            let cursor_sender = sender.clone();
+            match crate::cursor_overlay::CursorOverlay::spawn(
+                waydroid.user().runtime_dir(),
+                display,
+                false,
+                move |event| {
+                    let _ = cursor_sender.send(HostEvent::Cursor {
+                        event,
+                        received_at: Instant::now(),
+                    });
+                },
+            ) {
+                Ok(overlay) => {
+                    println!("Cursor overlay: Android UI clicks available.");
+                    Some(overlay)
+                }
+                Err(error) => {
+                    eprintln!("Cursor overlay unavailable: {error}; UI cursor mode disabled.");
+                    if !runtime.has_always_on_aim() && runtime.has_toggle_key_aim() {
+                        eprintln!(
+                            "This profile boots in UI cursor mode: without the overlay, left \
+                                 clicks cannot reach Android menus. Aim bindings still work once \
+                                 the aim key is pressed. Please report the error above."
+                        );
+                    }
+                    None
+                }
+            }
+        });
+
+        // Initial input mode: profiles with any always-on aim boot in aim mode;
+        // toggle-key-only aim profiles (with a working overlay) boot in UI
+        // cursor mode so LMB clicks Android UI until the toggle key is pressed.
+        let initial_mode = if !runtime.has_always_on_aim()
+            && runtime.has_toggle_key_aim()
+            && cursor_overlay.is_some()
+        {
+            InputMode::Ui
+        } else {
+            InputMode::Aim
+        };
+        if initial_mode == InputMode::Ui {
+            println!("Input mode: ui (LMB clicks the Android UI; press the aim key to aim).");
+        }
+
         if initially_focused {
             runtime.start()?;
+        }
+        // Optional Android-side trace: streams the bridged node's raw events
+        // from inside the container so delivery problems are visible at once.
+        let android_input_trace = options
+            .trace_android_input
+            .then(|| spawn_android_getevent_trace(&event_node))
+            .transpose()?;
+        if android_input_trace.is_some() {
+            println!(
+                "Android input trace: streaming getevent for {}.",
+                event_node.display()
+            );
         }
         let loop_result = run_event_loop(
             &receiver,
@@ -301,8 +388,16 @@ pub fn run_game_session(mut options: GameSessionOptions) -> GameSessionResult<Ga
                 focus_protected,
                 focused: initially_focused,
                 focus_receiver: focus_receiver.as_ref(),
+                grab_allowed: options.grab,
+                initial_mode,
+                overlay: cursor_overlay.as_ref(),
             },
         );
+        if let Some(mut trace) = android_input_trace {
+            if let Err(error) = stop_child(&mut trace) {
+                eprintln!("Android input trace stop failed: {error}");
+            }
+        }
         let cleanup_result = runtime.stop();
         let exit = loop_result?;
         cleanup_result?;
@@ -326,21 +421,34 @@ pub fn run_game_session(mut options: GameSessionOptions) -> GameSessionResult<Ga
 }
 
 enum SessionBridge {
-    InProcess(InstalledWaydroidBridge),
+    InProcess(AndroidInputAccess, InstalledWaydroidBridge),
     Broker(BridgeBrokerClient),
 }
 
 impl SessionBridge {
     fn verify_android_input(&mut self) -> io::Result<()> {
         match self {
-            Self::InProcess(_) => wait_for_android_input_device(WROID_TOUCHSCREEN_NAME),
+            Self::InProcess(..) => wait_for_android_input_device(WROID_TOUCHSCREEN_NAME),
             Self::Broker(broker) => broker.verify_android_input(),
         }
     }
 
     fn cleanup(self, waydroid_stopped: bool) -> io::Result<()> {
         match self {
-            Self::InProcess(bridge) => bridge.cleanup(),
+            Self::InProcess(input_access, bridge) => {
+                // Restore the bridge config first (container stopped), then
+                // give the event node back to the host ownership.
+                let bridge_result = bridge.cleanup();
+                let access_result = input_access.cleanup();
+                match (bridge_result, access_result) {
+                    (Ok(()), Ok(())) => Ok(()),
+                    (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+                    (Err(bridge_error), Err(access_error)) => Err(io::Error::other(format!(
+                        "bridge cleanup failed: {bridge_error}; input ownership restore failed: \
+                         {access_error}"
+                    ))),
+                }
+            }
             Self::Broker(broker) => broker.finish(waydroid_stopped),
         }
     }
@@ -421,6 +529,10 @@ enum HostEvent {
         received_at: Instant,
         kernel_timestamp: Option<SystemTime>,
     },
+    Cursor {
+        event: crate::cursor_overlay::CursorEvent,
+        received_at: Instant,
+    },
     ReaderFailed {
         reader: &'static str,
         message: String,
@@ -445,6 +557,11 @@ enum InputReaderCommand {
         enabled: bool,
         reply: Sender<Result<(), String>>,
     },
+    SetMouseMode {
+        forward: bool,
+        grab: bool,
+        reply: Sender<Result<(), String>>,
+    },
 }
 
 struct InputReaderControls {
@@ -453,10 +570,28 @@ struct InputReaderControls {
 }
 
 impl InputReaderControls {
-    fn set_capture(&self, enabled: bool) -> GameSessionResult<()> {
-        set_reader_capture(&self.keyboard, "keyboard", enabled)?;
+    fn set_keyboard_capture(&self, enabled: bool) -> GameSessionResult<()> {
+        set_reader_capture(&self.keyboard, "keyboard", enabled)
+    }
+
+    fn set_mouse_mode(&self, forward: bool, grab: bool) -> GameSessionResult<()> {
         if let Some(mouse) = self.mouse.as_ref() {
-            set_reader_capture(mouse, "mouse", enabled)?;
+            let (reply, response) = mpsc::channel();
+            mouse
+                .send(InputReaderCommand::SetMouseMode {
+                    forward,
+                    grab,
+                    reply,
+                })
+                .map_err(|_| io::Error::other("mouse control disconnected"))?;
+            response
+                .recv_timeout(INPUT_CONTROL_TIMEOUT)
+                .map_err(|error| {
+                    io::Error::other(format!(
+                        "mouse input reader did not update mouse mode: {error}"
+                    ))
+                })?
+                .map_err(|message| io::Error::other(format!("mouse mode failed: {message}")))?;
         }
         Ok(())
     }
@@ -498,6 +633,8 @@ fn spawn_keyboard_reader(
                 }
                 let _ = reply.send(result.map_err(|error| error.to_string()));
             }
+            // Mouse-only command; never routed to the keyboard reader.
+            Ok(InputReaderCommand::SetMouseMode { .. }) => {}
             Err(mpsc::TryRecvError::Disconnected) => return,
             Err(mpsc::TryRecvError::Empty) => {}
         }
@@ -541,6 +678,8 @@ fn spawn_keyboard_reader(
                 }
                 let _ = reply.send(result.map_err(|error| error.to_string()));
             }
+            // Mouse-only command; never routed to the keyboard reader.
+            Ok(InputReaderCommand::SetMouseMode { .. }) => {}
             Err(mpsc::TryRecvError::Disconnected) => return,
             Err(mpsc::TryRecvError::Empty) => {}
         }
@@ -579,18 +718,43 @@ fn keyboard_events_for_capture(events: Vec<HostKeyEvent>, captured: bool) -> Vec
 fn spawn_mouse_reader(
     mut mouse: EvdevMouse,
     sender: Sender<HostEvent>,
-    mut captured: bool,
+    captured: bool,
 ) -> Sender<InputReaderCommand> {
     let (control, commands) = mpsc::channel();
     let mouse_fd = mouse.as_raw_fd();
+    let mut forwarding = captured;
+    let mut grabbed = captured; // Assuming initial capture implies both.
     thread::spawn(move || loop {
         match commands.try_recv() {
             Ok(InputReaderCommand::SetCapture { enabled, reply }) => {
                 let result = update_mouse_capture(&mut mouse, enabled);
                 if result.is_ok() {
-                    captured = enabled;
+                    forwarding = enabled;
+                    grabbed = enabled;
                 }
                 let _ = reply.send(result.map_err(|error| error.to_string()));
+            }
+            Ok(InputReaderCommand::SetMouseMode {
+                forward,
+                grab,
+                reply,
+            }) => {
+                let result = if grab != grabbed {
+                    if grab {
+                        let _ = drain_mouse(&mut mouse);
+                        mouse.grab()
+                    } else {
+                        mouse.ungrab()
+                    }
+                    .map_err(|e| e.to_string())
+                } else {
+                    Ok(())
+                };
+                if result.is_ok() {
+                    forwarding = forward;
+                    grabbed = grab;
+                }
+                let _ = reply.send(result);
             }
             Err(mpsc::TryRecvError::Disconnected) => return,
             Err(mpsc::TryRecvError::Empty) => {}
@@ -598,7 +762,7 @@ fn spawn_mouse_reader(
         let had_events = match mouse.next_event_batch() {
             Ok(batch) => {
                 let had_events = !batch.events.is_empty();
-                if captured
+                if forwarding
                     && had_events
                     && sender
                         .send(HostEvent::Mouse {
@@ -631,9 +795,32 @@ fn spawn_mouse_reader(
             Ok(InputReaderCommand::SetCapture { enabled, reply }) => {
                 let result = update_mouse_capture(&mut mouse, enabled);
                 if result.is_ok() {
-                    captured = enabled;
+                    forwarding = enabled;
+                    grabbed = enabled;
                 }
                 let _ = reply.send(result.map_err(|error| error.to_string()));
+            }
+            Ok(InputReaderCommand::SetMouseMode {
+                forward,
+                grab,
+                reply,
+            }) => {
+                let result = if grab != grabbed {
+                    if grab {
+                        let _ = drain_mouse(&mut mouse);
+                        mouse.grab()
+                    } else {
+                        mouse.ungrab()
+                    }
+                    .map_err(|e| e.to_string())
+                } else {
+                    Ok(())
+                };
+                if result.is_ok() {
+                    forwarding = forward;
+                    grabbed = grab;
+                }
+                let _ = reply.send(result);
             }
             Err(mpsc::TryRecvError::Disconnected) => return,
             Err(mpsc::TryRecvError::Empty) => {}
@@ -763,6 +950,91 @@ struct EventLoopOptions<'a> {
     focus_protected: bool,
     focused: bool,
     focus_receiver: Option<&'a Receiver<FocusEvent>>,
+    /// Whether EVIOCGRAB is permitted at all (`--no-grab` turns it off).
+    grab_allowed: bool,
+    /// Initial Aim/UI mode when input is captured.
+    initial_mode: InputMode,
+    /// Cursor overlay used to click Android UI in UI mode; `None` disables UI mode.
+    overlay: Option<&'a crate::cursor_overlay::CursorOverlay>,
+}
+
+/// Input ownership mode: who currently owns the physical mouse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputMode {
+    /// Aim/gameplay mode: the mouse is forwarded to profile bindings (`fire`, aim)
+    /// and grabbed so the game owns the pointer.
+    Aim,
+    /// UI cursor mode: raw mouse events are not forwarded (gating the `fire`
+    /// binding at the source); the cursor overlay clicks the Android UI.
+    Ui,
+}
+
+impl fmt::Display for InputMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InputMode::Aim => f.write_str("aim"),
+            InputMode::Ui => f.write_str("ui"),
+        }
+    }
+}
+
+/// Apply an input mode transition while the session is active (captured).
+///
+/// Keyboard capture stays on in both modes; this handles the mouse routing
+/// (forward + EVIOCGRAB), the overlay input region, and the runtime aim state.
+/// Callers set `grab_allowed = false` under `--no-grab` so the reader never
+/// grabs the device.
+fn apply_input_mode<I: TouchInjector>(
+    runtime: &mut UnifiedRuntime<I>,
+    input_readers: &InputReaderControls,
+    overlay: Option<&crate::cursor_overlay::CursorOverlay>,
+    mode: InputMode,
+    grab_allowed: bool,
+    reactivate_toggle_aim: bool,
+) -> GameSessionResult<()> {
+    match mode {
+        InputMode::Aim => {
+            input_readers.set_mouse_mode(true, grab_allowed)?;
+            if let Some(overlay) = overlay {
+                overlay
+                    .set_enabled(false)
+                    .map_err(|error| io::Error::other(format!("cursor overlay: {error}")))?;
+            }
+            runtime.restore_aim(reactivate_toggle_aim)?;
+        }
+        InputMode::Ui => {
+            runtime.set_aim_enabled(false)?;
+            runtime.release_mouse_buttons()?;
+            input_readers.set_mouse_mode(false, false)?;
+            if let Some(overlay) = overlay {
+                overlay
+                    .set_enabled(true)
+                    .map_err(|error| io::Error::other(format!("cursor overlay: {error}")))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Fully release input to the host OS (F12 release / focus loss).
+///
+/// Stops keyboard forwarding, drops the mouse (no forwarding, no grab),
+/// disables the overlay's input region, and suspends the runtime. The current
+/// [`InputMode`] is deliberately not touched so recapture restores it.
+fn release_input_to_os<I: TouchInjector>(
+    runtime: &mut UnifiedRuntime<I>,
+    input_readers: &InputReaderControls,
+    overlay: Option<&crate::cursor_overlay::CursorOverlay>,
+) -> GameSessionResult<()> {
+    input_readers.set_keyboard_capture(false)?;
+    input_readers.set_mouse_mode(false, false)?;
+    if let Some(overlay) = overlay {
+        overlay
+            .set_enabled(false)
+            .map_err(|error| io::Error::other(format!("cursor overlay: {error}")))?;
+    }
+    runtime.suspend()?;
+    Ok(())
 }
 
 fn run_event_loop<I: TouchInjector>(
@@ -773,12 +1045,48 @@ fn run_event_loop<I: TouchInjector>(
 ) -> GameSessionResult<EventLoopExit> {
     let trace_input = options.trace_input;
     let exit_after = options.exit_after;
+    let grab_allowed = options.grab_allowed;
+    let overlay = options.overlay;
     let mut focus_protected = options.focus_protected;
     let mut waydroid_focused = options.focused;
     let mut input_active = options.focused;
     let mut manually_released = false;
+    // Whether the relay ever delivered a window event since the loop began.
+    // A silent relay is indistinguishable from a broken one until it speaks.
+    let mut saw_focus_event = false;
+    let mut mode = options.initial_mode;
+    // Aim activity at the moment of the last OS release, so recapture can
+    // restore the mode that was in effect rather than resetting.
+    let mut toggle_aim_active_before_release = false;
     let loop_started_at = Instant::now();
     let mut control_pressed = false;
+
+    // Sync mode with the current runtime aim state. Aim mode follows any
+    // active aim controller; when no aim is active but the profile only has
+    // toggle-key aim (and an overlay exists to click the UI), the session sits
+    // in UI cursor mode.
+    let desired_mode = |runtime: &UnifiedRuntime<I>| -> InputMode {
+        if runtime.aim_active() || !runtime.has_toggle_key_aim() || overlay.is_none() {
+            InputMode::Aim
+        } else {
+            InputMode::Ui
+        }
+    };
+
+    if input_active && mode == InputMode::Ui {
+        // Apply the non-default initial mode (Aim needs no apply: the readers
+        // already start forwarded/grabbed like legacy sessions).
+        apply_input_mode(
+            runtime,
+            input_readers,
+            overlay,
+            InputMode::Ui,
+            grab_allowed,
+            false,
+        )?;
+        println!("Cursor mode: Android UI clicks are enabled; press the aim key to aim.");
+    }
+
     loop {
         if interrupt_requested() {
             return Ok(EventLoopExit::InterruptRequested);
@@ -787,6 +1095,7 @@ fn run_event_loop<I: TouchInjector>(
             while let Ok(event) = focus_receiver.try_recv() {
                 match event {
                     FocusEvent::Changed(next_focused) if focus_protected => {
+                        saw_focus_event = true;
                         waydroid_focused = next_focused;
                         control_pressed = false;
                         if next_focused {
@@ -795,15 +1104,23 @@ fn run_event_loop<I: TouchInjector>(
                                     "Focus protection: Waydroid focused; press F12 to recapture input."
                                 );
                             } else if !input_active {
-                                input_readers.set_capture(true)?;
-                                runtime.start()?;
+                                input_readers.set_keyboard_capture(true)?;
+                                apply_input_mode(
+                                    runtime,
+                                    input_readers,
+                                    overlay,
+                                    mode,
+                                    grab_allowed,
+                                    toggle_aim_active_before_release,
+                                )?;
                                 input_active = true;
-                                println!("Focus protection: Waydroid focused; input captured.");
+                                println!("Focus protection: Waydroid focused; input captured ({mode} mode).");
                             }
                         } else if input_active {
                             input_active = false;
-                            input_readers.set_capture(false)?;
-                            runtime.suspend()?;
+                            mode = desired_mode(runtime);
+                            toggle_aim_active_before_release = runtime.aim_active();
+                            release_input_to_os(runtime, input_readers, overlay)?;
                             println!("Focus protection: Waydroid unfocused; input released.");
                         }
                     }
@@ -814,16 +1131,49 @@ fn run_event_loop<I: TouchInjector>(
                         control_pressed = false;
                         if input_active {
                             input_active = false;
-                            input_readers.set_capture(false)?;
-                            runtime.suspend()?;
+                            mode = desired_mode(runtime);
+                            toggle_aim_active_before_release = runtime.aim_active();
+                            release_input_to_os(runtime, input_readers, overlay)?;
                         }
                         eprintln!("Focus protection stopped: {message}");
                         eprintln!(
                             "Input was released. Press F12 to recapture with manual protection."
                         );
                     }
-                    FocusEvent::Changed(_) | FocusEvent::Unavailable(_) => {}
+                    FocusEvent::Changed(next_focused) => {
+                        // Focus signal arriving after protection was degraded
+                        // (relay fallback or disconnect): capture stays manual,
+                        // but remember that the relay is alive after all.
+                        saw_focus_event = true;
+                        waydroid_focused = next_focused;
+                        if next_focused && manually_released {
+                            println!(
+                                "Focus protection: game window focused; press F12 to capture input."
+                            );
+                        }
+                    }
+                    FocusEvent::Unavailable(_) => {}
                 }
+            }
+            // A connected relay that never reports the game window leaves the
+            // session dead: no grabs, no input, and F12 alone cannot recover
+            // while the loop still believes focus protection is active.
+            // Degrade to manual capture once it stays silent past the grace
+            // period.
+            if focus_protected
+                && !input_active
+                && !manually_released
+                && !saw_focus_event
+                && loop_started_at.elapsed() >= FOCUS_FALLBACK_AFTER
+            {
+                focus_protected = false;
+                manually_released = true;
+                eprintln!(
+                    "Focus protection: no focus events within {} seconds; the relay may not be \
+                     tracking the game window.",
+                    FOCUS_FALLBACK_AFTER.as_secs()
+                );
+                eprintln!("Falling back to manual capture: press F12 to capture input.");
             }
         }
         match receiver.recv_timeout(IDLE_POLL) {
@@ -847,17 +1197,27 @@ fn run_event_loop<I: TouchInjector>(
                             if input_active {
                                 manually_released = true;
                                 input_active = false;
-                                input_readers.set_capture(false)?;
-                                runtime.suspend()?;
+                                mode = desired_mode(runtime);
+                                toggle_aim_active_before_release = runtime.aim_active();
+                                release_input_to_os(runtime, input_readers, overlay)?;
                                 println!(
                                     "Manual capture: input released. Alt+Tab is available; focus Waydroid and press F12 to recapture."
                                 );
                             } else if manually_released && (waydroid_focused || !focus_protected) {
-                                input_readers.set_capture(true)?;
-                                runtime.start()?;
+                                input_readers.set_keyboard_capture(true)?;
+                                apply_input_mode(
+                                    runtime,
+                                    input_readers,
+                                    overlay,
+                                    mode,
+                                    grab_allowed,
+                                    toggle_aim_active_before_release,
+                                )?;
                                 input_active = true;
                                 manually_released = false;
-                                println!("Manual capture: Waydroid input recaptured.");
+                                println!(
+                                    "Manual capture: Waydroid input recaptured ({mode} mode)."
+                                );
                             } else if manually_released {
                                 println!("Manual capture: focus Waydroid before pressing F12.");
                             }
@@ -886,13 +1246,33 @@ fn run_event_loop<I: TouchInjector>(
                 if submitted {
                     runtime.record_pipeline_latency(received_at.elapsed(), kernel_timestamp);
                 }
+                // Sync the input mode with aim state: pressing a toggle key
+                // flips between aim and UI cursor mode.
+                if input_active {
+                    let next_mode = desired_mode(runtime);
+                    if next_mode != mode {
+                        apply_input_mode(
+                            runtime,
+                            input_readers,
+                            overlay,
+                            next_mode,
+                            grab_allowed,
+                            true,
+                        )?;
+                        mode = next_mode;
+                        println!("Input mode switched to {mode}.");
+                    }
+                }
             }
             Ok(HostEvent::Mouse {
                 events,
                 received_at,
                 kernel_timestamp,
             }) => {
-                if input_active {
+                // Raw mouse events only reach profile bindings in aim mode.
+                // In UI cursor mode the pointer belongs to the overlay, so the
+                // fire binding is gated here (and forwarding is also off).
+                if input_active && mode == InputMode::Aim {
                     let mut submitted = false;
                     for event in events {
                         if trace_input {
@@ -902,6 +1282,63 @@ fn run_event_loop<I: TouchInjector>(
                     }
                     if submitted {
                         runtime.record_pipeline_latency(received_at.elapsed(), kernel_timestamp);
+                    }
+                }
+            }
+            Ok(HostEvent::Cursor { event, received_at }) => {
+                // Overlay clicks only produce Android touches in UI cursor mode.
+                if input_active && mode == InputMode::Ui {
+                    let submitted = match event {
+                        crate::cursor_overlay::CursorEvent::Motion {
+                            x,
+                            y,
+                            surface_width,
+                            surface_height,
+                        } => {
+                            if let Some(point) =
+                                runtime.cursor_point(x, y, surface_width, surface_height)
+                            {
+                                if trace_input {
+                                    println!(
+                                        "[trace] cursor motion surface=({x:.1},{y:.1}) android=({},{})",
+                                        point.x, point.y
+                                    );
+                                }
+                                runtime.cursor_move(point)?;
+                                runtime.engine.state().is_active(runtime.cursor_contact)
+                            } else {
+                                false
+                            }
+                        }
+                        crate::cursor_overlay::CursorEvent::LeftButton {
+                            pressed,
+                            x,
+                            y,
+                            surface_width,
+                            surface_height,
+                        } => {
+                            if let Some(point) =
+                                runtime.cursor_point(x, y, surface_width, surface_height)
+                            {
+                                if trace_input {
+                                    println!(
+                                        "[trace] cursor left pressed={pressed} surface=({x:.1},{y:.1}) android=({},{})",
+                                        point.x, point.y
+                                    );
+                                }
+                                if pressed {
+                                    runtime.cursor_down(point)?;
+                                } else {
+                                    runtime.cursor_up()?;
+                                }
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                    };
+                    if submitted {
+                        runtime.record_pipeline_latency(received_at.elapsed(), None);
                     }
                 }
             }
@@ -978,6 +1415,7 @@ struct UnifiedRuntime<I: TouchInjector> {
     desired_bindings: Vec<bool>,
     selected_input_layers: [Option<LayerId>; PHYSICAL_INPUT_COUNT],
     point_contacts: Vec<Option<ContactId>>,
+    cursor_contact: ContactId,
     aim_controllers: Vec<Option<MouseAimController>>,
     aim_toggle_keys: Vec<Option<HostKeyName>>,
     last_joystick_frame: Vec<Option<Duration>>,
@@ -1045,6 +1483,8 @@ impl<I: TouchInjector> UnifiedRuntime<I> {
             }
         }
 
+        let cursor_contact = ContactId::new(next_contact);
+
         let mut layer_controls = [None; 46];
         for layer in &plan.layers {
             let mask = layer_mask_bit(layer.id)
@@ -1066,6 +1506,7 @@ impl<I: TouchInjector> UnifiedRuntime<I> {
             desired_bindings: vec![false; control_count],
             selected_input_layers: [None; PHYSICAL_INPUT_COUNT],
             point_contacts,
+            cursor_contact,
             aim_controllers,
             aim_toggle_keys,
             last_joystick_frame: vec![None; control_count],
@@ -1087,6 +1528,134 @@ impl<I: TouchInjector> UnifiedRuntime<I> {
             if controller.settings().toggle_key.is_none() {
                 controller.activate(&mut self.engine, now)?;
             }
+        }
+        Ok(())
+    }
+
+    fn has_toggle_key_aim(&self) -> bool {
+        self.aim_controllers
+            .iter()
+            .flatten()
+            .any(|c| c.settings().toggle_key.is_some())
+    }
+
+    /// True when any aim controller runs without a toggle key.
+    ///
+    /// Always-on aim starts active, so the session boots in aim mode; profiles
+    /// whose aim controllers all declare toggle keys boot in UI cursor mode
+    /// instead and switch to aim mode when a toggle key is pressed.
+    fn has_always_on_aim(&self) -> bool {
+        self.aim_controllers
+            .iter()
+            .flatten()
+            .any(|c| c.settings().toggle_key.is_none())
+    }
+
+    /// Restore aim controllers for aim mode.
+    ///
+    /// Always-on controllers activate unconditionally; toggle-key controllers
+    /// activate only when `reactivate_toggle_aim` is set (i.e. aim was active
+    /// before the release being undone). This avoids wrongly enabling a
+    /// toggle-key controller when restoring aim after a transition that left
+    /// it inactive by the user's choice.
+    fn restore_aim(&mut self, reactivate_toggle_aim: bool) -> GameSessionResult<()> {
+        let now = self.now();
+        for controller in self.aim_controllers.iter_mut().flatten() {
+            let wanted = controller.settings().toggle_key.is_none() || reactivate_toggle_aim;
+            if wanted && !controller.is_active() {
+                controller.activate(&mut self.engine, now)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Deactivate all aim controllers (UI cursor mode entry).
+    fn set_aim_enabled(&mut self, enabled: bool) -> GameSessionResult<()> {
+        if enabled {
+            return self.restore_aim(true);
+        }
+        for controller in self.aim_controllers.iter_mut().flatten() {
+            if controller.is_active() {
+                controller.deactivate(&mut self.engine)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Release any physically-held mouse buttons and their bindings.
+    ///
+    /// Called when leaving aim mode: raw mouse events stop being forwarded, so
+    /// a pending release would never arrive and a held fire binding would stay
+    /// stuck. Zeroing the held-button mask and reconciling lifts those contacts.
+    fn release_mouse_buttons(&mut self) -> GameSessionResult<()> {
+        if self.held_mouse_buttons == 0 {
+            return Ok(());
+        }
+        self.held_mouse_buttons = 0;
+        for controller in self.aim_controllers.iter_mut().flatten() {
+            controller.set_ads_active(false);
+        }
+        let now = self.now();
+        self.reconcile_continuous(now)?;
+        Ok(())
+    }
+
+    fn aim_active(&self) -> bool {
+        self.aim_controllers
+            .iter()
+            .flatten()
+            .any(MouseAimController::is_active)
+    }
+
+    fn cursor_point(
+        &self,
+        x: f64,
+        y: f64,
+        surface_width: u32,
+        surface_height: u32,
+    ) -> Option<Point> {
+        if surface_width == 0
+            || surface_height == 0
+            || self.plan.resolution.width == 0
+            || self.plan.resolution.height == 0
+        {
+            return None;
+        }
+
+        let max_x = self.plan.resolution.width.saturating_sub(1);
+        let max_y = self.plan.resolution.height.saturating_sub(1);
+        let x = x.clamp(0.0, f64::from(surface_width.saturating_sub(1)));
+        let y = y.clamp(0.0, f64::from(surface_height.saturating_sub(1)));
+
+        Some(Point {
+            x: ((x * f64::from(self.plan.resolution.width) / f64::from(surface_width)).floor()
+                as u32)
+                .min(max_x),
+            y: ((y * f64::from(self.plan.resolution.height) / f64::from(surface_height)).floor()
+                as u32)
+                .min(max_y),
+        })
+    }
+
+    fn cursor_down(&mut self, position: Point) -> GameSessionResult<()> {
+        if self.engine.state().is_active(self.cursor_contact) {
+            self.engine.move_contact(self.cursor_contact, position)?;
+        } else {
+            self.engine.begin_contact(self.cursor_contact, position)?;
+        }
+        Ok(())
+    }
+
+    fn cursor_move(&mut self, position: Point) -> GameSessionResult<()> {
+        if self.engine.state().is_active(self.cursor_contact) {
+            self.engine.move_contact(self.cursor_contact, position)?;
+        }
+        Ok(())
+    }
+
+    fn cursor_up(&mut self) -> GameSessionResult<()> {
+        if self.engine.state().is_active(self.cursor_contact) {
+            self.engine.end_contact(self.cursor_contact)?;
         }
         Ok(())
     }
@@ -2115,6 +2684,9 @@ pub struct GameSessionOptions {
     pub show_ui: bool,
     pub launch_package: bool,
     pub trace_input: bool,
+    /// Stream `getevent -lt` for the bridged touchscreen from inside Android,
+    /// making touch delivery problems visible in the session log.
+    pub trace_android_input: bool,
     pub exit_after: Option<Duration>,
     pub focus_socket: Option<PathBuf>,
     pub bridge_broker: Option<BridgeBrokerClient>,
@@ -2142,6 +2714,7 @@ impl GameSessionOptions {
             show_ui: true,
             launch_package: true,
             trace_input: false,
+            trace_android_input: false,
             exit_after: None,
             focus_socket: None,
             bridge_broker: None,
@@ -2161,6 +2734,7 @@ impl GameSessionOptions {
             show_ui: true,
             launch_package: true,
             trace_input: false,
+            trace_android_input: false,
             exit_after: None,
             focus_socket: None,
             bridge_broker: None,
@@ -2175,6 +2749,7 @@ impl GameSessionOptions {
                 "--no-ui" => options.show_ui = false,
                 "--no-launch" => options.launch_package = false,
                 "--trace-input" => options.trace_input = true,
+                "--trace-android-input" => options.trace_android_input = true,
                 "--exit-after-ms" => {
                     let milliseconds: u64 = parse_next(&mut args, "--exit-after-ms")?;
                     if milliseconds == 0 {
@@ -2253,7 +2828,7 @@ fn interrupt_requested() -> bool {
 
 fn print_usage() {
     println!(
-        "Usage: wroid-waydroid-game-session <profile-v2.json> <keyboard-event-node> [mouse-event-node] [--width W] [--height H] [--no-grab] [--no-ui] [--no-launch] [--trace-input] [--exit-after-ms N]"
+        "Usage: wroid-waydroid-game-session <profile-v2.json> <keyboard-event-node> [mouse-event-node] [--width W] [--height H] [--no-grab] [--no-ui] [--no-launch] [--trace-input] [--trace-android-input] [--exit-after-ms N]"
     );
     println!(
         "Example: sudo ./target/release/wroid-waydroid-game-session profiles/examples/shooter-v2.json /dev/input/event7 /dev/input/event9 --width 1920 --height 1080 --trace-input"
@@ -2659,6 +3234,9 @@ mod tests {
                 focus_protected: true,
                 focused: true,
                 focus_receiver: Some(&focus_receiver),
+                grab_allowed: true,
+                initial_mode: InputMode::Aim,
+                overlay: None,
             },
         )
         .unwrap();
@@ -2714,11 +3292,18 @@ mod tests {
         let (capture_state_sender, capture_states) = mpsc::channel();
         let reader_thread = thread::spawn(move || {
             for _ in 0..2 {
-                let InputReaderCommand::SetCapture { enabled, reply } = reader_commands
+                match reader_commands
                     .recv_timeout(Duration::from_secs(1))
-                    .unwrap();
-                capture_state_sender.send(enabled).unwrap();
-                let _ = reply.send(Ok(()));
+                    .unwrap()
+                {
+                    InputReaderCommand::SetCapture { enabled, reply } => {
+                        capture_state_sender.send(enabled).unwrap();
+                        let _ = reply.send(Ok(()));
+                    }
+                    InputReaderCommand::SetMouseMode { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                }
             }
         });
         let controls = InputReaderControls {
@@ -2736,6 +3321,9 @@ mod tests {
                 focus_protected: true,
                 focused: true,
                 focus_receiver: None,
+                grab_allowed: true,
+                initial_mode: InputMode::Aim,
+                overlay: None,
             },
         )
         .unwrap();
@@ -2810,6 +3398,9 @@ mod tests {
                 focus_protected: true,
                 focused: true,
                 focus_receiver: None,
+                grab_allowed: true,
+                initial_mode: InputMode::Aim,
+                overlay: None,
             },
         )
         .unwrap();

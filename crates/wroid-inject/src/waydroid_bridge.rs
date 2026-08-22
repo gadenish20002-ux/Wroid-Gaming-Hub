@@ -472,7 +472,7 @@ pub fn render_bridge_config(node: &InputDeviceNode, cgroup_mode: CgroupMode) -> 
     let destination = source.trim_start_matches('/');
 
     Ok(format!(
-        "{MANAGED_HEADER}\n# Host cgroup mode: {}; Waydroid device policy is intentionally unchanged\nlxc.mount.entry = tmpfs dev/input tmpfs mode=0755,create=dir 0 0\nlxc.mount.entry = {source} {destination} none bind,create=file 0 0\n",
+        "{MANAGED_HEADER}\n# Host cgroup mode: {}; Waydroid device policy is intentionally unchanged\nlxc.mount.entry = {source} {destination} none bind,create=file 0 0\n",
         cgroup_mode.label()
     ))
 }
@@ -581,13 +581,10 @@ mod tests {
         assert!(config.contains("Host cgroup mode: v2"));
         assert!(!config.contains("devices.allow"));
         assert!(!config.contains("devices.deny"));
-        assert!(config.contains("lxc.mount.entry = tmpfs dev/input tmpfs mode=0755,create=dir 0 0"));
+        assert!(!config.contains("tmpfs dev/input"));
         assert!(config.contains(
             "lxc.mount.entry = /dev/input/event29 dev/input/event29 none bind,create=file 0 0"
         ));
-        assert!(
-            config.find("tmpfs dev/input").unwrap() < config.find("dev/input/event29").unwrap()
-        );
     }
 
     #[test]

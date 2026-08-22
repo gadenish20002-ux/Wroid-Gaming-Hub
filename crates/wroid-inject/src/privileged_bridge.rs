@@ -1,6 +1,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -24,6 +25,11 @@ const ANDROID_SETTINGS_TIMEOUT: Duration = Duration::from_secs(5);
 const ANDROID_SETTINGS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const ANDROID_INPUT_ATTEMPTS: usize = 60;
 const ANDROID_INPUT_INTERVAL: Duration = Duration::from_millis(500);
+// Android AID_INPUT. The Waydroid system_server belongs to this group and
+// InputReader cannot open a host input node that retains the host input GID.
+const ANDROID_INPUT_GID: u32 = 1004;
+const ANDROID_INPUT_MODE: u32 = 0o660;
+const UDEV_SETTLE_TIMEOUT_ARG: &str = "--timeout=5";
 const LXC_PATH: &str = "/var/lib/waydroid/lxc";
 const WAYDROID_CONTAINER_NAME: &str = "waydroid";
 const SAFE_SYSTEM_PATH: &str = "/usr/sbin:/usr/bin";
@@ -181,6 +187,81 @@ fn helper_metadata_is_safe(
         && parent_mode & 0o022 == 0
 }
 
+/// Hands the Wroid touchscreen node to Android's AID_INPUT group while a
+/// session runs, restoring the original ownership on cleanup.
+///
+/// Shared by the privileged helper and the in-process root session path:
+/// without this handoff Android's InputReader cannot open a host node that
+/// still carries the host input GID, and touches silently never arrive.
+pub(crate) struct AndroidInputAccess {
+    file: fs::File,
+    original_uid: u32,
+    original_gid: u32,
+    original_mode: u32,
+    active: bool,
+}
+
+impl AndroidInputAccess {
+    /// Validate that the node still is the Wroid touchscreen and hand its
+    /// ownership to Android. Callers must have let udev settle first so the
+    /// device identity is stable across the handoff.
+    pub(crate) fn prepare(node: &InputDeviceNode) -> io::Result<Self> {
+        validate_wroid_touchscreen_node(node)?;
+        Self::prepare_unvalidated(node)
+    }
+
+    fn prepare_unvalidated(node: &InputDeviceNode) -> io::Result<Self> {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(node.path())?;
+        let metadata = file.metadata()?;
+        let access = Self {
+            file,
+            original_uid: metadata.uid(),
+            original_gid: metadata.gid(),
+            original_mode: metadata.permissions().mode() & 0o7777,
+            active: true,
+        };
+        access.set(access.original_uid, ANDROID_INPUT_GID, ANDROID_INPUT_MODE)?;
+        Ok(access)
+    }
+
+    fn set(&self, uid: u32, gid: u32, mode: u32) -> io::Result<()> {
+        let fd = self.file.as_raw_fd();
+        // SAFETY: fd is owned by this guard and uid/gid/mode are fixed or
+        // captured from the validated Wroid virtual touchscreen inode.
+        unsafe {
+            if libc::fchown(fd, uid, gid) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::fchmod(fd, mode as libc::mode_t) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    fn restore(&self) -> io::Result<()> {
+        self.set(self.original_uid, self.original_gid, self.original_mode)
+    }
+
+    pub(crate) fn cleanup(mut self) -> io::Result<()> {
+        self.restore()?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for AndroidInputAccess {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = self.restore();
+        }
+    }
+}
+
 pub fn run_privileged_bridge_helper(event_node: PathBuf) -> io::Result<()> {
     ensure_root("Wroid privileged input bridge helper")?;
     assume_full_root_identity()?;
@@ -195,6 +276,11 @@ pub fn run_privileged_bridge_helper(event_node: PathBuf) -> io::Result<()> {
 
     let node = InputDeviceNode::from_path(event_node)?;
     validate_wroid_touchscreen_node(&node)?;
+    settle_wroid_input_udev()?;
+    // udev may have completed device initialization while we waited. Recheck
+    // the identity immediately before the privileged permission handoff.
+    validate_wroid_touchscreen_node(&node)?;
+    let input_access = AndroidInputAccess::prepare(&node)?;
     let bridge = InstalledWaydroidBridge::install_default(&node)?;
 
     println!("{READY_LINE}");
@@ -213,6 +299,8 @@ pub fn run_privileged_bridge_helper(event_node: PathBuf) -> io::Result<()> {
         force_stop_waydroid_container()
     };
     let bridge_result = bridge.cleanup();
+    let input_access_result = input_access.cleanup();
+    let bridge_result = combine_bridge_cleanup_results(bridge_result, input_access_result);
     let cleanup_result = combine_helper_cleanup_results(stop_result, bridge_result);
     match (protocol_result, cleanup_result) {
         (Ok(_), cleanup_result) => cleanup_result,
@@ -350,6 +438,22 @@ fn fixed_privileged_command(executable: &str, arguments: &[&str]) -> Command {
         .current_dir("/")
         .stdin(Stdio::null());
     command
+}
+
+fn udev_settle_command() -> Command {
+    fixed_privileged_command("/usr/bin/udevadm", &["settle", UDEV_SETTLE_TIMEOUT_ARG])
+}
+
+pub(crate) fn settle_wroid_input_udev() -> io::Result<()> {
+    let output = udev_settle_command().output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(io::Error::other(format!(
+        "udev did not settle the Wroid touchscreen before Android input permission handoff
+{}",
+        combined_output(&output).trim()
+    )))
 }
 
 fn android_input_probe_command() -> Command {
@@ -673,6 +777,19 @@ fn probe_privileged_bridge_helper(path: &Path) -> io::Result<()> {
             String::from_utf8_lossy(&output.stderr).trim()
         ),
     ))
+}
+
+fn combine_bridge_cleanup_results(
+    bridge_result: io::Result<()>,
+    input_access_result: io::Result<()>,
+) -> io::Result<()> {
+    match (bridge_result, input_access_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(bridge_error), Err(input_error)) => Err(io::Error::other(format!(
+            "bridge cleanup failed: {bridge_error}; input node access restore also failed: {input_error}"
+        ))),
+    }
 }
 
 fn combine_helper_cleanup_results(
@@ -1117,6 +1234,13 @@ mod tests {
 
     #[test]
     fn privileged_lxc_commands_use_absolute_binaries_and_fixed_arguments() {
+        let udev = udev_settle_command();
+        assert_eq!(udev.get_program(), "/usr/bin/udevadm");
+        assert_eq!(
+            udev.get_args().collect::<Vec<_>>(),
+            ["settle", "--timeout=5"].map(std::ffi::OsStr::new)
+        );
+
         let command = lxc_status_command();
         assert_eq!(command.get_program(), "/usr/bin/lxc-info");
         assert_eq!(

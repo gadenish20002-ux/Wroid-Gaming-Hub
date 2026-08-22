@@ -6,6 +6,7 @@
 
 mod bridge_broker;
 mod config;
+mod cursor_overlay;
 mod error;
 mod event;
 mod game_session;
@@ -65,8 +66,8 @@ pub use waydroid_bridge::{
 pub use waydroid_session::{
     ensure_container_stopped, ensure_root, gamescope_is_available, presentation_for_game,
     spawn_android_getevent_trace, stop_child, wait_for_android_boot_completed,
-    wait_for_android_display_size, wait_for_android_input_device, DesktopUser,
-    DesktopWaydroidSession, WaydroidPresentation,
+    wait_for_android_display_size, wait_for_android_input_device, wait_for_android_input_reader,
+    DesktopUser, DesktopWaydroidSession, WaydroidPresentation,
 };
 
 #[cfg(test)]

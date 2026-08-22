@@ -10,6 +10,9 @@ libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 wroid-core = { path = "../wroid-core" }
 wroid-input = { path = "../wroid-input" }
 wroid-runtime = { path = "../wroid-runtime" }
