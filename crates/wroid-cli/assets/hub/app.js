@@ -127,8 +127,49 @@ let lastStateLoadAt = 0;
 let packageIntake = null;
 let apkUploadRequest = null;
 let apkStatusTimer = null;
+let launchingSince = 0;
+let launchingTimer = null;
 const focusRefreshMinimumMs = 1500;
 const maximumApkBytes = 4 * 1024 * 1024 * 1024;
+// Background launch keeps the worker busy long after the POST returns; keep
+// staged feedback alive until the session settles or this cap is reached.
+const launchProgressMaxMs = 150_000;
+
+function beginLaunchProgress() {
+  launchingSince = Date.now();
+  if (launchingTimer) window.clearInterval(launchingTimer);
+  launchingTimer = window.setInterval(() => {
+    if (!launchingSince) return;
+    if (Date.now() - launchingSince > launchProgressMaxMs) {
+      endLaunchProgress();
+      loadState();
+      return;
+    }
+    if (document.visibilityState === "hidden") return;
+    loadState();
+  }, 2000);
+}
+
+function endLaunchProgress() {
+  launchingSince = 0;
+  if (launchingTimer) {
+    window.clearInterval(launchingTimer);
+    launchingTimer = null;
+  }
+}
+
+function launchStageNote(elapsedMs) {
+  if (elapsedMs < 4000) {
+    return "Stopping desktop Android and preparing the fullscreen container…";
+  }
+  if (elapsedMs < 20000) {
+    return "Booting Android under Gamescope (FSR fullscreen)…";
+  }
+  if (elapsedMs < 45000) {
+    return "Waiting for the game package to start…";
+  }
+  return "Still starting — big games can take over a minute on first load. Stop and open the session report if this never finishes.";
+}
 
 function apiUrl(path) {
   const separator = path.includes("?") ? "&" : "?";
@@ -577,7 +618,11 @@ function primaryActionFor(game) {
   ) {
     return "compatibility";
   }
-  if (!hubState.system.waydroid.running && game.installed !== true) {
+  // Only force the Waydroid scan detour when the game is known to be missing:
+  // with the runtime stopped the package status is simply unknown, and the
+  // launch worker itself starts Android and verifies the package — skipping a
+  // full desktop Waydroid boot just to re-launch under Gamescope later.
+  if (!hubState.system.waydroid.running && game.installed === false) {
     return "runtime";
   }
   if (game.installed === false) {
@@ -611,6 +656,7 @@ function selectGame(id) {
 function renderHero() {
   const game = selectedGame();
   if (!game) {
+    endLaunchProgress();
     elements.heroName.textContent = "No valid profiles";
     elements.heroDescription.textContent = "Import a Profile V2 JSON file to start building your library.";
     elements.launchButton.disabled = true;
@@ -646,18 +692,33 @@ function renderHero() {
     (finding) => finding.severity === "blocking",
   );
   const bridge = hubState.system.inputBridge;
+  if (launchingSince && Date.now() - launchingSince > 5000 && bridge && !bridge.busy) {
+    // The worker exited (fast failure or stop) while staged feedback was up.
+    // The grace window avoids ending the streak before the worker opens the
+    // input bridge.
+    endLaunchProgress();
+  }
   renderLastGameSession(game, bridge);
   const primaryAction = primaryActionFor(game);
   elements.launchButton.dataset.action = primaryAction;
   elements.launchButton.disabled = false;
   if (bridge?.busy) {
+    const elapsedMs = launchingSince ? Date.now() - launchingSince : Infinity;
+    const launching = launchingSince !== 0 && elapsedMs < launchProgressMaxMs;
+    if (!launching) endLaunchProgress();
     elements.launchButton.dataset.action = bridge.canStop ? "stop" : "active";
-    elements.launchIcon.textContent = bridge.canStop ? "■" : "●";
-    elements.launchEyebrow.textContent = "SESSION ACTIVE";
-    elements.launchLabel.textContent = bridge.canStop ? "Stop game" : "Game already running";
-    elements.launchNote.textContent = bridge.canStop
-      ? `${bridge.owner || "Wroid game session"}. Running in the background; Ctrl+Esc or this button stops it safely.`
-      : `${bridge.owner || "Wroid owns the input bridge"}. Stop it with Ctrl+Esc before launching another game.`;
+    elements.launchIcon.textContent = bridge.canStop ? (launching ? "…" : "■") : "●";
+    elements.launchEyebrow.textContent = launching ? "LAUNCHING" : "SESSION ACTIVE";
+    elements.launchLabel.textContent = launching
+      ? "Starting game…"
+      : bridge.canStop
+        ? "Stop game"
+        : "Game already running";
+    elements.launchNote.textContent = launching
+      ? launchStageNote(elapsedMs)
+      : bridge.canStop
+        ? `${bridge.owner || "Wroid game session"}. Running in the background; Ctrl+Esc or this button stops it safely.`
+        : `${bridge.owner || "Wroid owns the input bridge"}. Stop it with Ctrl+Esc before launching another game.`;
     elements.launchButton.disabled = !bridge.canStop;
   } else if (primaryAction === "runtime") {
     elements.launchIcon.textContent = "↻";
@@ -708,7 +769,9 @@ function renderHero() {
     elements.launchLabel.textContent = game.installed === true ? "Launch game" : "Launch and verify";
     elements.launchNote.textContent = game.installed === true
       ? "Fullscreen FSR scaling through Gamescope when available; F12 releases input and Ctrl+Esc stops the session."
-      : "Waydroid is stopped; Wroid will start it and verify the package before gameplay.";
+      : !hubState.system.waydroid.running
+        ? "Waydroid is stopped; Wroid will start it fullscreen and verify the package before gameplay."
+        : "Wroid will verify the package is installed before gameplay.";
   }
   const editorAction = editorActionFor(game);
   elements.editButton.disabled = false;
@@ -859,6 +922,12 @@ async function performAction(action, extras = {}) {
       body: JSON.stringify({ action, ...extras }),
     });
     toast(result.message);
+    if (action === "launch") {
+      beginLaunchProgress();
+    }
+    if (action === "stop") {
+      endLaunchProgress();
+    }
     if (action === "store" || action === "show-waydroid") {
       await loadState();
     }
