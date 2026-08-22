@@ -138,6 +138,9 @@ pub(crate) enum Commands {
         no_launch: bool,
         #[arg(long)]
         trace_input: bool,
+        /// Stream Android-side getevent for the bridged touchscreen.
+        #[arg(long)]
+        trace_android_input: bool,
         #[arg(long, hide = true)]
         exit_after_ms: Option<u64>,
         /// Internal desktop focus relay used by launch-v2.
@@ -163,6 +166,9 @@ pub(crate) enum Commands {
         no_launch: bool,
         #[arg(long)]
         trace_input: bool,
+        /// Stream Android-side getevent for the bridged touchscreen.
+        #[arg(long)]
+        trace_android_input: bool,
         /// Stop automatically after the live diagnostic interval.
         #[arg(
             long,

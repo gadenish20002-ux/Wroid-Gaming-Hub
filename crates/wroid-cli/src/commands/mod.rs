@@ -274,6 +274,7 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
             no_ui,
             no_launch,
             trace_input,
+            trace_android_input,
             exit_after_ms,
             focus_socket,
         } => play_v2::play_v2(
@@ -286,6 +287,7 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
                 show_ui: !no_ui,
                 launch_package: !no_launch,
                 trace_input,
+                trace_android_input,
                 exit_after: exit_after_ms.map(std::time::Duration::from_millis),
                 focus_socket,
             },
@@ -301,6 +303,7 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
             no_ui,
             no_launch,
             trace_input,
+            trace_android_input,
             exit_after_seconds,
             daemon_worker,
             bridge_fd,
@@ -316,6 +319,7 @@ pub(crate) fn run(cli: Cli, input_executor: &impl InputExecutor) -> Result<()> {
                 show_ui: !no_ui,
                 launch_package: !no_launch,
                 trace_input,
+                trace_android_input,
                 exit_after: exit_after_ms
                     .map(std::time::Duration::from_millis)
                     .or_else(|| exit_after_seconds.map(std::time::Duration::from_secs)),

@@ -400,6 +400,9 @@ pub(crate) fn launch_arguments(
     if request.trace_input {
         arguments.push(OsString::from("--trace-input"));
     }
+    if request.trace_android_input {
+        arguments.push(OsString::from("--trace-android-input"));
+    }
     if let Some(milliseconds) = request.exit_after_millis {
         arguments.push(OsString::from("--exit-after-ms"));
         arguments.push(OsString::from(milliseconds.to_string()));
@@ -615,6 +618,7 @@ mod tests {
             show_ui: true,
             launch_package: true,
             trace_input: false,
+            trace_android_input: false,
             exit_after_millis: None,
         }
     }
@@ -636,6 +640,7 @@ mod tests {
         request.show_ui = false;
         request.launch_package = false;
         request.trace_input = true;
+        request.trace_android_input = true;
         request.exit_after_millis = Some(20_000);
         assert_eq!(
             launch_arguments(Path::new("/profiles/pubg-v2.json"), &request, 4242,),
@@ -659,6 +664,7 @@ mod tests {
                 "--no-ui",
                 "--no-launch",
                 "--trace-input",
+                "--trace-android-input",
                 "--exit-after-ms",
                 "20000",
             ]

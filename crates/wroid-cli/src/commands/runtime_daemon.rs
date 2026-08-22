@@ -82,6 +82,7 @@ pub(crate) fn launch_game(
         show_ui: true,
         launch_package: true,
         trace_input: false,
+        trace_android_input: false,
         exit_after: None,
         focus_socket: None,
     };
@@ -238,6 +239,7 @@ fn game_launch_request(
             show_ui: options.show_ui,
             launch_package: options.launch_package,
             trace_input: options.trace_input,
+            trace_android_input: options.trace_android_input,
             exit_after_millis: options
                 .exit_after
                 .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX)),
@@ -865,6 +867,7 @@ mod tests {
                 show_ui: true,
                 launch_package: true,
                 trace_input: false,
+                trace_android_input: false,
                 exit_after: None,
                 focus_socket: None,
             },
@@ -907,6 +910,7 @@ mod tests {
             show_ui: false,
             launch_package: false,
             trace_input: true,
+            trace_android_input: false,
             exit_after: Some(Duration::from_millis(25)),
             focus_socket: None,
         };

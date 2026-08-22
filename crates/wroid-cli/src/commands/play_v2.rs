@@ -15,6 +15,7 @@ pub(crate) struct PlayV2Options {
     pub show_ui: bool,
     pub launch_package: bool,
     pub trace_input: bool,
+    pub trace_android_input: bool,
     pub exit_after: Option<Duration>,
     pub focus_socket: Option<PathBuf>,
 }
@@ -78,6 +79,7 @@ pub(crate) fn play_v2_with_broker(
     session.show_ui = options.show_ui;
     session.launch_package = options.launch_package;
     session.trace_input = options.trace_input;
+    session.trace_android_input = options.trace_android_input;
     session.exit_after = options.exit_after;
     session.focus_socket = options.focus_socket;
     session.bridge_broker = bridge_broker;

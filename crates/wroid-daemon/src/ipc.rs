@@ -96,6 +96,8 @@ pub struct GameLaunchRequest {
     pub launch_package: bool,
     #[serde(default)]
     pub trace_input: bool,
+    #[serde(default)]
+    pub trace_android_input: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_after_millis: Option<u64>,
 }
@@ -1085,6 +1087,7 @@ mod tests {
                 show_ui: false,
                 launch_package: false,
                 trace_input: true,
+                trace_android_input: false,
                 exit_after_millis: Some(20_000),
             },
         });
@@ -1135,6 +1138,7 @@ mod tests {
             show_ui: true,
             launch_package: false,
             trace_input: true,
+            trace_android_input: false,
             exit_after_millis: timeout,
         };
         let credentials = PeerCredentials {
@@ -1204,6 +1208,7 @@ mod tests {
                     show_ui: true,
                     launch_package: true,
                     trace_input: false,
+                    trace_android_input: false,
                     exit_after_millis: None,
                 },
             })
